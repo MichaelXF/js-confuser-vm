@@ -1,0 +1,23 @@
+{
+  "name": "vm",
+  "version": "1.0.0",
+  "main": "vm.js",
+  "scripts": {
+    "test": "NODE_OPTIONS=--experimental-vm-modules jest"
+  },
+  "type": "module",
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@babel/generator": "^7.29.1",
+    "@babel/parser": "^7.29.0",
+    "@babel/traverse": "^7.29.0",
+    "google-closure-compiler": "^20260216.0.0",
+    "terser": "^5.46.0"
+  },
+  "devDependencies": {
+    "jest": "^30.2.0"
+  }
+}
