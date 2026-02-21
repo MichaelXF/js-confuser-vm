@@ -39,6 +39,7 @@ JsConfuserVM.obfuscate(`
   encodeBytecode: true, // encode bytecode? when off, comments for instructions are added
   selfModifying: true, // do self-modifying bytecode for function bodies?
   timingChecks: true, // add timing checks to detect debuggers?
+  minify: true // pass final output through Google Closure Compiler? (Renames VM class properties)
 }).then(result => {
   console.log(result.code)
 })
