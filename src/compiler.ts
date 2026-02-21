@@ -6,13 +6,17 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { stripTypeScriptTypes } from "module";
 import JSON5 from "json5";
+import { choice, getRandomInt } from "./random.ts";
+import * as t from "@babel/types";
+import { ok } from "assert";
 
 const traverse = traverseImport.default;
 
-const SHUFFLE_OPCODES = false;
+const RANDOMIZE_OPCODES = true;
 const PACK = true;
+const SELF_MODIFYING = true;
 
-// ── Opcodes ──────────────────────────────────────────────────────
+// Opcodes
 const OP_ORIGINAL = {
   LOAD_CONST: 0,
   LOAD_LOCAL: 1,
@@ -32,7 +36,7 @@ const OP_ORIGINAL = {
   LT: 15, // pop b, pop a → push (a < b)
   GT: 16,
   EQ: 17,
-  JUMP: 18, // unconditional — operand = absolute bytecode index
+  JUMP: 18, // unconditional - operand = absolute bytecode index
   JUMP_IF_FALSE: 19, // pop value; jump if falsy
   LTE: 20, // a <= b
   GTE: 21, // a >= b
@@ -40,7 +44,7 @@ const OP_ORIGINAL = {
   LOAD_UPVALUE: 23, // push frame.closure.upvalues[operand].read()
   STORE_UPVALUE: 24, // frame.closure.upvalues[operand].write(pop())
 
-  // ── Unary ──────────────────────────
+  //  Unary
   UNARY_NEG: 25, // -x
   UNARY_POS: 26, // +x
   UNARY_NOT: 27, // !x
@@ -48,9 +52,9 @@ const OP_ORIGINAL = {
   TYPEOF: 29, // typeof x
   VOID: 30, // void x  → always undefined
 
-  TYPEOF_SAFE: 31, // operand = name constIdx — typeof guard for undeclared globals
-  BUILD_ARRAY: 32, // operand = element count — pops N values → pushes array
-  BUILD_OBJECT: 33, // operand = pair count   — pops N*2 (key,val) → pushes object
+  TYPEOF_SAFE: 31, // operand = name constIdx - typeof guard for undeclared globals
+  BUILD_ARRAY: 32, // operand = element count - pops N values → pushes array
+  BUILD_OBJECT: 33, // operand = pair count   - pops N*2 (key,val) → pushes object
   SET_PROP: 34, // pop val, pop key, peek obj → obj[key] = val (obj stays on stack)
   GET_PROP_COMPUTED: 35, // pop key, peek obj → push obj[key]  (computed: nums[i])
 
@@ -62,16 +66,16 @@ const OP_ORIGINAL = {
   SHR: 41, // a >> b
   USHR: 42, // a >>> b
 
-  JUMP_IF_FALSE_OR_POP: 43, // && — if top falsy:  jump (keep), else: pop, eval RHS
-  JUMP_IF_TRUE_OR_POP: 44, // || — if top truthy: jump (keep), else: pop, eval RHS
+  JUMP_IF_FALSE_OR_POP: 43, // && - if top falsy:  jump (keep), else: pop, eval RHS
+  JUMP_IF_TRUE_OR_POP: 44, // || - if top truthy: jump (keep), else: pop, eval RHS
 
   DELETE_PROP: 45,
   IN: 46, // a in b
   INSTANCEOF: 47, // a instanceof b
 
-  // ── NEW ────────────────────────────────────────────
+  // NEW
   LOAD_THIS: 48, // push frame.thisVal
-  NEW: 49, // operand = argCount — construct a new object
+  NEW: 49, // operand = argCount - construct a new object
   DUP: 50, // duplicate top of stack
   THROW: 51, // pop value, throw it
   LOOSE_EQ: 52, // a == b  (abstract equality)
@@ -80,20 +84,20 @@ const OP_ORIGINAL = {
   FOR_IN_SETUP: 54, // pop obj → build enumerable-key iterator → push {keys,i}
   FOR_IN_NEXT: 55, // operand=exit_pc; pop iter; if done→jump; else push next key
 
-  // ── Self-modifying bytecode ────────────────────────────────
+  // Self-modifying bytecode
   PATCH: 56, // pop destPc; constants[operand]=word[]; write words into bytecode[destPc..]
 };
 
 export let OP: Partial<typeof OP_ORIGINAL> = {};
 // Construct randomized opcode mapping
-if (SHUFFLE_OPCODES) {
-  let used = new Set();
+if (RANDOMIZE_OPCODES) {
+  let usedNumbers = new Set<number>();
   for (const key in OP_ORIGINAL) {
     let val;
     do {
       val = Math.floor(Math.random() * 256);
-    } while (used.has(val));
-    used.add(val);
+    } while (usedNumbers.has(val));
+    usedNumbers.add(val);
     OP[key] = val;
   }
 } else {
@@ -111,11 +115,9 @@ const JUMP_OPS = new Set([
   OP.FOR_IN_NEXT,
 ]);
 
-// ─────────────────────────────────────────────────────────────────
 // Constant Pool
 // Primitives (string/number/bool) are interned (deduped).
-// Object entries (fn descriptors) are always appended — no dedup.
-// ─────────────────────────────────────────────────────────────────
+// Object entries (fn descriptors) are always appended - no dedup.
 class ConstantPool {
   items: any[];
   _index: Map<string, number>;
@@ -142,11 +144,9 @@ class ConstantPool {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
 // Scope
 // Each function call gets its own Scope. Locals are resolved to
 // numeric slots at compile time — zero name lookups at runtime.
-// ─────────────────────────────────────────────────────────────────
 class Scope {
   parent: Scope | null;
   _locals: Map<string, number>;
@@ -179,11 +179,9 @@ class Scope {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
 // FnContext
 // Compiler-side state for the function currently being compiled.
 // Distinct from runtime Frame — this is compile-time only.
-// ─────────────────────────────────────────────────────────────────
 class FnContext {
   upvalues: { name: string; isLocal: number; index: number }[];
   parentCtx: FnContext | null;
@@ -212,9 +210,7 @@ class FnContext {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
 // Compiler
-// ─────────────────────────────────────────────────────────────────
 class Compiler {
   constants: ConstantPool;
   fnDescriptors: any[];
@@ -248,9 +244,9 @@ class Compiler {
     this.serializer = new Serializer(this);
   }
 
-  // ── Variable resolution ──────────────────────────────────────
+  // Variable resolution
   // Walks up the FnContext chain. Crossing a context boundary means
-  // we're capturing from an outer function — register an upvalue.
+  // we're capturing from an outer function - register an upvalue.
   _resolve(name, ctx) {
     if (!ctx) return { kind: "global" };
 
@@ -275,8 +271,7 @@ class Compiler {
     return { kind: "upvalue", index: uvIdx };
   }
 
-  // ── Entry point ──────────────────────────────────────────────
-
+  // Entry point
   compile(source) {
     const ast = parser.parse(source, { sourceType: "script" });
 
@@ -284,7 +279,7 @@ class Compiler {
   }
 
   compileAST(ast) {
-    // Pass 1 — compile every FunctionDeclaration into a descriptor.
+    // Pass 1 - compile every FunctionDeclaration into a descriptor.
     //           Traverse finds them regardless of nesting depth.
     traverse(ast, {
       FunctionDeclaration: (path) => {
@@ -305,9 +300,9 @@ class Compiler {
     };
   }
 
-  // ── Function Declaration ──────────────────────────────────────
+  // Function Declaration
 
-  _compileFunctionDecl(node) {
+  _compileFunctionDecl(node: t.FunctionDeclaration | t.FunctionExpression) {
     // Create a context whose parent is whatever we're currently compiling.
     // This is what lets _resolve cross function boundaries correctly.
     const ctx = new FnContext(this, this._currentCtx);
@@ -316,18 +311,20 @@ class Compiler {
 
     // Params occupy the first N local slots (args are copied in on CALL)
     for (const param of node.params) {
-      if (param.type === "AssignmentPattern") {
-        ctx.scope.define(param.left.name);
-      } else {
-        ctx.scope.define(param.name);
-      }
+      let identifier = param.type === "AssignmentPattern" ? param.left : param;
+      ok(
+        identifier.type === "Identifier",
+        "Only simple identifiers allowed as parameters",
+      );
+
+      ctx.scope.define(identifier.name);
     }
 
     // Reserve the next slot for the implicit `arguments` object.
     // Slot index will always equal paramCount (params are 0..paramCount-1).
     ctx.scope.define("arguments");
 
-    // ── Pass 2: emit default-value guards at top of fn body ─────
+    // Pass 2: emit default-value guards at top of fn body
     // Mirrors what JS engines do: if the caller passed undefined (or
     // nothing), evaluate the default expression and overwrite the slot.
     // Default expressions are full expressions, so f(x = a + b) and
@@ -335,7 +332,7 @@ class Compiler {
     for (const param of node.params) {
       if (param.type !== "AssignmentPattern") continue;
 
-      const slot = ctx.scope._locals.get(param.left.name);
+      const slot = ctx.scope._locals.get((param.left as t.Identifier).name);
 
       // if (param === undefined) param = <default expr>
       ctx.bc.push([OP.LOAD_LOCAL, slot]);
@@ -361,7 +358,7 @@ class Compiler {
     this._currentCtx = savedCtx; // restore before touching fnDescriptors
 
     var fnIdx = this.fnDescriptors.length;
-    node._fnIdx = fnIdx; // for error messages
+    (node as any)._fnIdx = fnIdx; // for error messages
 
     const desc = {
       name: node.id?.name || "<anonymous>",
@@ -382,8 +379,7 @@ class Compiler {
     return desc;
   }
 
-  // ── Main (top-level) ─────────────────────────────────────────
-
+  // Main (top-level)
   _compileMain(body) {
     this.mainStartPc = 0; // ← record main's entry point
     const bc = this.bytecode;
@@ -412,7 +408,7 @@ class Compiler {
 
       descriptor.bytecode.push([OP.RETURN]); // ensure every function ends with RETURN
 
-      if (this.options.selfModifying) {
+      if (SELF_MODIFYING) {
         // Preamble is 2 instructions: LOAD_CONST(destPc) + PATCH(bodyConst)
         // Real body starts immediately after the preamble.
         const bodyPc = descriptor.startPc + 2;
@@ -435,7 +431,7 @@ class Compiler {
 
         // Garbage fill — same length as real body, never executed (PATCH fires first).
         for (let i = 0; i < realBodyInstrs.length; i++) {
-          this.bytecode.push([OP.LOAD_CONST, 0]);
+          this.bytecode.push([choice(Object.values(OP)), getRandomInt(0, 255)]);
         }
       } else {
         for (const instr of descriptor.bytecode) {
@@ -462,9 +458,8 @@ class Compiler {
     return instr;
   }
 
-  // ── Statements ───────────────────────────────────────────────
-
-  _compileStatement(node, scope, bc) {
+  // Statements
+  _compileStatement(node: t.Statement, scope, bc) {
     switch (node.type) {
       case "BlockStatement": {
         for (const stmt of node.body) {
@@ -518,6 +513,12 @@ class Compiler {
           } else {
             bc.push([OP.LOAD_CONST, this.constants.intern(undefined)]);
           }
+
+          ok(
+            decl.id.type === "Identifier",
+            "Only simple identifiers can be declared",
+          );
+
           // Store: local slot if inside a function, global name otherwise
           if (scope) {
             const slot = scope.define(decl.id.name);
@@ -583,6 +584,11 @@ class Compiler {
         bc.push([OP.JUMP_IF_FALSE, 0]);
         const exitJumpIdx = bc.length - 1;
 
+        ok(
+          node.body.type === "BlockStatement",
+          "Expected BlockStatement as while body",
+        );
+
         for (const stmt of node.body.body) {
           this._compileStatement(stmt, scope, bc);
         }
@@ -611,6 +617,11 @@ class Compiler {
         const loopCtxDW = this._loopStack[this._loopStack.length - 1];
 
         const loopTopDW = bc.length;
+
+        ok(
+          node.body.type === "BlockStatement",
+          "Expected BlockStatement as do-while body",
+        );
 
         for (const stmt of node.body.body) {
           this._compileStatement(stmt, scope, bc);
@@ -660,6 +671,11 @@ class Compiler {
           bc.push([OP.JUMP_IF_FALSE, 0]);
         }
         const exitJumpIdxF = node.test ? bc.length - 1 : null;
+
+        ok(
+          node.body.type === "BlockStatement",
+          "Expected BlockStatement as for loop body",
+        );
 
         for (const stmt of node.body.body) {
           this._compileStatement(stmt, scope, bc);
@@ -896,7 +912,12 @@ class Compiler {
 
         // Assign the key (now on top of stack) to the loop variable
         if (node.left.type === "VariableDeclaration") {
-          const name = node.left.declarations[0].id.name;
+          const identifier = node.left.declarations[0].id;
+          ok(
+            identifier.type === "Identifier",
+            "Only simple identifiers can be declared in for-in loops",
+          );
+          const name = identifier.name;
           if (scope) {
             const slot = scope.define(name);
             bc.push([OP.STORE_LOCAL, slot]);
@@ -947,8 +968,7 @@ class Compiler {
     }
   }
 
-  // ── Expressions ──────────────────────────────────────────────
-
+  // Expressions
   _compileExpr(node, scope, bc) {
     switch (node.type) {
       case "NumericLiteral":
@@ -1151,7 +1171,7 @@ class Compiler {
           throw new Error(`Unsupported assignment operator: ${node.operator}`);
         }
 
-        // ── Member assignment: obj.x = val  or  arr[i] = val ──────
+        // Member assignment: obj.x = val  or  arr[i] = val
         if (node.left.type === "MemberExpression") {
           this._compileExpr(node.left.object, scope, bc); // push obj
 
@@ -1190,7 +1210,7 @@ class Compiler {
           break;
         }
 
-        // ── Plain identifier assignment ────────────────────────────
+        // Plain identifier assignment
         const res = this._resolve(node.left.name, this._currentCtx);
 
         if (isCompound) {
@@ -1383,10 +1403,8 @@ class Compiler {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
 // Serializer
 // Turns the compiled output into a commented JS source string.
-// ─────────────────────────────────────────────────────────────────
 class Serializer {
   compiler: Compiler;
 
@@ -1578,11 +1596,9 @@ class Serializer {
   }
 }
 
-// ─────────────────────────────────────────────────────────────────
 // VM Runtime (emitted verbatim into the output file)
-// ─────────────────────────────────────────────────────────────────
 const VM_RUNTIME = `
-// ── Opcodes ──────────────────────────────────────────────────────
+// ── Opcodes 
 var OP = ${JSON5.stringify(OP)};
 ${stripTypeScriptTypes(
   readFileSync(join(import.meta.dirname, "./runtime.ts"), "utf-8").split(
@@ -1593,15 +1609,9 @@ ${stripTypeScriptTypes(
 
 interface Options {
   sourceMap?: boolean;
-  selfModifying?: boolean;
 }
 
-export function compileAndSerialize(
-  sourceCode: string,
-  options: Options = {
-    selfModifying: true,
-  },
-) {
+export function compileAndSerialize(sourceCode: string, options: Options = {}) {
   const compiler = new Compiler(options);
   const result = compiler.compile(sourceCode);
   const output = compiler.serializer.serialize(

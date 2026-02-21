@@ -1,8 +1,7 @@
 import { virtualize } from "../src";
 import { evalCode } from "./test-utils";
 
-// ── break ─────────────────────────────────────────────────────────
-
+// break
 test("Variant #1: break exits a while loop early", () => {
   const { code } = virtualize(`
     var i = 0;
@@ -44,7 +43,7 @@ test("Variant #3: break exits a do-while loop early", () => {
   expect(evalCode(code)).toBe(3);
 });
 
-// ── continue ──────────────────────────────────────────────────────
+// continue
 
 test("Variant #4: continue in while skips rest of body, re-evaluates test", () => {
   const { code } = virtualize(`
@@ -92,8 +91,7 @@ test("Variant #6: continue in do-while skips to the test", () => {
   expect(evalCode(code)).toBe(25);
 });
 
-// ── nested loops ──────────────────────────────────────────────────
-
+// nested loops
 test("Variant #7: break only exits the innermost loop", () => {
   const { code } = virtualize(`
     var result = [];

@@ -25,12 +25,12 @@ function decodeBytecode(s) {
   return r;
 }
 
-// ── Closure symbol ────────────────────────────────────────────────
+// Closure symbol
 // Used to tag shell functions so the VM can fast-path back to the
 // inner Closure instead of going through a sub-VM on internal calls.
 var CLOSURE_SYM = Symbol(); // Nameless for obfuscation
 
-// ── Upvalue ───────────────────────────────────────────────────────
+// Upvalue
 // While the outer frame is alive: reads/writes go to frame.locals[slot].
 // After the outer frame returns (closed): reads/writes hit this.value.
 function Upvalue(frame, slot) {
@@ -51,7 +51,7 @@ Upvalue.prototype.close = function () {
   this._closed = true;
 };
 
-// ── Closure & Frame ───────────────────────────────────────────────
+// Closure & Frame
 function Closure(fn) {
   this.fn = fn;
   this.upvalues = [];
@@ -68,7 +68,7 @@ function Frame(closure, returnPc, parent, thisVal?) {
   this._newObj = null; // ← set by NEW so RETURN can see it
 }
 
-// ── VM ────────────────────────────────────────────────────────────
+// VM
 function VM(bytecode, mainStartPc, constants, globals) {
   this.bytecode = bytecode;
   this.constants = constants;
@@ -108,7 +108,7 @@ VM.prototype.captureUpvalue = function (frame, slot) {
 };
 
 VM.prototype.closeUpvaluesFor = function (frame) {
-  // Called on RETURN — close every upvalue that was pointing into this frame.
+  // Called on RETURN - close every upvalue that was pointing into this frame.
   // After this, closures that captured from the frame read from upvalue.value.
   this.openUpvalues = this.openUpvalues.filter(function (uv) {
     if (uv.frame === frame) {
@@ -608,7 +608,7 @@ VM.prototype.run = function () {
   }
 };
 
-// ── Boot ─────────────────────────────────────────────────────────
+// Boot
 var globals: any = {}; // global object for globals
 
 // Always pull built-ins from globalThis so eval() scoping can't shadow them
