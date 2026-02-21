@@ -1,4 +1,3 @@
-import { readFile } from "fs/promises";
 import * as path from "path";
 import { glob } from "glob";
 import { fileURLToPath } from "url";
@@ -9,7 +8,6 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const TEST_DIR = path.resolve(__dirname, "../test262/test/suite");
-const HARNESS_PATH = path.resolve(__dirname, "./es5harness.js");
 const WORKER_URL = new URL("./test262-worker.ts", import.meta.url);
 const NUM_WORKERS = os.cpus().length;
 const FILE_TIMEOUT_MS = 10_000;
@@ -21,10 +19,7 @@ interface TestResult {
   error?: string;
 }
 
-const [harnessCode, files] = await Promise.all([
-  readFile(HARNESS_PATH, "utf8"),
-  glob(`${TEST_DIR}/**/*.js`),
-]);
+const files = await glob(`${TEST_DIR}/**/*.js`);
 
 console.log(
   `Running ${files.length} test files across ${NUM_WORKERS} workers...`,
@@ -56,7 +51,7 @@ await new Promise<void>((resolve) => {
     let timer: NodeJS.Timeout;
 
     const worker = new Worker(WORKER_URL, {
-      workerData: { harnessCode, TEST_DIR, files: chunk },
+      workerData: { TEST_DIR, files: chunk },
     });
 
     function armTimeout() {

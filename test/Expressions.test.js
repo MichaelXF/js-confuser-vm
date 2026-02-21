@@ -159,6 +159,68 @@ test("Variant #11: void and delete", () => {
   expect(evalCode(code)).toEqual([undefined, undefined, true, false, true]);
 });
 
+test("Variant #11b: delete with computed property key", () => {
+  const { code } = virtualize(`
+    var obj = { a: 1, b: 2, c: 3 };
+    var key = "b";
+    var d = delete obj[key];
+    window.TEST_OUTPUT = [d, "a" in obj, "b" in obj, "c" in obj];
+  `);
+
+  expect(evalCode(code)).toEqual([true, true, false, true]);
+});
+
+test("Variant #11c: delete result used inside an expression", () => {
+  // Regression: delete inside a binary expression used to leave a stale value
+  // on the stack, causing the callee to be displaced and crash with
+  // "callee.apply is not a function".
+  const { code } = virtualize(`
+    var obj = { x: 1 };
+    var msg = "deleted=" + delete obj.x;
+    var still = "x" in obj;
+    window.TEST_OUTPUT = [msg, still];
+  `);
+
+  expect(evalCode(code)).toEqual(["deleted=true", false]);
+});
+
+test("Variant #11d: delete non-existent property returns true", () => {
+  const { code } = virtualize(`
+    var obj = { x: 1 };
+    window.TEST_OUTPUT = [delete obj.z, delete obj.x, "x" in obj];
+  `);
+
+  expect(evalCode(code)).toEqual([true, true, false]);
+});
+
+test("Variant #10b: typeof on local variable and function", () => {
+  const { code } = virtualize(`
+    var n = 42;
+    var s = "hi";
+    var b = true;
+    var u;
+    function fn() {}
+    var arr = [];
+    window.TEST_OUTPUT = [
+      typeof n,
+      typeof s,
+      typeof b,
+      typeof u,
+      typeof fn,
+      typeof arr
+    ];
+  `);
+
+  expect(evalCode(code)).toEqual([
+    "number",
+    "string",
+    "boolean",
+    "undefined",
+    "function",
+    "object",
+  ]);
+});
+
 // ── Update ────────────────────────────────────────────────────────
 
 test("Variant #12: Update expressions (++ and --)", () => {

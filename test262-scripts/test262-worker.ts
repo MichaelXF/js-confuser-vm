@@ -1,7 +1,8 @@
 import { parentPort, workerData } from "worker_threads";
-import { readFileSync } from "fs";
+import { readFileSync, readdirSync } from "fs";
 import * as path from "path";
 import * as vm from "vm";
+import { fileURLToPath } from "url";
 import { virtualize } from "../src/index.js";
 
 interface TestResult {
@@ -11,11 +12,29 @@ interface TestResult {
   error?: string;
 }
 
-const { harnessCode, TEST_DIR, files } = workerData as {
-  harnessCode: string;
+const { TEST_DIR, files } = workerData as {
   TEST_DIR: string;
   files: string[];
 };
+
+// Build the harness once at worker startup.
+// 1. All files from test262/test/harness/ in sorted order (jQuery included) —
+//    each is run independently so browser-only files that throw are skipped silently.
+// 2. Our custom es5harness.js runs last, overriding runTestCase / $ERROR / etc.
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const HARNESS_DIR = path.resolve(__dirname, "../test262/test/harness");
+const CUSTOM_HARNESS = readFileSync(
+  path.resolve(__dirname, "./es5harness.js"),
+  "utf8",
+);
+
+const harnessFiles = readdirSync(HARNESS_DIR)
+  .filter((f) => f.endsWith(".js"))
+  .sort()
+  .map((f) => ({
+    name: f,
+    code: readFileSync(path.join(HARNESS_DIR, f), "utf8"),
+  }));
 
 function processFile(file: string): TestResult[] {
   const relFile = path.relative(TEST_DIR, file);
@@ -36,10 +55,19 @@ function processFile(file: string): TestResult[] {
 
   const ctx = vm.createContext(sandbox);
 
+  // Load each upstream harness file individually so a browser-only file
+  // (gs.js referencing testDescrip, sth.js using $, etc.) can't poison the
+  // whole context — its error is silently swallowed.
+  for (const { code } of harnessFiles) {
+    try {
+      vm.runInContext(code, ctx, { timeout: 500 });
+    } catch (_) {}
+  }
+  // Custom harness runs last so it can override runTestCase, $ERROR, etc.
   try {
-    vm.runInContext(harnessCode, ctx, { timeout: 1000 });
+    vm.runInContext(CUSTOM_HARNESS, ctx, { timeout: 1000 });
   } catch (e: any) {
-    return [{ file: relFile, id: "harness-error", passed: false, error: `Harness setup failed: ${e.message}` }];
+    return [{ file: relFile, id: "harness-error", passed: false, error: `Custom harness setup failed: ${e.message}` }];
   }
 
   let virtualizedCode: string;

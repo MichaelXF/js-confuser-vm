@@ -214,3 +214,14 @@ test("Variant #15: For-in — multiple sequential for-in loops work independentl
 
   expect(evalCode(code)).toBe("x|y");
 });
+
+test("Variant #16: For-in bare blockless body", async () => {
+  const { code } = virtualize(`
+    var obj = { a: 1, b: 2, c: 3, d: 4 };
+    var keys = [];
+    for (var k in obj) if (k !== "d") keys.push(k);
+    window.TEST_OUTPUT = keys.join(",");  
+  `);
+
+  expect(evalCode(code)).toBe("a,b,c");
+});

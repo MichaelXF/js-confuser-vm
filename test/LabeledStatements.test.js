@@ -96,6 +96,26 @@ test("Variant #6: labeled do-while — break exits from nested for loop", () => 
   expect(evalCode(code)).toBe(12);
 });
 
+test("Variant #8: empty statement — no-op, surrounding code runs normally", () => {
+  const { code } = virtualize(`
+    var x = 0;
+    ;
+    x = 5;
+    ;
+    window.TEST_OUTPUT = x;
+  `);
+  expect(evalCode(code)).toBe(5);
+});
+
+test("Variant #9: labeled empty statement — compiles and runs without error", () => {
+  const { code } = virtualize(`
+    var x = 1;
+    emptyLabel: ;
+    window.TEST_OUTPUT = x;
+  `);
+  expect(evalCode(code)).toBe(1);
+});
+
 test("Variant #7: labeled block with no early break — code after runs normally", () => {
   const { code } = virtualize(`
     var x = 0;

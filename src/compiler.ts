@@ -9,6 +9,7 @@ import JSON5 from "json5";
 import { choice, getRandomInt } from "./random.ts";
 import * as t from "@babel/types";
 import { ok } from "assert";
+import { obfuscateRuntime } from "./runtimeObf.ts";
 
 const traverse = traverseImport.default;
 
@@ -33,7 +34,7 @@ const OP_ORIGINAL = {
   CALL_METHOD: 12,
   RETURN: 13,
   POP: 14,
-  LT: 15, // pop b, pop a → push (a < b)
+  LT: 15, // pop b, pop a -> push (a < b)
   GT: 16,
   EQ: 17,
   JUMP: 18, // unconditional - operand = absolute bytecode index
@@ -50,13 +51,13 @@ const OP_ORIGINAL = {
   UNARY_NOT: 27, // !x
   UNARY_BITNOT: 28, // ~x
   TYPEOF: 29, // typeof x
-  VOID: 30, // void x  → always undefined
+  VOID: 30, // void x  -> always undefined
 
   TYPEOF_SAFE: 31, // operand = name constIdx - typeof guard for undeclared globals
-  BUILD_ARRAY: 32, // operand = element count - pops N values → pushes array
-  BUILD_OBJECT: 33, // operand = pair count   - pops N*2 (key,val) → pushes object
-  SET_PROP: 34, // pop val, pop key, peek obj → obj[key] = val (obj stays on stack)
-  GET_PROP_COMPUTED: 35, // pop key, peek obj → push obj[key]  (computed: nums[i])
+  BUILD_ARRAY: 32, // operand = element count - pops N values -> pushes array
+  BUILD_OBJECT: 33, // operand = pair count   - pops N*2 (key,val) -> pushes object
+  SET_PROP: 34, // pop val, pop key, peek obj -> obj[key] = val (obj stays on stack)
+  GET_PROP_COMPUTED: 35, // pop key, peek obj -> push obj[key]  (computed: nums[i])
 
   MOD: 36, // a % b
   BAND: 37, // a & b
@@ -81,8 +82,8 @@ const OP_ORIGINAL = {
   LOOSE_EQ: 52, // a == b  (abstract equality)
   LOOSE_NEQ: 53, // a != b  (abstract inequality)
 
-  FOR_IN_SETUP: 54, // pop obj → build enumerable-key iterator → push {keys,i}
-  FOR_IN_NEXT: 55, // operand=exit_pc; pop iter; if done→jump; else push next key
+  FOR_IN_SETUP: 54, // pop obj -> build enumerable-key iterator -> push {keys,i}
+  FOR_IN_NEXT: 55, // operand=exit_pc; pop iter; if done->jump; else push next key
 
   // Self-modifying bytecode
   PATCH: 56, // pop destPc; constants[operand]=word[]; write words into bytecode[destPc..]
@@ -154,7 +155,7 @@ class Scope {
 
   constructor(parent = null) {
     this.parent = parent;
-    this._locals = new Map(); // name → slot index
+    this._locals = new Map(); // name -> slot index
     this._next = 0;
   }
 
@@ -165,7 +166,7 @@ class Scope {
     return this._locals.get(name);
   }
 
-  // Walk up scope chain. If we fall off the top → global.
+  // Walk up scope chain. If we fall off the top -> global.
   resolve(name) {
     if (this._locals.has(name)) {
       return { kind: "local", slot: this._locals.get(name) };
@@ -199,8 +200,8 @@ class FnContext {
   }
 
   // Find or register a captured variable as an upvalue.
-  // isLocal=true  → captured directly from parent's locals[index]
-  // isLocal=false → relayed from parent's own upvalue list[index]
+  // isLocal=true  -> captured directly from parent's locals[index]
+  // isLocal=false -> relayed from parent's own upvalue list[index]
   addUpvalue(name, isLocal, index) {
     const existing = this.upvalues.findIndex((u) => u.name === name);
     if (existing !== -1) return existing;
@@ -255,7 +256,7 @@ class Compiler {
       return { kind: "local", slot: ctx.scope._locals.get(name) };
     }
 
-    // 2. No parent context → must be global
+    // 2. No parent context -> must be global
     if (!ctx.parentCtx) return { kind: "global" };
 
     // 3. Ask parent — recurse up the chain
@@ -272,13 +273,13 @@ class Compiler {
   }
 
   // Entry point
-  compile(source) {
+  compile(source: string) {
     const ast = parser.parse(source, { sourceType: "script" });
 
     return this.compileAST(ast);
   }
 
-  compileAST(ast) {
+  compileAST(ast: t.File) {
     // Pass 1 - compile every FunctionDeclaration into a descriptor.
     //           Traverse finds them regardless of nesting depth.
     traverse(ast, {
@@ -380,15 +381,17 @@ class Compiler {
   }
 
   // Main (top-level)
-  _compileMain(body) {
+  _compileMain(body: t.Statement[]) {
     this.mainStartPc = 0; // ← record main's entry point
     const bc = this.bytecode;
 
-    // Hoist all FunctionDeclarations: MAKE_CLOSURE → STORE_GLOBAL
+    // Hoist all FunctionDeclarations: MAKE_CLOSURE -> STORE_GLOBAL
     // (mirrors JS hoisting — functions are available before other code)
     for (const node of body) {
       if (node.type !== "FunctionDeclaration") continue;
-      const desc = this.fnDescriptors.find((d) => d._fnIdx === node._fnIdx);
+      const desc = this.fnDescriptors.find(
+        (d) => d._fnIdx === (node as any)._fnIdx,
+      );
       const nameIdx = this.constants.intern(node.id.name);
       bc.push([OP.MAKE_CLOSURE, desc._constIdx]);
       bc.push([OP.STORE_GLOBAL, nameIdx]);
@@ -397,7 +400,7 @@ class Compiler {
     // Compile everything else in order
     for (const node of body) {
       if (node.type === "FunctionDeclaration") continue;
-      this._compileStatement(node, null, bc); // null scope → global context
+      this._compileStatement(node, null, bc); // null scope -> global context
     }
 
     bc.push([OP.RETURN]); // end program
@@ -461,6 +464,11 @@ class Compiler {
   // Statements
   _compileStatement(node: t.Statement, scope, bc) {
     switch (node.type) {
+      case "EmptyStatement": {
+        // nothing to emit — bare semicolon is a no-op
+        break;
+      }
+
       case "BlockStatement": {
         for (const stmt of node.body) {
           this._compileStatement(stmt, scope, bc);
@@ -531,7 +539,7 @@ class Compiler {
       }
 
       case "IfStatement": {
-        // 1. Compile the test expression → leaves a value on the stack
+        // 1. Compile the test expression -> leaves a value on the stack
         this._compileExpr(node.test, scope, bc);
         // 2. Emit JUMP_IF_FALSE with placeholder target
         bc.push([OP.JUMP_IF_FALSE, 0]);
@@ -584,16 +592,13 @@ class Compiler {
         bc.push([OP.JUMP_IF_FALSE, 0]);
         const exitJumpIdx = bc.length - 1;
 
-        ok(
-          node.body.type === "BlockStatement",
-          "Expected BlockStatement as while body",
-        );
-
-        for (const stmt of node.body.body) {
+        const whileBody =
+          node.body.type === "BlockStatement" ? node.body.body : [node.body];
+        for (const stmt of whileBody) {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // continue → re-evaluate the test
+        // continue -> re-evaluate the test
         for (const idx of loopCtxW.continueJumps) bc[idx][1] = loopTop;
         bc.push([OP.JUMP, loopTop]);
 
@@ -618,16 +623,13 @@ class Compiler {
 
         const loopTopDW = bc.length;
 
-        ok(
-          node.body.type === "BlockStatement",
-          "Expected BlockStatement as do-while body",
-        );
-
-        for (const stmt of node.body.body) {
+        const doWhileBody =
+          node.body.type === "BlockStatement" ? node.body.body : [node.body];
+        for (const stmt of doWhileBody) {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // continue → skip rest of body, fall through to test
+        // continue -> skip rest of body, fall through to test
         const continueTargetDW = bc.length;
         for (const idx of loopCtxDW.continueJumps)
           bc[idx][1] = continueTargetDW;
@@ -672,16 +674,13 @@ class Compiler {
         }
         const exitJumpIdxF = node.test ? bc.length - 1 : null;
 
-        ok(
-          node.body.type === "BlockStatement",
-          "Expected BlockStatement as for loop body",
-        );
-
-        for (const stmt of node.body.body) {
+        const forBody =
+          node.body.type === "BlockStatement" ? node.body.body : [node.body];
+        for (const stmt of forBody) {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // continue → run update (if any) then back to test
+        // continue -> run update (if any) then back to test
         if (node.update) {
           const continueTargetF = bc.length;
           for (const idx of loopCtxF.continueJumps)
@@ -872,7 +871,7 @@ class Compiler {
         const _fiLabel = this._pendingLabel;
         this._pendingLabel = null;
 
-        // Evaluate the object expression → on stack
+        // Evaluate the object expression -> on stack
         this._compileExpr(node.right, scope, bc);
         // FOR_IN_SETUP: pops obj, pushes iterator {keys, i}
         bc.push([OP.FOR_IN_SETUP]);
@@ -936,7 +935,7 @@ class Compiler {
         } else {
           const src = generate(node.left).code;
           throw new Error(
-            `Unsupported for-in left-hand side: ${node.left.type}\n  → ${src}`,
+            `Unsupported for-in left-hand side: ${node.left.type}\n  -> ${src}`,
           );
         }
 
@@ -947,7 +946,7 @@ class Compiler {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // continue → re-load iterator and check next key
+        // continue -> re-load iterator and check next key
         for (const idx of loopCtxFI.continueJumps) bc[idx][1] = loopTopFI;
         bc.push([OP.JUMP, loopTopFI]);
 
@@ -963,7 +962,7 @@ class Compiler {
         // Use @babel/generator to reproduce the source of unsupported nodes
         // so we can emit a clear error with context.
         const src = generate(node).code;
-        throw new Error(`Unsupported statement: ${node.type}\n  → ${src}`);
+        throw new Error(`Unsupported statement: ${node.type}\n  -> ${src}`);
       }
     }
   }
@@ -988,7 +987,7 @@ class Compiler {
       }
 
       case "Identifier": {
-        // scope=null means we're at the top-level → always global
+        // scope=null means we're at the top-level -> always global
         const res = this._resolve(node.name, this._currentCtx);
         if (res.kind === "local") {
           bc.push([OP.LOAD_LOCAL, res.slot]);
@@ -1014,7 +1013,7 @@ class Compiler {
       }
 
       case "SequenceExpression": {
-        // (a, b, c)  →  eval a → POP, eval b → POP, eval c → leave on stack
+        // (a, b, c)  ->  eval a -> POP, eval b -> POP, eval c -> leave on stack
         // Matches CPython's BINARY_OP / POP_TOP pattern for comma expressions.
         for (let i = 0; i < node.expressions.length - 1; i++) {
           this._compileExpr(node.expressions[i], scope, bc);
@@ -1042,17 +1041,17 @@ class Compiler {
         bc.push([OP.JUMP, 0]);
         const jumpToEnd = bc.length - 1;
 
-        bc[jumpToElse][1] = bc.length; // patch: false → alternate
+        bc[jumpToElse][1] = bc.length; // patch: false -> alternate
         this._compileExpr(node.alternate, scope, bc);
 
-        bc[jumpToEnd][1] = bc.length; // patch: after consequent → end
+        bc[jumpToEnd][1] = bc.length; // patch: after consequent -> end
         break;
       }
 
       case "LogicalExpression": {
         // Pattern (CPython-style):
         //   eval LHS
-        //   JUMP_IF_*_OR_POP  → target (past RHS)
+        //   JUMP_IF_*_OR_POP  -> target (past RHS)
         //   eval RHS          ← only reached if LHS didn't short-circuit
         //   [target lands here, stack top is the result either way]
 
@@ -1187,7 +1186,7 @@ class Compiler {
           if (isCompound) {
             // Duplicate obj+key on the stack so we can read before we write.
             // Stack before DUP2: [..., obj, key]
-            // We need: [..., obj, key, obj, key] → GET_PROP_COMPUTED → [..., obj, key, currentVal]
+            // We need: [..., obj, key, obj, key] -> GET_PROP_COMPUTED -> [..., obj, key, currentVal]
             // Cheapest approach without a DUP opcode: re-compile the member read.
             // (emits obj + key again; a future peephole pass could DUP instead)
             this._compileExpr(node.left.object, scope, bc);
@@ -1227,7 +1226,7 @@ class Compiler {
         this._compileExpr(node.right, scope, bc); // push RHS
 
         if (isCompound) {
-          bc.push([compoundOp]); // apply binary op → leaves newVal on stack
+          bc.push([compoundOp]); // apply binary op -> leaves newVal on stack
         }
 
         // Store & leave value on stack (assignment is an expression)
@@ -1279,6 +1278,30 @@ class Compiler {
           }
           // Known local or upvalue — safe to load first, then typeof
         }
+
+        // Special case: delete — argument must NOT be pre-evaluated.
+        // The generic path below compiles the argument first, which would leave
+        // a stale value on the stack before the delete result, corrupting it.
+        if (node.operator === "delete") {
+          const arg = node.argument;
+          if (arg.type === "MemberExpression") {
+            this._compileExpr(arg.object, scope, bc);
+            if (arg.computed) {
+              this._compileExpr(arg.property, scope, bc);
+            } else {
+              bc.push([
+                OP.LOAD_CONST,
+                this.constants.intern(arg.property.name),
+              ]);
+            }
+            bc.push([OP.DELETE_PROP]);
+          } else {
+            // delete x, delete 0, etc. — always true in non-strict, just push true
+            bc.push([OP.LOAD_CONST, this.constants.intern(true)]);
+          }
+          break;
+        }
+
         // All other unary ops: compile argument first, then apply operator
         this._compileExpr(node.argument, scope, bc);
         switch (node.operator) {
@@ -1301,29 +1324,19 @@ class Compiler {
             bc.push([OP.VOID]);
             break;
 
-          case "delete": {
-            const arg = node.argument;
-            if (arg.type === "MemberExpression") {
-              this._compileExpr(arg.object, scope, bc);
-              if (arg.computed) {
-                this._compileExpr(arg.property, scope, bc);
-              } else {
-                bc.push([
-                  OP.LOAD_CONST,
-                  this.constants.intern(arg.property.name),
-                ]);
-              }
-              bc.push([OP.DELETE_PROP]);
-            } else {
-              // delete x, delete 0, etc. — always true in non-strict, just push true
-              bc.push([OP.LOAD_CONST, this.constants.intern(true)]);
-            }
-            break;
-          }
-
           default:
             throw new Error(`Unsupported unary operator: ${node.operator}`);
         }
+        break;
+      }
+
+      case "RegExpLiteral": {
+        // Emit: new RegExp(pattern, flags)
+        // Fresh object per evaluation — correct for stateful g/y flags.
+        bc.push([OP.LOAD_GLOBAL, this.constants.intern("RegExp")]);
+        bc.push([OP.LOAD_CONST, this.constants.intern(node.pattern)]);
+        bc.push([OP.LOAD_CONST, this.constants.intern(node.flags)]);
+        bc.push([OP.NEW, 2]);
         break;
       }
 
@@ -1354,7 +1367,7 @@ class Compiler {
       }
 
       case "ArrayExpression": {
-        // Compile each element left→right, then BUILD_ARRAY collapses them.
+        // Compile each element left->right, then BUILD_ARRAY collapses them.
         // Sparse arrays (holes) get explicit undefined per slot.
         for (const el of node.elements) {
           if (el === null) {
@@ -1369,7 +1382,7 @@ class Compiler {
       }
       case "ObjectExpression": {
         // For each property: push key (always as string), push value.
-        // BUILD_OBJECT pops pairs right→left and assembles the object.
+        // BUILD_OBJECT pops pairs right->left and assembles the object.
         for (const prop of node.properties) {
           if (prop.type === "SpreadElement") {
             throw new Error("Object spread not supported");
@@ -1378,7 +1391,7 @@ class Compiler {
           const key = prop.key;
           let keyStr;
           if (key.type === "Identifier") {
-            keyStr = key.name; // {x: 1} → key is "x"
+            keyStr = key.name; // {x: 1} -> key is "x"
           } else if (
             key.type === "StringLiteral" ||
             key.type === "NumericLiteral"
@@ -1397,7 +1410,7 @@ class Compiler {
 
       default: {
         const src = generate(node).code;
-        throw new Error(`Unsupported expression: ${node.type}\n  → ${src}`);
+        throw new Error(`Unsupported expression: ${node.type}\n  -> ${src}`);
       }
     }
   }
@@ -1425,12 +1438,12 @@ class Serializer {
     if (val === null) return "null";
     if (val === undefined) return "undefined";
     if (typeof val === "object" && val._fnIdx !== undefined) {
-      return `FN[${val._fnIdx}]`; // fn descriptor → reference by FN index
+      return `FN[${val._fnIdx}]`; // fn descriptor -> reference by FN index
     }
     return JSON.stringify(val); // number / string / bool
   }
 
-  // One instruction → "[op, operand]  // MNEMONIC description"
+  // One instruction -> "[op, operand]  // MNEMONIC description"
   _serializeInstr(instr) {
     const constants = this.constants;
 
@@ -1445,7 +1458,7 @@ class Serializer {
         case OP.MAKE_CLOSURE: {
           const val = constants[operand];
           if (val && typeof val === "object" && val.name) {
-            comment += `  FN[${val._fnIdx}] → fn:${val.name}`;
+            comment += `  FN[${val._fnIdx}] -> fn:${val.name}`;
           } else {
             comment += `  ${JSON.stringify(val)}`;
           }
@@ -1549,7 +1562,7 @@ class Serializer {
       words.push(this._serializeInstr(instr).value);
     }
 
-    // Convert packed words → raw 4-byte little-endian binary → base64
+    // Convert packed words -> raw 4-byte little-endian binary -> base64
     const buf = new Uint8Array(words.length * 4);
     words.forEach((w, i) => {
       buf[i * 4] = w & 0xff;
@@ -1619,7 +1632,7 @@ export function compileAndSerialize(sourceCode: string, options: Options = {}) {
     result.mainStartPc,
   );
 
-  const finalOutput = output;
+  const finalOutput = obfuscateRuntime(output);
 
   return {
     code: finalOutput,

@@ -168,3 +168,19 @@ test("Variant #12: Nested for loops", () => {
 
   expect(evalCode(code)).toEqual([0, 1, 2, 10, 11, 12, 20, 21, 22]);
 });
+
+test("Variant #13: Loops with blockless bodies (no braces)", () => {
+  const { code } = virtualize(`
+    var i = 0;
+    var wSum = 0;
+    var fSum = 0;
+    var dSum = 0;
+    while (i < 5) wSum = wSum + i++;
+    for(var j = 0; j < 5; j++) fSum = fSum + j;
+    do dSum = dSum + i++; while (i < 10);
+
+    window.TEST_OUTPUT = [wSum, fSum, dSum];
+  `);
+
+  expect(evalCode(code)).toEqual([10, 10, 35]);
+});

@@ -175,7 +175,7 @@ VM.prototype.run = function () {
         break;
 
       case OP.GET_PROP: {
-        // Stack: [..., obj, key] → [..., obj, obj[key]]
+        // Stack: [..., obj, key] -> [..., obj, obj[key]]
         // obj is PEEKED (not popped) — CALL_METHOD needs it as receiver
         var key = this._pop();
         var obj = this.peek();
@@ -391,7 +391,8 @@ VM.prototype.run = function () {
           return function () {
             var args = Array.prototype.slice.call(arguments);
             var sub = new VM(self.bytecode, 0, self.constants, self.globals);
-            var f = new Frame(c, null, null, this);
+            // Sloppy-mode: null/undefined thisArg → global object
+            var f = new Frame(c, null, null, this == null ? self.globals : this);
             for (var i = 0; i < args.length; i++) f.locals[i] = args[i];
             f.locals[c.fn.paramCount] = args;
             sub.currentFrame = f;
@@ -420,7 +421,7 @@ VM.prototype.run = function () {
       }
 
       case OP.BUILD_OBJECT: {
-        // Stack has: key0, val0, key1, val1 ... keyN, valN  (pushed left→right)
+        // Stack has: key0, val0, key1, val1 ... keyN, valN  (pushed left->right)
         // Pop all pairs and build the object.
         var pairs = this._stack.splice(this._stack.length - operand * 2);
         var o = {};
@@ -436,7 +437,11 @@ VM.prototype.run = function () {
         var val = this._pop();
         var key = this._pop();
         var obj = this._pop();
-        obj[key] = val;
+        // Reflect.set performs [[Set]] without throwing on failure,
+        // correctly simulating sloppy-mode assignment from a strict-mode host
+        // (output.js is an ES module). This also properly invokes inherited
+        // or prototype-chain setter functions.
+        Reflect.set(obj, key, val);
         this._push(val); // assignment expression evaluates to the assigned value
         break;
       }
@@ -461,7 +466,8 @@ VM.prototype.run = function () {
         if (callee && callee[CLOSURE_SYM]) {
           // VM closure — run directly in this VM, no sub-VM overhead
           var c = callee[CLOSURE_SYM];
-          var f = new Frame(c, frame.pc, frame, undefined);
+          // Sloppy-mode: plain function call → global object as this
+          var f = new Frame(c, frame.pc, frame, this.globals);
           for (var i = 0; i < args.length; i++) f.locals[i] = args[i];
           f.locals[c.fn.paramCount] = args;
           this.frameStack.push(this.currentFrame);
@@ -523,7 +529,7 @@ VM.prototype.run = function () {
         this.closeUpvaluesFor(frame); // must happen before frame is abandoned
         if (this.frameStack.length === 0) return retVal;
 
-        // new-call rule: primitive return → discard, use the constructed object instead
+        // new-call rule: primitive return -> discard, use the constructed object instead
         if (frame._newObj !== null) {
           if (typeof retVal !== "object" || retVal === null)
             retVal = frame._newObj;

@@ -63,6 +63,73 @@ test("Variant #6: Object expressions", () => {
   });
 });
 
+test("Variant #8: RegExp literal basic", () => {
+  const { code } = virtualize(`
+    var re = /hello/;
+    window.TEST_OUTPUT = [re instanceof RegExp, re.source, re.flags];
+  `);
+
+  expect(evalCode(code)).toEqual([true, "hello", ""]);
+});
+
+test("Variant #9: RegExp literal with flags", () => {
+  const { code } = virtualize(`
+    var re = /foo/gi;
+    window.TEST_OUTPUT = [re.source, re.flags];
+  `);
+
+  expect(evalCode(code)).toEqual(["foo", "gi"]);
+});
+
+test("Variant #10: RegExp literal test()", () => {
+  const { code } = virtualize(`
+    var re = /^\\d+$/;
+    window.TEST_OUTPUT = [re.test("123"), re.test("abc"), re.test("12x")];
+  `);
+
+  expect(evalCode(code)).toEqual([true, false, false]);
+});
+
+test("Variant #11: RegExp literal exec() and match()", () => {
+  const { code } = virtualize(`
+    var m = /(\\w+)\\s(\\w+)/.exec("Hello World");
+    window.TEST_OUTPUT = [m[0], m[1], m[2]];
+  `);
+
+  expect(evalCode(code)).toEqual(["Hello World", "Hello", "World"]);
+});
+
+test("Variant #12: RegExp literal stateful lastIndex with /g", () => {
+  const { code } = virtualize(`
+    var re = /a/g;
+    var s = "aXaX";
+    var r1 = re.test(s);
+    var i1 = re.lastIndex;
+    var r2 = re.test(s);
+    var i2 = re.lastIndex;
+    window.TEST_OUTPUT = [r1, i1, r2, i2];
+  `);
+
+  expect(evalCode(code)).toEqual([true, 1, true, 3]);
+});
+
+test("Variant #13: RegExp literal fresh object per evaluation", () => {
+  const { code } = virtualize(`
+    // Each pass through the loop re-evaluates the literal -> fresh lastIndex
+    var results = [];
+    for (var i = 0; i < 3; i++) {
+      var re = /x/g;
+      results.push(re.lastIndex);
+      re.test("x");
+      results.push(re.lastIndex);
+    }
+    window.TEST_OUTPUT = results;
+  `);
+
+  // lastIndex starts at 0 each iteration because a new object is created
+  expect(evalCode(code)).toEqual([0, 1, 0, 1, 0, 1]);
+});
+
 test("Variant #7: Array and object runtime order", () => {
   const { code } = virtualize(`
     var counter = 0;

@@ -105,6 +105,166 @@ test("Variant #5: Function assigned to window called as method receives window a
   expect(evalCode(code)).toBe("MyApp");
 });
 
+// ── call() ────────────────────────────────────────────────────────
+
+test("Variant #7: call() invokes function with explicit this", () => {
+  const { code } = virtualize(`
+    function greet(greeting) {
+      return greeting + ", " + this.name;
+    }
+    var obj = { name: "Alice" };
+    window.TEST_OUTPUT = greet.call(obj, "Hello");
+  `);
+
+  expect(evalCode(code)).toBe("Hello, Alice");
+});
+
+test("Variant #8: call() with multiple arguments", () => {
+  const { code } = virtualize(`
+    function add(a, b, c) {
+      return this.base + a + b + c;
+    }
+    var obj = { base: 10 };
+    window.TEST_OUTPUT = add.call(obj, 1, 2, 3);
+  `);
+
+  expect(evalCode(code)).toBe(16);
+});
+
+test("Variant #9: call() used for method borrowing", () => {
+  const { code } = virtualize(`
+    var dog = { name: "Rex", sound: "woof" };
+    var cat = { name: "Whiskers", sound: "meow" };
+    function speak() {
+      return this.name + " says " + this.sound;
+    }
+    window.TEST_OUTPUT = [speak.call(dog), speak.call(cat)];
+  `);
+
+  expect(evalCode(code)).toEqual(["Rex says woof", "Whiskers says meow"]);
+});
+
+// ── apply() ───────────────────────────────────────────────────────
+
+test("Variant #10: apply() invokes function with explicit this and args array", () => {
+  const { code } = virtualize(`
+    function greet(greeting, punctuation) {
+      return greeting + ", " + this.name + punctuation;
+    }
+    var obj = { name: "Bob" };
+    window.TEST_OUTPUT = greet.apply(obj, ["Hi", "!"]);
+  `);
+
+  expect(evalCode(code)).toBe("Hi, Bob!");
+});
+
+test("Variant #11: apply() with Math.max to spread an array", () => {
+  const { code } = virtualize(`
+    var nums = [3, 1, 4, 1, 5, 9, 2, 6];
+    window.TEST_OUTPUT = Math.max.apply(null, nums);
+  `);
+
+  expect(evalCode(code)).toBe(9);
+});
+
+test("Variant #12: apply() used for constructor chaining", () => {
+  const { code } = virtualize(`
+    function Base(x, y) {
+      this.x = x;
+      this.y = y;
+    }
+    function Point(x, y, label) {
+      Base.apply(this, [x, y]);
+      this.label = label;
+    }
+    var p = new Point(3, 4, "P");
+    window.TEST_OUTPUT = [p.x, p.y, p.label];
+  `);
+
+  expect(evalCode(code)).toEqual([3, 4, "P"]);
+});
+
+// ── bind() ────────────────────────────────────────────────────────
+
+test("Variant #13: bind() returns a function with fixed this", () => {
+  const { code } = virtualize(`
+    function getName() {
+      return this.name;
+    }
+    var obj = { name: "Carol" };
+    var boundGet = getName.bind(obj);
+    window.TEST_OUTPUT = boundGet();
+  `);
+
+  expect(evalCode(code)).toBe("Carol");
+});
+
+test("Variant #14: bind() with pre-filled arguments (partial application)", () => {
+  const { code } = virtualize(`
+    function multiply(a, b) {
+      return a * b;
+    }
+    var double = multiply.bind(null, 2);
+    window.TEST_OUTPUT = [double(3), double(5), double(10)];
+  `);
+
+  expect(evalCode(code)).toEqual([6, 10, 20]);
+});
+
+test("Variant #15: bind() preserves this through setTimeout-style callbacks", () => {
+  const { code } = virtualize(`
+    function Timer() {
+      this.ticks = 0;
+    }
+    Timer.prototype.tick = function() {
+      this.ticks = this.ticks + 1;
+      return this.ticks;
+    };
+    var t = new Timer();
+    var boundTick = t.tick.bind(t);
+    boundTick();
+    boundTick();
+    window.TEST_OUTPUT = boundTick();
+  `);
+
+  expect(evalCode(code)).toBe(3);
+});
+
+// ── null/undefined thisArg → global object (sloppy mode) ─────────
+
+test("Variant #16: call(null) passes global object as this", () => {
+  const { code } = virtualize(`
+    window.TEST_OUTPUT = (function() {
+      this.callNullResult = 42;
+      return this.callNullResult;
+    }).call(null);
+  `);
+
+  expect(evalCode(code)).toBe(42);
+});
+
+test("Variant #17: apply(undefined) passes global object as this", () => {
+  const { code } = virtualize(`
+    window.TEST_OUTPUT = (function() {
+      this.applyUndefinedResult = 99;
+      return this.applyUndefinedResult;
+    }).apply(undefined);
+  `);
+
+  expect(evalCode(code)).toBe(99);
+});
+
+test("Variant #18: plain function call receives global object as this", () => {
+  const { code } = virtualize(`
+    window.TEST_OUTPUT = (function() {
+      this.plainCallResult = 7;
+      return this.plainCallResult;
+    })();
+  `);
+
+  expect(evalCode(code)).toBe(7);
+});
+
 // ── Method chaining (return this) ────────────────────────────────
 
 test("Variant #6: Returning `this` from prototype methods enables chaining", () => {
