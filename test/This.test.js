@@ -1,10 +1,10 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
 // ── Constructor functions ─────────────────────────────────────────
 
-test("Variant #1: Constructor sets properties on `this` via new", () => {
-  const { code } = virtualize(`
+test("Variant #1: Constructor sets properties on `this` via new", async () => {
+  const { code } = await obfuscate(`
     function Rectangle(width, height) {
       this.width = width;
       this.height = height;
@@ -21,8 +21,8 @@ test("Variant #1: Constructor sets properties on `this` via new", () => {
 
 // ── Object literal method this ────────────────────────────────────
 
-test("Variant #2: Object literal method receives object as `this`", () => {
-  const { code } = virtualize(`
+test("Variant #2: Object literal method receives object as `this`", async () => {
+  const { code } = await obfuscate(`
     var counter = {
       count: 0,
       increment: function() {
@@ -40,8 +40,8 @@ test("Variant #2: Object literal method receives object as `this`", () => {
 
 // ── Prototype methods ─────────────────────────────────────────────
 
-test("Variant #3: Prototype methods receive instance as `this`", () => {
-  const { code } = virtualize(`
+test("Variant #3: Prototype methods receive instance as `this`", async () => {
+  const { code } = await obfuscate(`
     function Stack() {
       this.items = [];
     }
@@ -67,8 +67,8 @@ test("Variant #3: Prototype methods receive instance as `this`", () => {
 
 // ── ES5 class extending ───────────────────────────────────────────
 
-test("Variant #4: ES5 inheritance via Function.call forwards `this` to parent constructor", () => {
-  const { code } = virtualize(`
+test("Variant #4: ES5 inheritance via Function.call forwards `this` to parent constructor", async () => {
+  const { code } = await obfuscate(`
     function Animal(name) {
       this.name = name;
       this.type = "animal";
@@ -87,13 +87,18 @@ test("Variant #4: ES5 inheritance via Function.call forwards `this` to parent co
     window.TEST_OUTPUT = [d.name, d.type, d.breed, d.describe()];
   `);
 
-  expect(evalCode(code)).toEqual(["Rex", "dog", "Labrador", "Rex is a Labrador"]);
+  expect(evalCode(code)).toEqual([
+    "Rex",
+    "dog",
+    "Labrador",
+    "Rex is a Labrador",
+  ]);
 });
 
 // ── Exposed globals ───────────────────────────────────────────────
 
-test("Variant #5: Function assigned to window called as method receives window as `this`", () => {
-  const { code } = virtualize(`
+test("Variant #5: Function assigned to window called as method receives window as `this`", async () => {
+  const { code } = await obfuscate(`
     window.appName = "MyApp";
     function getAppName() {
       return this.appName;
@@ -107,8 +112,8 @@ test("Variant #5: Function assigned to window called as method receives window a
 
 // ── call() ────────────────────────────────────────────────────────
 
-test("Variant #7: call() invokes function with explicit this", () => {
-  const { code } = virtualize(`
+test("Variant #7: call() invokes function with explicit this", async () => {
+  const { code } = await obfuscate(`
     function greet(greeting) {
       return greeting + ", " + this.name;
     }
@@ -119,8 +124,8 @@ test("Variant #7: call() invokes function with explicit this", () => {
   expect(evalCode(code)).toBe("Hello, Alice");
 });
 
-test("Variant #8: call() with multiple arguments", () => {
-  const { code } = virtualize(`
+test("Variant #8: call() with multiple arguments", async () => {
+  const { code } = await obfuscate(`
     function add(a, b, c) {
       return this.base + a + b + c;
     }
@@ -131,8 +136,8 @@ test("Variant #8: call() with multiple arguments", () => {
   expect(evalCode(code)).toBe(16);
 });
 
-test("Variant #9: call() used for method borrowing", () => {
-  const { code } = virtualize(`
+test("Variant #9: call() used for method borrowing", async () => {
+  const { code } = await obfuscate(`
     var dog = { name: "Rex", sound: "woof" };
     var cat = { name: "Whiskers", sound: "meow" };
     function speak() {
@@ -146,8 +151,8 @@ test("Variant #9: call() used for method borrowing", () => {
 
 // ── apply() ───────────────────────────────────────────────────────
 
-test("Variant #10: apply() invokes function with explicit this and args array", () => {
-  const { code } = virtualize(`
+test("Variant #10: apply() invokes function with explicit this and args array", async () => {
+  const { code } = await obfuscate(`
     function greet(greeting, punctuation) {
       return greeting + ", " + this.name + punctuation;
     }
@@ -158,8 +163,8 @@ test("Variant #10: apply() invokes function with explicit this and args array", 
   expect(evalCode(code)).toBe("Hi, Bob!");
 });
 
-test("Variant #11: apply() with Math.max to spread an array", () => {
-  const { code } = virtualize(`
+test("Variant #11: apply() with Math.max to spread an array", async () => {
+  const { code } = await obfuscate(`
     var nums = [3, 1, 4, 1, 5, 9, 2, 6];
     window.TEST_OUTPUT = Math.max.apply(null, nums);
   `);
@@ -167,8 +172,8 @@ test("Variant #11: apply() with Math.max to spread an array", () => {
   expect(evalCode(code)).toBe(9);
 });
 
-test("Variant #12: apply() used for constructor chaining", () => {
-  const { code } = virtualize(`
+test("Variant #12: apply() used for constructor chaining", async () => {
+  const { code } = await obfuscate(`
     function Base(x, y) {
       this.x = x;
       this.y = y;
@@ -186,8 +191,8 @@ test("Variant #12: apply() used for constructor chaining", () => {
 
 // ── bind() ────────────────────────────────────────────────────────
 
-test("Variant #13: bind() returns a function with fixed this", () => {
-  const { code } = virtualize(`
+test("Variant #13: bind() returns a function with fixed this", async () => {
+  const { code } = await obfuscate(`
     function getName() {
       return this.name;
     }
@@ -199,8 +204,8 @@ test("Variant #13: bind() returns a function with fixed this", () => {
   expect(evalCode(code)).toBe("Carol");
 });
 
-test("Variant #14: bind() with pre-filled arguments (partial application)", () => {
-  const { code } = virtualize(`
+test("Variant #14: bind() with pre-filled arguments (partial application)", async () => {
+  const { code } = await obfuscate(`
     function multiply(a, b) {
       return a * b;
     }
@@ -211,8 +216,8 @@ test("Variant #14: bind() with pre-filled arguments (partial application)", () =
   expect(evalCode(code)).toEqual([6, 10, 20]);
 });
 
-test("Variant #15: bind() preserves this through setTimeout-style callbacks", () => {
-  const { code } = virtualize(`
+test("Variant #15: bind() preserves this through setTimeout-style callbacks", async () => {
+  const { code } = await obfuscate(`
     function Timer() {
       this.ticks = 0;
     }
@@ -232,8 +237,8 @@ test("Variant #15: bind() preserves this through setTimeout-style callbacks", ()
 
 // ── null/undefined thisArg → global object (sloppy mode) ─────────
 
-test("Variant #16: call(null) passes global object as this", () => {
-  const { code } = virtualize(`
+test("Variant #16: call(null) passes global object as this", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = (function() {
       this.callNullResult = 42;
       return this.callNullResult;
@@ -243,8 +248,8 @@ test("Variant #16: call(null) passes global object as this", () => {
   expect(evalCode(code)).toBe(42);
 });
 
-test("Variant #17: apply(undefined) passes global object as this", () => {
-  const { code } = virtualize(`
+test("Variant #17: apply(undefined) passes global object as this", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = (function() {
       this.applyUndefinedResult = 99;
       return this.applyUndefinedResult;
@@ -254,8 +259,8 @@ test("Variant #17: apply(undefined) passes global object as this", () => {
   expect(evalCode(code)).toBe(99);
 });
 
-test("Variant #18: plain function call receives global object as this", () => {
-  const { code } = virtualize(`
+test("Variant #18: plain function call receives global object as this", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = (function() {
       this.plainCallResult = 7;
       return this.plainCallResult;
@@ -267,8 +272,8 @@ test("Variant #18: plain function call receives global object as this", () => {
 
 // ── Method chaining (return this) ────────────────────────────────
 
-test("Variant #6: Returning `this` from prototype methods enables chaining", () => {
-  const { code } = virtualize(`
+test("Variant #6: Returning `this` from prototype methods enables chaining", async () => {
+  const { code } = await obfuscate(`
     function Builder() {
       this.value = 0;
     }

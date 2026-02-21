@@ -1,47 +1,47 @@
 # JS Confuser VM
 
-**Requires Node v24.13.1 or higher**
+  [![NPM](https://img.shields.io/badge/NPM-%23000000.svg?style=for-the-badge&logo=npm&logoColor=white)](https://npmjs.com/package/js-confuser-vm) [![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/MichaelXF/js-confuser-vm)
 
+
+- **Requires Node v24.13.1 or higher**
 - ES5 support only. No complex features: async, generator, and even try..catch are beyond scope.
 - Experimental. Expect issues.
 
-### Usage
+### Installation
 
 ```shell
-$ git clone https://github.com/MichaelXF/js-confuser-vm
+$ npm install js-confuser-vm
 ```
 
-- Example Script:
+### Usage
 
 ```js
-import { virtualize } from "./src/index.js";
-import { readFileSync, writeFileSync } from "fs";
+import JsConfuserVM from "js-confuser-vm";
 
-const sourceCode = readFileSync("input.js", "utf-8");
-const { code: output } = virtualize(sourceCode);
-
-writeFileSync("output.js", output, "utf-8");
-console.log(output);
-```
-
-- Input/Output:
-
-```js
-function fibonacci(num) {
-  var a = 0,
-    b = 1,
-    c = num;
-  while (num-- > 1) {
-    c = a + b;
-    a = b;
-    b = c;
+JsConfuserVM.obfuscate(`
+  function fibonacci(num){   
+    var a = 0, b = 1, c = num;
+    while (num-- > 1) {
+      c = a + b;
+      a = b;
+      b = c;
+    }
+    return c;
   }
-  return c;
-}
 
-for (var i = 1; i <= 25; i++) {
-  console.log(i, fibonacci(i));
-}
+  for ( var i = 1; i <= 25; i++ ) {
+    console.log(i, fibonacci(i))
+  }
+`, {
+  target: "browser", // or "node"
+  randomizeOpcodes: true, // randomize opcode values in OP mapping?
+  shuffleOpcodes: true, // shuffle order of opcode handlers in the runtime?
+  encodeBytecode: true, // encode bytecode? when off, comments for instructions are added
+  selfModifying: true, // do self-modifying bytecode for function bodies?
+  timingChecks: true, // add timing checks to detect debuggers?
+}).then(result => {
+  console.log(result.code)
+})
 
 /*
 function d(a){a=typeof Buffer!=="undefined"?Buffer.from(a,"base64"):Uint8Array.from(atob(a),function(b){return b.charCodeAt(0)});for(var h=new Int32Array(a.length/4),c=0;c<h.length;c++)h[c]=a[c*4]|a[c*4+1]<<8|a[c*4+2]<<16|a[c*4+3]<<24;return h}var f=Symbol();function l(a,h){this.g=a;this.m=h;this.n=!1;this.p=void 0}function m(a){return a.n?a.p:a.g.b[a.m]}function n(a,h){a.n?a.p=h:a.g.b[a.m]=h}function p(a){this.f=a;this.l=[];this.prototype={}}
@@ -114,7 +114,7 @@ G(new x(d("4AMAANUEAAAjAQAA1QUAAKEFAAAjBgAAGQAAAK0YAAChBwAAIwgAAEsAAAChBQAAoQQAA
 
 ### Minification
 
-`minify.js` uses Google Closure Compiler to minify the JS VM and renames (most) VM property names. This approach helps keep the VM Compiler simple and lets Google do the heavy lifting.
+The `minify` option uses Google Closure Compiler to minify the JS VM and renames (most) VM property names. This approach helps keep the VM Compiler simple and lets Google do the heavy lifting.
 
 ### No Try Catch
 
@@ -149,6 +149,33 @@ Please transpile your code down first using [Babel](https://github.com/babel/bab
 ### Use with JS-Confuser
 
 JS-Confuser is recommended to be applied *after* virtualizing your source code. JS-Confuser's CFF can safeguard and obfuscate your VM internals - adding a layer of obscurity and preventing analysis of the opcodes. 
+
+```js
+import JsConfuser from "js-confuser";
+import JsConfuserVM from "js-confuser-vm";
+import { readFile, writeFile } from "fs/promises";
+
+async function main() {
+  // Read input code
+  const sourceCode = await readFile("input.js", "utf8");
+
+  const { code: virtualized } = await JsConfuserVM.obfuscate(sourceCode, {
+    target: "browser",
+    randomizeOpcodes: true
+  });
+  const { code: obfuscated } = await JsConfuser.obfuscate(virtualized, {
+    target: "browser",
+    preset: "medium",
+    pack: false,
+    globalConcealing: false,
+  });
+
+  // Write output file
+  await writeFile("output.js", obfuscated, "utf8");
+}
+
+main().catch(console.error);
+```
 
 ### WIP
 

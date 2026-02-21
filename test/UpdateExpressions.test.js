@@ -1,8 +1,8 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
-test("Variant #1: Pre/Post increment and decrement", () => {
-  const { code } = virtualize(`
+test("Variant #1: Pre/Post increment and decrement", async () => {
+  const { code } = await obfuscate(`
     let a = 1;
     a++;
     window.TEST_OUTPUT = [

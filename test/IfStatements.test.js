@@ -1,8 +1,8 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
-test("Variant #1: Basic if — condition true, body executes", () => {
-  const { code } = virtualize(`
+test("Variant #1: Basic if — condition true, body executes", async () => {
+  const { code } = await obfuscate(`
     var result = "no";
     if (10 > 5) {
       result = "yes";
@@ -13,8 +13,8 @@ test("Variant #1: Basic if — condition true, body executes", () => {
   expect(evalCode(code)).toBe("yes");
 });
 
-test("Variant #2: Basic if — condition false, body is skipped", () => {
-  const { code } = virtualize(`
+test("Variant #2: Basic if — condition false, body is skipped", async () => {
+  const { code } = await obfuscate(`
     var result = "original";
     if (3 > 10) {
       result = "changed";
@@ -25,8 +25,8 @@ test("Variant #2: Basic if — condition false, body is skipped", () => {
   expect(evalCode(code)).toBe("original");
 });
 
-test("Variant #3: If-else — true branch taken", () => {
-  const { code } = virtualize(`
+test("Variant #3: If-else — true branch taken", async () => {
+  const { code } = await obfuscate(`
     var x = 10;
     var result;
     if (x > 5) {
@@ -40,8 +40,8 @@ test("Variant #3: If-else — true branch taken", () => {
   expect(evalCode(code)).toBe("big");
 });
 
-test("Variant #4: If-else — false branch taken", () => {
-  const { code } = virtualize(`
+test("Variant #4: If-else — false branch taken", async () => {
+  const { code } = await obfuscate(`
     var x = 3;
     var result;
     if (x > 5) {
@@ -55,8 +55,8 @@ test("Variant #4: If-else — false branch taken", () => {
   expect(evalCode(code)).toBe("small");
 });
 
-test("Variant #5: If-else-if chain hits each branch", () => {
-  const { code } = virtualize(`
+test("Variant #5: If-else-if chain hits each branch", async () => {
+  const { code } = await obfuscate(`
     function grade(score) {
       var g;
       if (score >= 90) {
@@ -76,8 +76,8 @@ test("Variant #5: If-else-if chain hits each branch", () => {
   expect(evalCode(code)).toEqual(["A", "B", "C", "F"]);
 });
 
-test("Variant #6: Nested if statements — all four paths", () => {
-  const { code } = virtualize(`
+test("Variant #6: Nested if statements — all four paths", async () => {
+  const { code } = await obfuscate(`
     function classify(x, y) {
       var result;
       if (x > 0) {
@@ -101,8 +101,8 @@ test("Variant #6: Nested if statements — all four paths", () => {
   expect(evalCode(code)).toEqual(["Q1", "Q2", "Q3", "Q4"]);
 });
 
-test("Variant #7: Compact body (no braces) on if", () => {
-  const { code } = virtualize(`
+test("Variant #7: Compact body (no braces) on if", async () => {
+  const { code } = await obfuscate(`
     var x = 10;
     var result = "no";
     if (x > 5) result = "yes";
@@ -112,8 +112,8 @@ test("Variant #7: Compact body (no braces) on if", () => {
   expect(evalCode(code)).toBe("yes");
 });
 
-test("Variant #8: Compact body (no braces) on if-else-if", () => {
-  const { code } = virtualize(`
+test("Variant #8: Compact body (no braces) on if-else-if", async () => {
+  const { code } = await obfuscate(`
     function sign(n) {
       var s;
       if (n > 0) s = "positive";

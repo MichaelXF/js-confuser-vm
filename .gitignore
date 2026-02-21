@@ -2,8 +2,11 @@ node_modules
 dist
 coverage
 
+input.js
+./index.ts
 output.js
 output.min.js
 output.obf.js
 .claude
 package-lock.json
+test.js

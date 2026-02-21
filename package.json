@@ -1,12 +1,14 @@
 {
   "name": "js-confuser-vm",
-  "version": "0.0.1",
-  "main": "src/index.ts",
+  "version": "0.0.2",
+  "main": "dist/index.js",
   "scripts": {
+    "build": "babel src --out-dir dist --extensions '.ts,.js'",
     "index": "NODE_OPTIONS=\"--disable-warning=ExperimentalWarning\" node index.ts",
-    "test": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html",
+    "test": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html --selectProjects default",
+    "test-all": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html",
     "test262": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" node test262-scripts/run-test262.ts",
-    "prepublishOnly": "npm run test"
+    "prepublishOnly": "npm run build && npm run test"
   },
   "type": "module",
   "keywords": [
@@ -28,14 +30,19 @@
     "@babel/traverse": "^7.29.0",
     "@babel/types": "^7.29.0",
     "google-closure-compiler": "^20260216.0.0",
-    "js-confuser": "^2.0.0",
     "json5": "^2.2.3"
   },
   "devDependencies": {
+    "@babel/cli": "^7.28.6",
+    "@babel/core": "^7.29.0",
+    "@babel/preset-env": "^7.29.0",
+    "@babel/preset-typescript": "^7.28.5",
     "@types/node": "^25.3.0",
+    "babel-plugin-module-resolver": "^5.0.2",
+    "babel-plugin-replace-import-extension": "^1.1.5",
     "jest": "^30.2.0"
   },
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=18.0.0"
   }
 }

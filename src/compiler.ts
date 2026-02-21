@@ -10,33 +10,40 @@ import { choice, getRandomInt } from "./random.ts";
 import * as t from "@babel/types";
 import { ok } from "assert";
 import { obfuscateRuntime } from "./runtimeObf.ts";
+import type { Options } from "./options.ts";
 
 const traverse = traverseImport.default;
 
-const RANDOMIZE_OPCODES = true;
-const PACK = true;
-const SELF_MODIFYING = true;
+const readVMRuntimeFile = () => {
+  try {
+    return readFileSync(join(import.meta.dirname, "./runtime.ts"), "utf-8");
+  } catch (e) {
+    return readFileSync(join(import.meta.dirname, "./runtime.js"), "utf-8");
+  }
+};
+
+const VM_RUNTIME = stripTypeScriptTypes(readVMRuntimeFile().split("@START")[1]);
 
 // Opcodes
-const OP_ORIGINAL = {
+export const OP_ORIGINAL = {
   LOAD_CONST: 0,
   LOAD_LOCAL: 1,
   STORE_LOCAL: 2,
   LOAD_GLOBAL: 3,
   STORE_GLOBAL: 4,
   GET_PROP: 5,
-  ADD: 6,
-  SUB: 7,
-  MUL: 8,
-  DIV: 9,
+  ADD: 6, // a + b (both are popped)
+  SUB: 7, // a - b
+  MUL: 8, // a * b
+  DIV: 9, // a / b
   MAKE_CLOSURE: 10,
   CALL: 11,
   CALL_METHOD: 12,
   RETURN: 13,
-  POP: 14,
+  POP: 14, // discard top of stack
   LT: 15, // pop b, pop a -> push (a < b)
-  GT: 16,
-  EQ: 17,
+  GT: 16, // pop b, pop a -> push (a > b)
+  EQ: 17, // pop b, pop a -> push (a === b)
   JUMP: 18, // unconditional - operand = absolute bytecode index
   JUMP_IF_FALSE: 19, // pop value; jump if falsy
   LTE: 20, // a <= b
@@ -89,33 +96,6 @@ const OP_ORIGINAL = {
   PATCH: 56, // pop destPc; constants[operand]=word[]; write words into bytecode[destPc..]
 };
 
-export let OP: Partial<typeof OP_ORIGINAL> = {};
-// Construct randomized opcode mapping
-if (RANDOMIZE_OPCODES) {
-  let usedNumbers = new Set<number>();
-  for (const key in OP_ORIGINAL) {
-    let val;
-    do {
-      val = Math.floor(Math.random() * 256);
-    } while (usedNumbers.has(val));
-    usedNumbers.add(val);
-    OP[key] = val;
-  }
-} else {
-  OP = OP_ORIGINAL;
-}
-
-// Reverse map for comment generation
-const OP_NAME = Object.fromEntries(Object.entries(OP).map(([k, v]) => [v, k]));
-
-const JUMP_OPS = new Set([
-  OP.JUMP,
-  OP.JUMP_IF_FALSE,
-  OP.JUMP_IF_TRUE_OR_POP,
-  OP.JUMP_IF_FALSE_OR_POP,
-  OP.FOR_IN_NEXT,
-]);
-
 // Constant Pool
 // Primitives (string/number/bool) are interned (deduped).
 // Object entries (fn descriptors) are always appended - no dedup.
@@ -129,7 +109,7 @@ class ConstantPool {
   }
 
   intern(val) {
-    // Only intern primitives — objects must use addObject()
+    // Only intern primitives -- objects must use addObject()
     const key = `${typeof val}:${val}`;
     if (this._index.has(key)) return this._index.get(key);
     const idx = this.items.length;
@@ -147,7 +127,7 @@ class ConstantPool {
 
 // Scope
 // Each function call gets its own Scope. Locals are resolved to
-// numeric slots at compile time — zero name lookups at runtime.
+// numeric slots at compile time -- zero name lookups at runtime.
 class Scope {
   parent: Scope | null;
   _locals: Map<string, number>;
@@ -182,7 +162,7 @@ class Scope {
 
 // FnContext
 // Compiler-side state for the function currently being compiled.
-// Distinct from runtime Frame — this is compile-time only.
+// Distinct from runtime Frame -- this is compile-time only.
 class FnContext {
   upvalues: { name: string; isLocal: number; index: number }[];
   parentCtx: FnContext | null;
@@ -231,6 +211,10 @@ class Compiler {
   options: Options;
   serializer: Serializer;
 
+  OP: Partial<typeof OP_ORIGINAL>;
+  OP_NAME: Record<number, string>;
+  JUMP_OPS: Set<number>;
+
   constructor(options: Options) {
     this.options = options;
     this.constants = new ConstantPool();
@@ -243,6 +227,35 @@ class Compiler {
     this._forInCount = 0; // counter for synthetic for-in iterator global names
 
     this.serializer = new Serializer(this);
+
+    this.OP = {};
+    // Construct randomized opcode mapping
+    if (this.options.randomizeOpcodes) {
+      let usedNumbers = new Set<number>();
+      for (const key in OP_ORIGINAL) {
+        let val;
+        do {
+          val = Math.floor(Math.random() * 256);
+        } while (usedNumbers.has(val));
+        usedNumbers.add(val);
+        this.OP[key] = val;
+      }
+    } else {
+      this.OP = OP_ORIGINAL;
+    }
+
+    // Reverse map for comment generation
+    this.OP_NAME = Object.fromEntries(
+      Object.entries(this.OP).map(([k, v]) => [v, k]),
+    );
+
+    this.JUMP_OPS = new Set([
+      this.OP.JUMP,
+      this.OP.JUMP_IF_FALSE,
+      this.OP.JUMP_IF_TRUE_OR_POP,
+      this.OP.JUMP_IF_FALSE_OR_POP,
+      this.OP.FOR_IN_NEXT,
+    ]);
   }
 
   // Variable resolution
@@ -259,11 +272,11 @@ class Compiler {
     // 2. No parent context -> must be global
     if (!ctx.parentCtx) return { kind: "global" };
 
-    // 3. Ask parent — recurse up the chain
+    // 3. Ask parent -- recurse up the chain
     const parentResult = this._resolve(name, ctx.parentCtx);
     if (parentResult.kind === "global") return { kind: "global" };
 
-    // 4. Parent has it (as local or upvalue) — register an upvalue here.
+    // 4. Parent has it (as local or upvalue) -- register an upvalue here.
     //    isLocal=true means "take it straight from parent's locals[index]"
     //    isLocal=false means "relay parent's upvalue[index]" (multi-level capture)
     const isLocal = parentResult.kind === "local";
@@ -292,7 +305,7 @@ class Compiler {
       },
     });
 
-    // Pass 2 — compile top-level statements into BYTECODE.
+    // Pass 2 -- compile top-level statements into BYTECODE.
     this._compileMain(ast.program.body);
 
     return {
@@ -336,14 +349,14 @@ class Compiler {
       const slot = ctx.scope._locals.get((param.left as t.Identifier).name);
 
       // if (param === undefined) param = <default expr>
-      ctx.bc.push([OP.LOAD_LOCAL, slot]);
-      ctx.bc.push([OP.LOAD_CONST, this.constants.intern(undefined)]);
-      ctx.bc.push([OP.EQ]);
-      ctx.bc.push([OP.JUMP_IF_FALSE, 0]);
+      ctx.bc.push([this.OP.LOAD_LOCAL, slot]);
+      ctx.bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
+      ctx.bc.push([this.OP.EQ]);
+      ctx.bc.push([this.OP.JUMP_IF_FALSE, 0]);
       const skipIdx = ctx.bc.length - 1;
 
       this._compileExpr(param.right, ctx.scope, ctx.bc); // eval default
-      ctx.bc.push([OP.STORE_LOCAL, slot]);
+      ctx.bc.push([this.OP.STORE_LOCAL, slot]);
 
       ctx.bc[skipIdx][1] = ctx.bc.length; // patch skip jump
     }
@@ -353,8 +366,8 @@ class Compiler {
     }
 
     // If we fall off the end of the function, implicitly return undefined.
-    ctx.bc.push([OP.LOAD_CONST, this.constants.intern(undefined)]);
-    ctx.bc.push([OP.RETURN]);
+    ctx.bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
+    ctx.bc.push([this.OP.RETURN]);
 
     this._currentCtx = savedCtx; // restore before touching fnDescriptors
 
@@ -386,15 +399,15 @@ class Compiler {
     const bc = this.bytecode;
 
     // Hoist all FunctionDeclarations: MAKE_CLOSURE -> STORE_GLOBAL
-    // (mirrors JS hoisting — functions are available before other code)
+    // (mirrors JS hoisting -- functions are available before other code)
     for (const node of body) {
       if (node.type !== "FunctionDeclaration") continue;
       const desc = this.fnDescriptors.find(
         (d) => d._fnIdx === (node as any)._fnIdx,
       );
       const nameIdx = this.constants.intern(node.id.name);
-      bc.push([OP.MAKE_CLOSURE, desc._constIdx]);
-      bc.push([OP.STORE_GLOBAL, nameIdx]);
+      bc.push([this.OP.MAKE_CLOSURE, desc._constIdx]);
+      bc.push([this.OP.STORE_GLOBAL, nameIdx]);
     }
 
     // Compile everything else in order
@@ -403,15 +416,15 @@ class Compiler {
       this._compileStatement(node, null, bc); // null scope -> global context
     }
 
-    bc.push([OP.RETURN]); // end program
+    bc.push([this.OP.RETURN]); // end program
 
     // Now that main is compiled, we can append all the function bodies at the end of the bytecode.
     for (const descriptor of this.fnDescriptors) {
       descriptor.startPc = this.bytecode.length;
 
-      descriptor.bytecode.push([OP.RETURN]); // ensure every function ends with RETURN
+      descriptor.bytecode.push([this.OP.RETURN]); // ensure every function ends with RETURN
 
-      if (SELF_MODIFYING) {
+      if (this.options.selfModifying) {
         // Preamble is 2 instructions: LOAD_CONST(destPc) + PATCH(bodyConst)
         // Real body starts immediately after the preamble.
         const bodyPc = descriptor.startPc + 2;
@@ -429,12 +442,15 @@ class Compiler {
 
         // Emit preamble: push destination PC, then PATCH.
         const destPcConstIdx = this.constants.intern(bodyPc);
-        this.bytecode.push([OP.LOAD_CONST, destPcConstIdx]);
-        this.bytecode.push([OP.PATCH, bodyConstIdx]);
+        this.bytecode.push([this.OP.LOAD_CONST, destPcConstIdx]);
+        this.bytecode.push([this.OP.PATCH, bodyConstIdx]);
 
-        // Garbage fill — same length as real body, never executed (PATCH fires first).
+        // Garbage fill -- same length as real body, never executed (PATCH fires first).
         for (let i = 0; i < realBodyInstrs.length; i++) {
-          this.bytecode.push([choice(Object.values(OP)), getRandomInt(0, 255)]);
+          this.bytecode.push([
+            choice(Object.values(this.OP)),
+            getRandomInt(0, 255),
+          ]);
         }
       } else {
         for (const instr of descriptor.bytecode) {
@@ -455,7 +471,7 @@ class Compiler {
   }
 
   _offsetJump(instr, offset) {
-    if (JUMP_OPS.has(instr[0]) && instr[1] !== undefined) {
+    if (this.JUMP_OPS.has(instr[0]) && instr[1] !== undefined) {
       return [instr[0], instr[1] + offset];
     }
     return instr;
@@ -465,7 +481,7 @@ class Compiler {
   _compileStatement(node: t.Statement, scope, bc) {
     switch (node.type) {
       case "EmptyStatement": {
-        // nothing to emit — bare semicolon is a no-op
+        // nothing to emit -- bare semicolon is a no-op
         break;
       }
 
@@ -477,23 +493,23 @@ class Compiler {
       }
 
       case "FunctionDeclaration": {
-        // Nested function — compile it into a descriptor, then emit
+        // Nested function -- compile it into a descriptor, then emit
         // MAKE_CLOSURE so it's captured as a live closure at runtime.
         // (_compileFunctionDecl pushes/pops _currentCtx internally)
         const desc = this._compileFunctionDecl(node);
-        bc.push([OP.MAKE_CLOSURE, desc._constIdx]);
+        bc.push([this.OP.MAKE_CLOSURE, desc._constIdx]);
         if (scope) {
           const slot = scope.define(node.id.name);
-          bc.push([OP.STORE_LOCAL, slot]);
+          bc.push([this.OP.STORE_LOCAL, slot]);
         } else {
-          bc.push([OP.STORE_GLOBAL, this.constants.intern(node.id.name)]);
+          bc.push([this.OP.STORE_GLOBAL, this.constants.intern(node.id.name)]);
         }
         break;
       }
 
       case "ThrowStatement": {
         this._compileExpr(node.argument, scope, bc);
-        bc.push([OP.THROW]);
+        bc.push([this.OP.THROW]);
         break;
       }
 
@@ -501,15 +517,15 @@ class Compiler {
         if (node.argument) {
           this._compileExpr(node.argument, scope, bc);
         } else {
-          bc.push([OP.LOAD_CONST, this.constants.intern(undefined)]);
+          bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
         }
-        bc.push([OP.RETURN]);
+        bc.push([this.OP.RETURN]);
         break;
       }
 
       case "ExpressionStatement": {
         this._compileExpr(node.expression, scope, bc);
-        bc.push([OP.POP]); // discard return value of statement-level expressions
+        bc.push([this.OP.POP]); // discard return value of statement-level expressions
         break;
       }
 
@@ -519,7 +535,7 @@ class Compiler {
           if (decl.init) {
             this._compileExpr(decl.init, scope, bc);
           } else {
-            bc.push([OP.LOAD_CONST, this.constants.intern(undefined)]);
+            bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
           }
 
           ok(
@@ -530,9 +546,12 @@ class Compiler {
           // Store: local slot if inside a function, global name otherwise
           if (scope) {
             const slot = scope.define(decl.id.name);
-            bc.push([OP.STORE_LOCAL, slot]);
+            bc.push([this.OP.STORE_LOCAL, slot]);
           } else {
-            bc.push([OP.STORE_GLOBAL, this.constants.intern(decl.id.name)]);
+            bc.push([
+              this.OP.STORE_GLOBAL,
+              this.constants.intern(decl.id.name),
+            ]);
           }
         }
         break;
@@ -542,7 +561,7 @@ class Compiler {
         // 1. Compile the test expression -> leaves a value on the stack
         this._compileExpr(node.test, scope, bc);
         // 2. Emit JUMP_IF_FALSE with placeholder target
-        bc.push([OP.JUMP_IF_FALSE, 0]);
+        bc.push([this.OP.JUMP_IF_FALSE, 0]);
         const jumpIfFalseIdx = bc.length - 1;
         // 3. Compile the consequent block (the "then" branch)
         // Consequent may be a BlockStatement or a bare statement (no braces)
@@ -555,7 +574,7 @@ class Compiler {
         }
         if (node.alternate) {
           // 4a. Consequent needs to jump OVER the else block when done
-          bc.push([OP.JUMP, 0]);
+          bc.push([this.OP.JUMP, 0]);
           const jumpOverElseIdx = bc.length - 1;
           // Patch JUMP_IF_FALSE to land here (start of else)
           bc[jumpIfFalseIdx][1] = bc.length;
@@ -563,14 +582,14 @@ class Compiler {
           const altBody =
             node.alternate.type === "BlockStatement"
               ? node.alternate.body
-              : [node.alternate]; // handles `else if` — it's just a nested IfStatement
+              : [node.alternate]; // handles `else if` -- it's just a nested IfStatement
           for (const stmt of altBody) {
             this._compileStatement(stmt, scope, bc);
           }
           // Patch the JUMP to land after the else block
           bc[jumpOverElseIdx][1] = bc.length;
         } else {
-          // 4b. No else — patch JUMP_IF_FALSE to land right after the then block
+          // 4b. No else -- patch JUMP_IF_FALSE to land right after the then block
           bc[jumpIfFalseIdx][1] = bc.length;
         }
         break;
@@ -589,7 +608,7 @@ class Compiler {
 
         const loopTop = bc.length;
         this._compileExpr(node.test, scope, bc);
-        bc.push([OP.JUMP_IF_FALSE, 0]);
+        bc.push([this.OP.JUMP_IF_FALSE, 0]);
         const exitJumpIdx = bc.length - 1;
 
         const whileBody =
@@ -600,7 +619,7 @@ class Compiler {
 
         // continue -> re-evaluate the test
         for (const idx of loopCtxW.continueJumps) bc[idx][1] = loopTop;
-        bc.push([OP.JUMP, loopTop]);
+        bc.push([this.OP.JUMP, loopTop]);
 
         const exitTargetW = bc.length;
         bc[exitJumpIdx][1] = exitTargetW;
@@ -635,9 +654,9 @@ class Compiler {
           bc[idx][1] = continueTargetDW;
 
         this._compileExpr(node.test, scope, bc);
-        bc.push([OP.JUMP_IF_FALSE, 0]);
+        bc.push([this.OP.JUMP_IF_FALSE, 0]);
         const exitJumpIdxDW = bc.length - 1;
-        bc.push([OP.JUMP, loopTopDW]);
+        bc.push([this.OP.JUMP, loopTopDW]);
 
         const exitTargetDW = bc.length;
         bc[exitJumpIdxDW][1] = exitTargetDW;
@@ -663,14 +682,14 @@ class Compiler {
             this._compileStatement(node.init, scope, bc);
           } else {
             this._compileExpr(node.init, scope, bc);
-            bc.push([OP.POP]);
+            bc.push([this.OP.POP]);
           }
         }
 
         const loopTopF = bc.length;
         if (node.test) {
           this._compileExpr(node.test, scope, bc);
-          bc.push([OP.JUMP_IF_FALSE, 0]);
+          bc.push([this.OP.JUMP_IF_FALSE, 0]);
         }
         const exitJumpIdxF = node.test ? bc.length - 1 : null;
 
@@ -686,13 +705,13 @@ class Compiler {
           for (const idx of loopCtxF.continueJumps)
             bc[idx][1] = continueTargetF;
           this._compileExpr(node.update, scope, bc);
-          bc.push([OP.POP]);
+          bc.push([this.OP.POP]);
         } else {
-          // No update — continue goes straight to the test
+          // No update -- continue goes straight to the test
           for (const idx of loopCtxF.continueJumps) bc[idx][1] = loopTopF;
         }
 
-        bc.push([OP.JUMP, loopTopF]);
+        bc.push([this.OP.JUMP, loopTopF]);
 
         const exitTargetF = bc.length;
         if (exitJumpIdxF !== null) bc[exitJumpIdxF][1] = exitTargetF;
@@ -703,7 +722,7 @@ class Compiler {
       }
 
       case "BreakStatement": {
-        bc.push([OP.JUMP, 0]);
+        bc.push([this.OP.JUMP, 0]);
         const _bJumpIdx = bc.length - 1;
         if (node.label) {
           const _bLabelName = node.label.name;
@@ -728,7 +747,7 @@ class Compiler {
       }
 
       case "ContinueStatement": {
-        bc.push([OP.JUMP, 0]);
+        bc.push([this.OP.JUMP, 0]);
         const _cJumpIdx = bc.length - 1;
         if (node.label) {
           const _cLabelName = node.label.name;
@@ -786,14 +805,14 @@ class Compiler {
           if (cas.test === null) continue; // Skip default in dispatch
 
           // Check this case: DUP; LOAD_CONST; EQ; JUMP_IF_FALSE
-          bc.push([OP.DUP]);
+          bc.push([this.OP.DUP]);
           this._compileExpr(cas.test, scope, bc);
-          bc.push([OP.EQ]);
-          bc.push([OP.JUMP_IF_FALSE, 0]); // Jump to next check (patched later)
+          bc.push([this.OP.EQ]);
+          bc.push([this.OP.JUMP_IF_FALSE, 0]); // Jump to next check (patched later)
           const skipIdx = bc.length - 1;
 
           // If matched, jump to this case's body
-          bc.push([OP.JUMP, 0]); // Jump to body (patched later)
+          bc.push([this.OP.JUMP, 0]); // Jump to body (patched later)
           bodyJumps.push({ cas, jumpIdx: bc.length - 1 });
 
           // Patch the JUMP_IF_FALSE to the next check
@@ -801,7 +820,7 @@ class Compiler {
         }
 
         // No match found: jump to default (or exit if no default)
-        bc.push([OP.JUMP, 0]);
+        bc.push([this.OP.JUMP, 0]);
         const noMatchJumpIdx = bc.length - 1;
 
         // Body section: compile all case bodies in source order
@@ -827,7 +846,7 @@ class Compiler {
         }
 
         // Exit: pop the discriminant and patch break jumps
-        bc.push([OP.POP]);
+        bc.push([this.OP.POP]);
         for (const idx of switchCtx.breakJumps) {
           bc[idx][1] = bc.length - 1; // Point to the POP instruction
         }
@@ -852,7 +871,7 @@ class Compiler {
           this._compileStatement(_lBody, scope, bc);
           this._pendingLabel = null; // safety clear if handler didn't consume it
         } else {
-          // Non-loop labeled statement (e.g. labeled block) — only break is valid
+          // Non-loop labeled statement (e.g. labeled block) -- only break is valid
           this._loopStack.push({
             type: "block",
             label: _lName,
@@ -874,7 +893,7 @@ class Compiler {
         // Evaluate the object expression -> on stack
         this._compileExpr(node.right, scope, bc);
         // FOR_IN_SETUP: pops obj, pushes iterator {keys, i}
-        bc.push([OP.FOR_IN_SETUP]);
+        bc.push([this.OP.FOR_IN_SETUP]);
 
         // Store iterator in a hidden slot so break/continue need no cleanup
         let emitLoadIter: () => void;
@@ -882,15 +901,15 @@ class Compiler {
         if (scope) {
           // Reserve a hidden local slot (no name mapping needed)
           const iterSlot = scope._next++;
-          emitLoadIter = () => bc.push([OP.LOAD_LOCAL, iterSlot]);
-          emitStoreIter = () => bc.push([OP.STORE_LOCAL, iterSlot]);
+          emitLoadIter = () => bc.push([this.OP.LOAD_LOCAL, iterSlot]);
+          emitStoreIter = () => bc.push([this.OP.STORE_LOCAL, iterSlot]);
         } else {
-          // Top level — use a synthetic global that won't collide with user code
+          // Top level -- use a synthetic global that won't collide with user code
           const iterNameIdx = this.constants.intern(
             "__fi" + this._forInCount++,
           );
-          emitLoadIter = () => bc.push([OP.LOAD_GLOBAL, iterNameIdx]);
-          emitStoreIter = () => bc.push([OP.STORE_GLOBAL, iterNameIdx]);
+          emitLoadIter = () => bc.push([this.OP.LOAD_GLOBAL, iterNameIdx]);
+          emitStoreIter = () => bc.push([this.OP.STORE_GLOBAL, iterNameIdx]);
         }
         emitStoreIter();
 
@@ -906,7 +925,7 @@ class Compiler {
 
         // Load iterator, attempt to get next key
         emitLoadIter();
-        bc.push([OP.FOR_IN_NEXT, 0]); // exit target patched below
+        bc.push([this.OP.FOR_IN_NEXT, 0]); // exit target patched below
         const forInNextPatch = bc.length - 1;
 
         // Assign the key (now on top of stack) to the loop variable
@@ -919,18 +938,21 @@ class Compiler {
           const name = identifier.name;
           if (scope) {
             const slot = scope.define(name);
-            bc.push([OP.STORE_LOCAL, slot]);
+            bc.push([this.OP.STORE_LOCAL, slot]);
           } else {
-            bc.push([OP.STORE_GLOBAL, this.constants.intern(name)]);
+            bc.push([this.OP.STORE_GLOBAL, this.constants.intern(name)]);
           }
         } else if (node.left.type === "Identifier") {
           const res = this._resolve(node.left.name, this._currentCtx);
           if (res.kind === "local") {
-            bc.push([OP.STORE_LOCAL, res.slot]);
+            bc.push([this.OP.STORE_LOCAL, res.slot]);
           } else if (res.kind === "upvalue") {
-            bc.push([OP.STORE_UPVALUE, res.index]);
+            bc.push([this.OP.STORE_UPVALUE, res.index]);
           } else {
-            bc.push([OP.STORE_GLOBAL, this.constants.intern(node.left.name)]);
+            bc.push([
+              this.OP.STORE_GLOBAL,
+              this.constants.intern(node.left.name),
+            ]);
           }
         } else {
           const src = generate(node.left).code;
@@ -948,7 +970,7 @@ class Compiler {
 
         // continue -> re-load iterator and check next key
         for (const idx of loopCtxFI.continueJumps) bc[idx][1] = loopTopFI;
-        bc.push([OP.JUMP, loopTopFI]);
+        bc.push([this.OP.JUMP, loopTopFI]);
 
         const exitTargetFI = bc.length;
         bc[forInNextPatch][1] = exitTargetFI;
@@ -972,17 +994,17 @@ class Compiler {
     switch (node.type) {
       case "NumericLiteral":
       case "StringLiteral": {
-        bc.push([OP.LOAD_CONST, this.constants.intern(node.value)]);
+        bc.push([this.OP.LOAD_CONST, this.constants.intern(node.value)]);
         break;
       }
 
       case "BooleanLiteral": {
-        bc.push([OP.LOAD_CONST, this.constants.intern(node.value)]);
+        bc.push([this.OP.LOAD_CONST, this.constants.intern(node.value)]);
         break;
       }
 
       case "NullLiteral": {
-        bc.push([OP.LOAD_CONST, this.constants.intern(null)]);
+        bc.push([this.OP.LOAD_CONST, this.constants.intern(null)]);
         break;
       }
 
@@ -990,25 +1012,25 @@ class Compiler {
         // scope=null means we're at the top-level -> always global
         const res = this._resolve(node.name, this._currentCtx);
         if (res.kind === "local") {
-          bc.push([OP.LOAD_LOCAL, res.slot]);
+          bc.push([this.OP.LOAD_LOCAL, res.slot]);
         } else if (res.kind === "upvalue") {
-          bc.push([OP.LOAD_UPVALUE, res.index]);
+          bc.push([this.OP.LOAD_UPVALUE, res.index]);
         } else {
-          bc.push([OP.LOAD_GLOBAL, this.constants.intern(node.name)]);
+          bc.push([this.OP.LOAD_GLOBAL, this.constants.intern(node.name)]);
         }
         break;
       }
 
       case "ThisExpression": {
-        bc.push([OP.LOAD_THIS]);
+        bc.push([this.OP.LOAD_THIS]);
         break;
       }
 
       case "NewExpression": {
-        // Push callee, then args — identical layout to CALL but uses NEW opcode
+        // Push callee, then args -- identical layout to CALL but uses NEW opcode
         this._compileExpr(node.callee, scope, bc);
         for (const arg of node.arguments) this._compileExpr(arg, scope, bc);
-        bc.push([OP.NEW, node.arguments.length]);
+        bc.push([this.OP.NEW, node.arguments.length]);
         break;
       }
 
@@ -1017,9 +1039,9 @@ class Compiler {
         // Matches CPython's BINARY_OP / POP_TOP pattern for comma expressions.
         for (let i = 0; i < node.expressions.length - 1; i++) {
           this._compileExpr(node.expressions[i], scope, bc);
-          bc.push([OP.POP]); // discard intermediate result
+          bc.push([this.OP.POP]); // discard intermediate result
         }
-        // Last expression — its value is the result of the whole sequence
+        // Last expression -- its value is the result of the whole sequence
         this._compileExpr(
           node.expressions[node.expressions.length - 1],
           scope,
@@ -1033,12 +1055,12 @@ class Compiler {
         // Identical to IfStatement codegen, just lives in expression context.
         this._compileExpr(node.test, scope, bc);
 
-        bc.push([OP.JUMP_IF_FALSE, 0]);
+        bc.push([this.OP.JUMP_IF_FALSE, 0]);
         const jumpToElse = bc.length - 1;
 
         this._compileExpr(node.consequent, scope, bc);
 
-        bc.push([OP.JUMP, 0]);
+        bc.push([this.OP.JUMP, 0]);
         const jumpToEnd = bc.length - 1;
 
         bc[jumpToElse][1] = bc.length; // patch: false -> alternate
@@ -1058,14 +1080,14 @@ class Compiler {
         this._compileExpr(node.left, scope, bc);
 
         if (node.operator === "||") {
-          // Short-circuit if LHS is TRUTHY — keep it, skip RHS
-          bc.push([OP.JUMP_IF_TRUE_OR_POP, 0]);
+          // Short-circuit if LHS is TRUTHY -- keep it, skip RHS
+          bc.push([this.OP.JUMP_IF_TRUE_OR_POP, 0]);
           const jumpIdx = bc.length - 1;
           this._compileExpr(node.right, scope, bc);
           bc[jumpIdx][1] = bc.length; // patch target to after RHS
         } else if (node.operator === "&&") {
-          // Short-circuit if LHS is FALSY — keep it, skip RHS
-          bc.push([OP.JUMP_IF_FALSE_OR_POP, 0]);
+          // Short-circuit if LHS is FALSY -- keep it, skip RHS
+          bc.push([this.OP.JUMP_IF_FALSE_OR_POP, 0]);
           const jumpIdx = bc.length - 1;
           this._compileExpr(node.right, scope, bc);
           bc[jumpIdx][1] = bc.length; // patch target to after RHS
@@ -1079,30 +1101,30 @@ class Compiler {
         this._compileExpr(node.left, scope, bc);
         this._compileExpr(node.right, scope, bc);
         const arithOp = {
-          "+": OP.ADD,
-          "-": OP.SUB,
-          "*": OP.MUL,
-          "/": OP.DIV,
-          "%": OP.MOD,
-          "&": OP.BAND,
-          "|": OP.BOR,
-          "^": OP.BXOR,
-          "<<": OP.SHL,
-          ">>": OP.SHR,
-          ">>>": OP.USHR,
+          "+": this.OP.ADD,
+          "-": this.OP.SUB,
+          "*": this.OP.MUL,
+          "/": this.OP.DIV,
+          "%": this.OP.MOD,
+          "&": this.OP.BAND,
+          "|": this.OP.BOR,
+          "^": this.OP.BXOR,
+          "<<": this.OP.SHL,
+          ">>": this.OP.SHR,
+          ">>>": this.OP.USHR,
         }[node.operator];
 
         const cmpOp = {
-          "<": OP.LT,
-          ">": OP.GT,
-          "===": OP.EQ,
-          "==": OP.LOOSE_EQ,
-          "<=": OP.LTE,
-          ">=": OP.GTE,
-          "!==": OP.NEQ,
-          "!=": OP.LOOSE_NEQ,
-          in: OP.IN, // ← add
-          instanceof: OP.INSTANCEOF, // ← add
+          "<": this.OP.LT,
+          ">": this.OP.GT,
+          "===": this.OP.EQ,
+          "==": this.OP.LOOSE_EQ,
+          "<=": this.OP.LTE,
+          ">=": this.OP.GTE,
+          "!==": this.OP.NEQ,
+          "!=": this.OP.LOOSE_NEQ,
+          in: this.OP.IN, // ← add
+          instanceof: this.OP.INSTANCEOF, // ← add
         }[node.operator];
         const resolvedOp = arithOp ?? cmpOp;
         if (resolvedOp === undefined)
@@ -1114,34 +1136,34 @@ class Compiler {
 
       case "UpdateExpression": {
         const res = this._resolve(node.argument.name, this._currentCtx);
-        const bumpOp = node.operator === "++" ? OP.ADD : OP.SUB;
+        const bumpOp = node.operator === "++" ? this.OP.ADD : this.OP.SUB;
         const one = this.constants.intern(1);
 
         // Helper closures: emit load / store for whichever resolution kind we have
         const emitLoad = () => {
-          if (res.kind === "local") bc.push([OP.LOAD_LOCAL, res.slot]);
+          if (res.kind === "local") bc.push([this.OP.LOAD_LOCAL, res.slot]);
           else if (res.kind === "upvalue")
-            bc.push([OP.LOAD_UPVALUE, res.index]);
+            bc.push([this.OP.LOAD_UPVALUE, res.index]);
           else
             bc.push([
-              OP.LOAD_GLOBAL,
+              this.OP.LOAD_GLOBAL,
               this.constants.intern(node.argument.name),
             ]);
         };
         const emitStore = () => {
-          if (res.kind === "local") bc.push([OP.STORE_LOCAL, res.slot]);
+          if (res.kind === "local") bc.push([this.OP.STORE_LOCAL, res.slot]);
           else if (res.kind === "upvalue")
-            bc.push([OP.STORE_UPVALUE, res.index]);
+            bc.push([this.OP.STORE_UPVALUE, res.index]);
           else
             bc.push([
-              OP.STORE_GLOBAL,
+              this.OP.STORE_GLOBAL,
               this.constants.intern(node.argument.name),
             ]);
         };
 
         emitLoad();
-        if (!node.prefix) bc.push([OP.DUP]); // post: save old value before mutating
-        bc.push([OP.LOAD_CONST, one]);
+        if (!node.prefix) bc.push([this.OP.DUP]); // post: save old value before mutating
+        bc.push([this.OP.LOAD_CONST, one]);
         bc.push([bumpOp]);
         emitStore();
         if (node.prefix) emitLoad(); // pre: reload new value as result
@@ -1151,17 +1173,17 @@ class Compiler {
 
       case "AssignmentExpression": {
         const compoundOp = {
-          "+=": OP.ADD,
-          "-=": OP.SUB,
-          "*=": OP.MUL,
-          "/=": OP.DIV,
-          "%=": OP.MOD,
-          "&=": OP.BAND,
-          "|=": OP.BOR,
-          "^=": OP.BXOR,
-          "<<=": OP.SHL,
-          ">>=": OP.SHR,
-          ">>>=": OP.USHR,
+          "+=": this.OP.ADD,
+          "-=": this.OP.SUB,
+          "*=": this.OP.MUL,
+          "/=": this.OP.DIV,
+          "%=": this.OP.MOD,
+          "&=": this.OP.BAND,
+          "|=": this.OP.BOR,
+          "^=": this.OP.BXOR,
+          "<<=": this.OP.SHL,
+          ">>=": this.OP.SHR,
+          ">>>=": this.OP.USHR,
         }[node.operator];
 
         const isCompound = compoundOp !== undefined;
@@ -1178,7 +1200,7 @@ class Compiler {
             this._compileExpr(node.left.property, scope, bc); // push key (runtime)
           } else {
             bc.push([
-              OP.LOAD_CONST,
+              this.OP.LOAD_CONST,
               this.constants.intern(node.left.property.name),
             ]);
           }
@@ -1194,18 +1216,18 @@ class Compiler {
               this._compileExpr(node.left.property, scope, bc);
             } else {
               bc.push([
-                OP.LOAD_CONST,
+                this.OP.LOAD_CONST,
                 this.constants.intern(node.left.property.name),
               ]);
             }
-            bc.push([OP.GET_PROP_COMPUTED]); // [..., obj, key, currentVal]
+            bc.push([this.OP.GET_PROP_COMPUTED]); // [..., obj, key, currentVal]
             this._compileExpr(node.right, scope, bc); // [..., obj, key, currentVal, rhs]
             bc.push([compoundOp]); // [..., obj, key, newVal]
           } else {
             this._compileExpr(node.right, scope, bc); // [..., obj, key, val]
           }
 
-          bc.push([OP.SET_PROP]); // obj[key] = val, leaves val on stack
+          bc.push([this.OP.SET_PROP]); // obj[key] = val, leaves val on stack
           break;
         }
 
@@ -1215,11 +1237,14 @@ class Compiler {
         if (isCompound) {
           // Load the current value of the target first
           if (res.kind === "local") {
-            bc.push([OP.LOAD_LOCAL, res.slot]);
+            bc.push([this.OP.LOAD_LOCAL, res.slot]);
           } else if (res.kind === "upvalue") {
-            bc.push([OP.LOAD_UPVALUE, res.index]);
+            bc.push([this.OP.LOAD_UPVALUE, res.index]);
           } else {
-            bc.push([OP.LOAD_GLOBAL, this.constants.intern(node.left.name)]);
+            bc.push([
+              this.OP.LOAD_GLOBAL,
+              this.constants.intern(node.left.name),
+            ]);
           }
         }
 
@@ -1231,15 +1256,15 @@ class Compiler {
 
         // Store & leave value on stack (assignment is an expression)
         if (res.kind === "local") {
-          bc.push([OP.STORE_LOCAL, res.slot]);
-          bc.push([OP.LOAD_LOCAL, res.slot]);
+          bc.push([this.OP.STORE_LOCAL, res.slot]);
+          bc.push([this.OP.LOAD_LOCAL, res.slot]);
         } else if (res.kind === "upvalue") {
-          bc.push([OP.STORE_UPVALUE, res.index]);
-          bc.push([OP.LOAD_UPVALUE, res.index]);
+          bc.push([this.OP.STORE_UPVALUE, res.index]);
+          bc.push([this.OP.LOAD_UPVALUE, res.index]);
         } else {
           const nameIdx = this.constants.intern(node.left.name);
-          bc.push([OP.STORE_GLOBAL, nameIdx]);
-          bc.push([OP.LOAD_GLOBAL, nameIdx]);
+          bc.push([this.OP.STORE_GLOBAL, nameIdx]);
+          bc.push([this.OP.LOAD_GLOBAL, nameIdx]);
         }
         break;
       }
@@ -1251,15 +1276,15 @@ class Compiler {
           this._compileExpr(node.callee.object, scope, bc);
           const prop = node.callee.property.name;
           const propIdx = this.constants.intern(prop);
-          bc.push([OP.LOAD_CONST, propIdx]);
-          bc.push([OP.GET_PROP]);
+          bc.push([this.OP.LOAD_CONST, propIdx]);
+          bc.push([this.OP.GET_PROP]);
           for (const arg of node.arguments) this._compileExpr(arg, scope, bc);
-          bc.push([OP.CALL_METHOD, node.arguments.length]);
+          bc.push([this.OP.CALL_METHOD, node.arguments.length]);
         } else {
           // ── Plain call: add(5, 10)
           this._compileExpr(node.callee, scope, bc);
           for (const arg of node.arguments) this._compileExpr(arg, scope, bc);
-          bc.push([OP.CALL, node.arguments.length]);
+          bc.push([this.OP.CALL, node.arguments.length]);
         }
         break;
       }
@@ -1271,15 +1296,18 @@ class Compiler {
         if (node.operator === "typeof" && node.argument.type === "Identifier") {
           const res = this._resolve(node.argument.name, this._currentCtx);
           if (res.kind === "global") {
-            // Potentially undeclared — let VM guard it
-            bc.push([OP.LOAD_CONST, this.constants.intern(node.argument.name)]);
-            bc.push([OP.TYPEOF_SAFE]);
+            // Potentially undeclared -- let VM guard it
+            bc.push([
+              this.OP.LOAD_CONST,
+              this.constants.intern(node.argument.name),
+            ]);
+            bc.push([this.OP.TYPEOF_SAFE]);
             break;
           }
-          // Known local or upvalue — safe to load first, then typeof
+          // Known local or upvalue -- safe to load first, then typeof
         }
 
-        // Special case: delete — argument must NOT be pre-evaluated.
+        // Special case: delete -- argument must NOT be pre-evaluated.
         // The generic path below compiles the argument first, which would leave
         // a stale value on the stack before the delete result, corrupting it.
         if (node.operator === "delete") {
@@ -1290,14 +1318,14 @@ class Compiler {
               this._compileExpr(arg.property, scope, bc);
             } else {
               bc.push([
-                OP.LOAD_CONST,
+                this.OP.LOAD_CONST,
                 this.constants.intern(arg.property.name),
               ]);
             }
-            bc.push([OP.DELETE_PROP]);
+            bc.push([this.OP.DELETE_PROP]);
           } else {
-            // delete x, delete 0, etc. — always true in non-strict, just push true
-            bc.push([OP.LOAD_CONST, this.constants.intern(true)]);
+            // delete x, delete 0, etc. -- always true in non-strict, just push true
+            bc.push([this.OP.LOAD_CONST, this.constants.intern(true)]);
           }
           break;
         }
@@ -1306,22 +1334,22 @@ class Compiler {
         this._compileExpr(node.argument, scope, bc);
         switch (node.operator) {
           case "-":
-            bc.push([OP.UNARY_NEG]);
+            bc.push([this.OP.UNARY_NEG]);
             break;
           case "+":
-            bc.push([OP.UNARY_POS]);
+            bc.push([this.OP.UNARY_POS]);
             break;
           case "!":
-            bc.push([OP.UNARY_NOT]);
+            bc.push([this.OP.UNARY_NOT]);
             break;
           case "~":
-            bc.push([OP.UNARY_BITNOT]);
+            bc.push([this.OP.UNARY_BITNOT]);
             break;
           case "typeof":
-            bc.push([OP.TYPEOF]);
+            bc.push([this.OP.TYPEOF]);
             break;
           case "void":
-            bc.push([OP.VOID]);
+            bc.push([this.OP.VOID]);
             break;
 
           default:
@@ -1332,37 +1360,40 @@ class Compiler {
 
       case "RegExpLiteral": {
         // Emit: new RegExp(pattern, flags)
-        // Fresh object per evaluation — correct for stateful g/y flags.
-        bc.push([OP.LOAD_GLOBAL, this.constants.intern("RegExp")]);
-        bc.push([OP.LOAD_CONST, this.constants.intern(node.pattern)]);
-        bc.push([OP.LOAD_CONST, this.constants.intern(node.flags)]);
-        bc.push([OP.NEW, 2]);
+        // Fresh object per evaluation -- correct for stateful g/y flags.
+        bc.push([this.OP.LOAD_GLOBAL, this.constants.intern("RegExp")]);
+        bc.push([this.OP.LOAD_CONST, this.constants.intern(node.pattern)]);
+        bc.push([this.OP.LOAD_CONST, this.constants.intern(node.flags)]);
+        bc.push([this.OP.NEW, 2]);
         break;
       }
 
       case "FunctionExpression": {
         // Compile into a descriptor exactly like a declaration,
-        // but leave the resulting closure ON THE STACK — no store.
+        // but leave the resulting closure ON THE STACK -- no store.
         // The surrounding expression (assignment, call arg, return) consumes it.
         const desc = this._compileFunctionDecl(node);
-        bc.push([OP.MAKE_CLOSURE, desc._constIdx]);
+        bc.push([this.OP.MAKE_CLOSURE, desc._constIdx]);
         break;
       }
 
       case "MemberExpression": {
         this._compileExpr(node.object, scope, bc);
         if (node.computed) {
-          // nums[i] — key is runtime value
+          // nums[i] -- key is runtime value
           this._compileExpr(node.property, scope, bc);
         } else {
-          // point.x — push key as string, same opcode handles both
-          bc.push([OP.LOAD_CONST, this.constants.intern(node.property.name)]);
+          // point.x -- push key as string, same opcode handles both
+          bc.push([
+            this.OP.LOAD_CONST,
+            this.constants.intern(node.property.name),
+          ]);
         }
 
-        // GET_PROP_COMPUTED pops the object — correct for value access.
+        // GET_PROP_COMPUTED pops the object -- correct for value access.
         // GET_PROP (peek) is only used in CallExpression's method call path
         // where the receiver must survive on the stack for CALL_METHOD.
-        bc.push([OP.GET_PROP_COMPUTED]);
+        bc.push([this.OP.GET_PROP_COMPUTED]);
         break;
       }
 
@@ -1372,12 +1403,12 @@ class Compiler {
         for (const el of node.elements) {
           if (el === null) {
             // hole: e.g. [1,,3]
-            bc.push([OP.LOAD_CONST, this.constants.intern(undefined)]);
+            bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
           } else {
             this._compileExpr(el, scope, bc);
           }
         }
-        bc.push([OP.BUILD_ARRAY, node.elements.length]);
+        bc.push([this.OP.BUILD_ARRAY, node.elements.length]);
         break;
       }
       case "ObjectExpression": {
@@ -1387,7 +1418,7 @@ class Compiler {
           if (prop.type === "SpreadElement") {
             throw new Error("Object spread not supported");
           }
-          // Key — identifier shorthand (`{x:1}`) or string/number literal
+          // Key -- identifier shorthand (`{x:1}`) or string/number literal
           const key = prop.key;
           let keyStr;
           if (key.type === "Identifier") {
@@ -1400,11 +1431,11 @@ class Compiler {
           } else {
             throw new Error(`Unsupported object key type: ${key.type}`);
           }
-          bc.push([OP.LOAD_CONST, this.constants.intern(keyStr)]);
-          // Value — any expression, including FunctionExpression
+          bc.push([this.OP.LOAD_CONST, this.constants.intern(keyStr)]);
+          // Value -- any expression, including FunctionExpression
           this._compileExpr(prop.value, scope, bc);
         }
-        bc.push([OP.BUILD_OBJECT, node.properties.length]);
+        bc.push([this.OP.BUILD_OBJECT, node.properties.length]);
         break;
       }
 
@@ -1423,6 +1454,22 @@ class Serializer {
 
   constructor(compiler: Compiler) {
     this.compiler = compiler;
+  }
+
+  get options() {
+    return this.compiler.options;
+  }
+
+  get OP() {
+    return this.compiler.OP;
+  }
+
+  get OP_NAME() {
+    return this.compiler.OP_NAME;
+  }
+
+  get JUMP_OPS() {
+    return this.compiler.JUMP_OPS;
   }
 
   get constants() {
@@ -1448,14 +1495,14 @@ class Serializer {
     const constants = this.constants;
 
     const [op, operand] = instr;
-    const name = OP_NAME[op] || `OP_${op}`;
+    const name = this.OP_NAME[op] || `OP_${op}`;
     let comment = name;
 
     // Annotate operand with its meaning
     if (operand !== undefined) {
       switch (op) {
-        case OP.LOAD_CONST:
-        case OP.MAKE_CLOSURE: {
+        case this.OP.LOAD_CONST:
+        case this.OP.MAKE_CLOSURE: {
           const val = constants[operand];
           if (val && typeof val === "object" && val.name) {
             comment += `  FN[${val._fnIdx}] -> fn:${val.name}`;
@@ -1464,31 +1511,31 @@ class Serializer {
           }
           break;
         }
-        case OP.LOAD_LOCAL:
-        case OP.STORE_LOCAL:
+        case this.OP.LOAD_LOCAL:
+        case this.OP.STORE_LOCAL:
           comment += `  slot[${operand}]`;
           break;
-        case OP.LOAD_UPVALUE:
-        case OP.STORE_UPVALUE:
+        case this.OP.LOAD_UPVALUE:
+        case this.OP.STORE_UPVALUE:
           comment += `  upvalue[${operand}]`;
           break;
-        case OP.LOAD_GLOBAL:
-        case OP.STORE_GLOBAL:
+        case this.OP.LOAD_GLOBAL:
+        case this.OP.STORE_GLOBAL:
           comment += `  "${constants[operand]}"`;
           break;
-        case OP.CALL:
-        case OP.CALL_METHOD:
+        case this.OP.CALL:
+        case this.OP.CALL_METHOD:
           comment += `  (${operand} args)`;
           break;
 
-        case OP.BUILD_ARRAY:
+        case this.OP.BUILD_ARRAY:
           comment += `  (${operand} elements)`;
           break;
-        case OP.BUILD_OBJECT:
+        case this.OP.BUILD_OBJECT:
           comment += `  (${operand} pairs)`;
           break;
 
-        case OP.NEW:
+        case this.OP.NEW:
           comment += `  (${operand} args)`;
           break;
 
@@ -1500,7 +1547,7 @@ class Serializer {
     // Pack a [op, operand?] instruction pair into a single 32-bit word.
     // Shared between the Serializer and the obfuscation path in _compileMain.
 
-    if (!PACK) {
+    if (!this.options.encodeBytecode) {
       const instrText =
         operand !== undefined ? `[${op}, ${operand}]` : `[${op}]`;
 
@@ -1530,7 +1577,7 @@ class Serializer {
   // Serialize one fn descriptor into its FN[n] block
   _serializeFn(desc) {
     const lines = [
-      `  {                       // FN[${desc._fnIdx}] — ${desc.name}`,
+      `  {                       // FN[${desc._fnIdx}] -- ${desc.name}`,
       `    paramCount: ${desc.paramCount},`,
       `    localCount: ${desc.localCount},`,
       `    upvalueDescriptors: ${JSON5.stringify(desc.upvalueDescriptors)},`,
@@ -1551,13 +1598,13 @@ class Serializer {
   }
 
   _serializeBytecode(bytecode) {
-    if (!PACK) {
+    if (!this.options.encodeBytecode) {
       return bytecode.map((instr) => this._serializeInstr(instr).value);
     }
 
     let words = [];
 
-    // ── BYTECODE
+    // BYTECODE
     for (const instr of bytecode) {
       words.push(this._serializeInstr(instr).value);
     }
@@ -1589,7 +1636,7 @@ class Serializer {
     // ── CONSTANTS
     sections.push(this._serializeConstants());
 
-    if (PACK) {
+    if (this.options.encodeBytecode) {
       sections.push(`var BYTECODE = "${this._serializeBytecode(bytecode)}";`);
     } else {
       sections.push(
@@ -1597,34 +1644,24 @@ class Serializer {
       );
     }
 
-    // ── MAIN_START_PC
+    // MAIN_START_PC
     sections.push(`var MAIN_START_PC = ${mainStartPc};`);
+    sections.push(`var ENCODE_BYTECODE = ${!!this.options.encodeBytecode};`);
+    sections.push(`var TIMING_CHECKS = ${!!this.options.timingChecks};`);
+    // Opcodes
+    sections.push(`var OP = ${JSON5.stringify(this.OP)};`);
 
-    sections.push(`var PACK = ${PACK};`);
-
-    // ── VM runtime
+    // VM runtime
     sections.push(VM_RUNTIME);
 
     return sections.join("\n\n");
   }
 }
 
-// VM Runtime (emitted verbatim into the output file)
-const VM_RUNTIME = `
-// ── Opcodes 
-var OP = ${JSON5.stringify(OP)};
-${stripTypeScriptTypes(
-  readFileSync(join(import.meta.dirname, "./runtime.ts"), "utf-8").split(
-    "@START",
-  )[1],
-)}
-`;
-
-interface Options {
-  sourceMap?: boolean;
-}
-
-export function compileAndSerialize(sourceCode: string, options: Options = {}) {
+export async function compileAndSerialize(
+  sourceCode: string,
+  options: Options,
+) {
   const compiler = new Compiler(options);
   const result = compiler.compile(sourceCode);
   const output = compiler.serializer.serialize(
@@ -1632,7 +1669,7 @@ export function compileAndSerialize(sourceCode: string, options: Options = {}) {
     result.mainStartPc,
   );
 
-  const finalOutput = obfuscateRuntime(output);
+  const finalOutput = await obfuscateRuntime(output, options);
 
   return {
     code: finalOutput,

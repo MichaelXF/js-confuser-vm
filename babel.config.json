@@ -1,0 +1,24 @@
+{
+  "presets": [
+    [
+      "@babel/preset-env",
+      {
+        "targets": {
+          "node": "18"
+        },
+        "modules": false
+      }
+    ],
+    [
+      "@babel/preset-typescript"
+    ]
+  ],
+  "plugins": [
+    [
+      "replace-import-extension",
+      {
+        "extMapping": { ".ts": ".js" }
+      }
+    ]
+  ]
+}

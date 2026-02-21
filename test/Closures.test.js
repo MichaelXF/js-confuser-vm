@@ -1,8 +1,8 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
-test("Variant #1: Basic closure captures a single variable", () => {
-  const { code } = virtualize(`
+test("Variant #1: Basic closure captures a single variable", async () => {
+  const { code } = await obfuscate(`
     function makeGreeter(greeting) {
       return function(name) {
         return greeting + ", " + name + "!";
@@ -15,8 +15,8 @@ test("Variant #1: Basic closure captures a single variable", () => {
   expect(evalCode(code)).toBe("Hello, World!");
 });
 
-test("Variant #2: Closure captures multiple variables", () => {
-  const { code } = virtualize(`
+test("Variant #2: Closure captures multiple variables", async () => {
+  const { code } = await obfuscate(`
     function makeRange(min, max) {
       return function(x) {
         return x >= min && x <= max;
@@ -29,8 +29,8 @@ test("Variant #2: Closure captures multiple variables", () => {
   expect(evalCode(code)).toEqual([true, false, true]);
 });
 
-test("Variant #3: Closure captures from outer function (counter)", () => {
-  const { code } = virtualize(`
+test("Variant #3: Closure captures from outer function (counter)", async () => {
+  const { code } = await obfuscate(`
     function makeCounter() {
       var count = 0;
       return function() {
@@ -47,8 +47,8 @@ test("Variant #3: Closure captures from outer function (counter)", () => {
   expect(evalCode(code)).toBe(3);
 });
 
-test("Variant #4: Closure modifies a captured variable", () => {
-  const { code } = virtualize(`
+test("Variant #4: Closure modifies a captured variable", async () => {
+  const { code } = await obfuscate(`
     function makeAccumulator(initial) {
       var total = initial;
       return function(n) {
@@ -65,8 +65,8 @@ test("Variant #4: Closure modifies a captured variable", () => {
   expect(evalCode(code)).toBe(20);
 });
 
-test("Variant #5: Nested closures (multi-level capture)", () => {
-  const { code } = virtualize(`
+test("Variant #5: Nested closures (multi-level capture)", async () => {
+  const { code } = await obfuscate(`
     function outer(x) {
       return function middle(y) {
         return function inner(z) {
@@ -80,8 +80,8 @@ test("Variant #5: Nested closures (multi-level capture)", () => {
   expect(evalCode(code)).toBe(6);
 });
 
-test("Variant #6: Two closures sharing the same mutable cell", () => {
-  const { code } = virtualize(`
+test("Variant #6: Two closures sharing the same mutable cell", async () => {
+  const { code } = await obfuscate(`
     function makeGetterSetter() {
       var value = 0;
       var get = function() { return value; };
@@ -98,8 +98,8 @@ test("Variant #6: Two closures sharing the same mutable cell", () => {
   expect(evalCode(code)).toBe(42);
 });
 
-test("Variant #7: Closure exits VM", () => {
-  const { code } = virtualize(`
+test("Variant #7: Closure exits VM", async () => {
+  const { code } = await obfuscate(`
     function makeClosure() {
       var captured = "I am captured";
       return function() {

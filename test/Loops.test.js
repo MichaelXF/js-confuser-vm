@@ -1,10 +1,10 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
 // ── While ─────────────────────────────────────────────────────────
 
-test("Variant #1: While — accumulates a sum", () => {
-  const { code } = virtualize(`
+test("Variant #1: While — accumulates a sum", async () => {
+  const { code } = await obfuscate(`
     var i = 1;
     var sum = 0;
     while (i <= 10) {
@@ -17,8 +17,8 @@ test("Variant #1: While — accumulates a sum", () => {
   expect(evalCode(code)).toBe(55);
 });
 
-test("Variant #2: While — condition false from the start, body never runs", () => {
-  const { code } = virtualize(`
+test("Variant #2: While — condition false from the start, body never runs", async () => {
+  const { code } = await obfuscate(`
     var result = "untouched";
     while (false) {
       result = "changed";
@@ -29,8 +29,8 @@ test("Variant #2: While — condition false from the start, body never runs", ()
   expect(evalCode(code)).toBe("untouched");
 });
 
-test("Variant #3: While — builds an array via index assignment", () => {
-  const { code } = virtualize(`
+test("Variant #3: While — builds an array via index assignment", async () => {
+  const { code } = await obfuscate(`
     var squares = [];
     var i = 0;
     while (i < 5) {
@@ -43,8 +43,8 @@ test("Variant #3: While — builds an array via index assignment", () => {
   expect(evalCode(code)).toEqual([0, 1, 4, 9, 16]);
 });
 
-test("Variant #4: While — compound condition (&&)", () => {
-  const { code } = virtualize(`
+test("Variant #4: While — compound condition (&&)", async () => {
+  const { code } = await obfuscate(`
     var i = 0;
     var j = 10;
     var count = 0;
@@ -62,8 +62,8 @@ test("Variant #4: While — compound condition (&&)", () => {
 
 // ── Do-While ──────────────────────────────────────────────────────
 
-test("Variant #5: Do-while — body executes at least once even when condition is false", () => {
-  const { code } = virtualize(`
+test("Variant #5: Do-while — body executes at least once even when condition is false", async () => {
+  const { code } = await obfuscate(`
     var ran = false;
     do {
       ran = true;
@@ -74,8 +74,8 @@ test("Variant #5: Do-while — body executes at least once even when condition i
   expect(evalCode(code)).toBe(true);
 });
 
-test("Variant #6: Do-while — accumulates a sum", () => {
-  const { code } = virtualize(`
+test("Variant #6: Do-while — accumulates a sum", async () => {
+  const { code } = await obfuscate(`
     var i = 1;
     var sum = 0;
     do {
@@ -88,8 +88,8 @@ test("Variant #6: Do-while — accumulates a sum", () => {
   expect(evalCode(code)).toBe(55);
 });
 
-test("Variant #7: Do-while — runs exactly N times, test at the bottom", () => {
-  const { code } = virtualize(`
+test("Variant #7: Do-while — runs exactly N times, test at the bottom", async () => {
+  const { code } = await obfuscate(`
     var count = 0;
     var i = 0;
     do {
@@ -104,8 +104,8 @@ test("Variant #7: Do-while — runs exactly N times, test at the bottom", () => 
 
 // ── For ───────────────────────────────────────────────────────────
 
-test("Variant #8: For — basic sum with var init and ++ update", () => {
-  const { code } = virtualize(`
+test("Variant #8: For — basic sum with var init and ++ update", async () => {
+  const { code } = await obfuscate(`
     var sum = 0;
     for (var i = 1; i <= 5; i++) {
       sum = sum + i;
@@ -116,8 +116,8 @@ test("Variant #8: For — basic sum with var init and ++ update", () => {
   expect(evalCode(code)).toBe(15);
 });
 
-test("Variant #9: For — builds an array", () => {
-  const { code } = virtualize(`
+test("Variant #9: For — builds an array", async () => {
+  const { code } = await obfuscate(`
     var result = [];
     for (var i = 0; i < 5; i++) {
       result[i] = i * 2;
@@ -128,8 +128,8 @@ test("Variant #9: For — builds an array", () => {
   expect(evalCode(code)).toEqual([0, 2, 4, 6, 8]);
 });
 
-test("Variant #10: For — bare expression init (not a var declaration)", () => {
-  const { code } = virtualize(`
+test("Variant #10: For — bare expression init (not a var declaration)", async () => {
+  const { code } = await obfuscate(`
     var i;
     var sum = 0;
     for (i = 0; i < 5; i++) {
@@ -142,8 +142,8 @@ test("Variant #10: For — bare expression init (not a var declaration)", () => 
   expect(evalCode(code)).toBe(10);
 });
 
-test("Variant #11: For — no update clause", () => {
-  const { code } = virtualize(`
+test("Variant #11: For — no update clause", async () => {
+  const { code } = await obfuscate(`
     var sum = 0;
     for (var i = 0; i < 5;) {
       sum = sum + i;
@@ -155,8 +155,8 @@ test("Variant #11: For — no update clause", () => {
   expect(evalCode(code)).toBe(10);
 });
 
-test("Variant #12: Nested for loops", () => {
-  const { code } = virtualize(`
+test("Variant #12: Nested for loops", async () => {
+  const { code } = await obfuscate(`
     var result = [];
     for (var i = 0; i < 3; i++) {
       for (var j = 0; j < 3; j++) {
@@ -169,8 +169,8 @@ test("Variant #12: Nested for loops", () => {
   expect(evalCode(code)).toEqual([0, 1, 2, 10, 11, 12, 20, 21, 22]);
 });
 
-test("Variant #13: Loops with blockless bodies (no braces)", () => {
-  const { code } = virtualize(`
+test("Variant #13: Loops with blockless bodies (no braces)", async () => {
+  const { code } = await obfuscate(`
     var i = 0;
     var wSum = 0;
     var fSum = 0;

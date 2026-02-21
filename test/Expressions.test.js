@@ -1,26 +1,26 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
 // ── Binary: Arithmetic ────────────────────────────────────────────
 
-test("Variant #1: Arithmetic binary operators (+, -, *, /, %)", () => {
-  const { code } = virtualize(`
+test("Variant #1: Arithmetic binary operators (+, -, *, /, %)", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = [2 + 3, 10 - 4, 3 * 4, 15 / 3, 10 % 3];
   `);
 
   expect(evalCode(code)).toEqual([5, 6, 12, 5, 1]);
 });
 
-test("Variant #2: Bitwise binary operators (&, |, ^, <<, >>, >>>)", () => {
-  const { code } = virtualize(`
+test("Variant #2: Bitwise binary operators (&, |, ^, <<, >>, >>>)", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = [5 & 3, 5 | 3, 5 ^ 3, 1 << 3, 16 >> 2, -1 >>> 28];
   `);
 
   expect(evalCode(code)).toEqual([1, 7, 6, 8, 4, 15]);
 });
 
-test("Variant #3: String concatenation with +", () => {
-  const { code } = virtualize(`
+test("Variant #3: String concatenation with +", async () => {
+  const { code } = await obfuscate(`
     var a = "hello";
     var b = " world";
     window.TEST_OUTPUT = a + b;
@@ -31,8 +31,8 @@ test("Variant #3: String concatenation with +", () => {
 
 // ── Binary: Comparison ────────────────────────────────────────────
 
-test("Variant #4: Comparison operators (<, >, <=, >=, ===, !==)", () => {
-  const { code } = virtualize(`
+test("Variant #4: Comparison operators (<, >, <=, >=, ===, !==)", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = [
       1 < 2,
       2 > 1,
@@ -67,8 +67,8 @@ test("Variant #4: Comparison operators (<, >, <=, >=, ===, !==)", () => {
 
 // ── Binary: in / instanceof ───────────────────────────────────────
 
-test("Variant #5: `in` operator", () => {
-  const { code } = virtualize(`
+test("Variant #5: `in` operator", async () => {
+  const { code } = await obfuscate(`
     var obj = { x: 1, y: 2 };
     window.TEST_OUTPUT = ["x" in obj, "y" in obj, "z" in obj];
   `);
@@ -76,8 +76,8 @@ test("Variant #5: `in` operator", () => {
   expect(evalCode(code)).toEqual([true, true, false]);
 });
 
-test("Variant #6: `instanceof` operator", () => {
-  const { code } = virtualize(`
+test("Variant #6: `instanceof` operator", async () => {
+  const { code } = await obfuscate(`
     function Animal(name) {
       this.name = name;
     }
@@ -91,8 +91,8 @@ test("Variant #6: `instanceof` operator", () => {
 
 // ── Logical ───────────────────────────────────────────────────────
 
-test("Variant #7: Logical && — short-circuits on falsy LHS", () => {
-  const { code } = virtualize(`
+test("Variant #7: Logical && — short-circuits on falsy LHS", async () => {
+  const { code } = await obfuscate(`
     var sideEffect = 0;
     var r1 = false && (sideEffect = 1);
     var r2 = true  && "yes";
@@ -103,8 +103,8 @@ test("Variant #7: Logical && — short-circuits on falsy LHS", () => {
   expect(evalCode(code)).toEqual([false, "yes", 0]);
 });
 
-test("Variant #8: Logical || — short-circuits on truthy LHS", () => {
-  const { code } = virtualize(`
+test("Variant #8: Logical || — short-circuits on truthy LHS", async () => {
+  const { code } = await obfuscate(`
     var sideEffect = 0;
     var r1 = true  || (sideEffect = 1);
     var r2 = false || "fallback";
@@ -117,16 +117,16 @@ test("Variant #8: Logical || — short-circuits on truthy LHS", () => {
 
 // ── Unary ─────────────────────────────────────────────────────────
 
-test("Variant #9: Arithmetic and boolean unary operators (-, +, !, ~)", () => {
-  const { code } = virtualize(`
+test("Variant #9: Arithmetic and boolean unary operators (-, +, !, ~)", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = [-5, +(-3), !true, !false, ~0, ~(-1)];
   `);
 
   expect(evalCode(code)).toEqual([-5, -3, false, true, -1, 0]);
 });
 
-test("Variant #10: typeof on primitives and undeclared variable", () => {
-  const { code } = virtualize(`
+test("Variant #10: typeof on primitives and undeclared variable", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = [
       typeof 42,
       typeof "hello",
@@ -149,8 +149,8 @@ test("Variant #10: typeof on primitives and undeclared variable", () => {
   ]);
 });
 
-test("Variant #11: void and delete", () => {
-  const { code } = virtualize(`
+test("Variant #11: void and delete", async () => {
+  const { code } = await obfuscate(`
     var obj = { x: 1, y: 2 };
     var d = delete obj.x;
     window.TEST_OUTPUT = [void 0, void "anything", d, "x" in obj, "y" in obj];
@@ -159,8 +159,8 @@ test("Variant #11: void and delete", () => {
   expect(evalCode(code)).toEqual([undefined, undefined, true, false, true]);
 });
 
-test("Variant #11b: delete with computed property key", () => {
-  const { code } = virtualize(`
+test("Variant #11b: delete with computed property key", async () => {
+  const { code } = await obfuscate(`
     var obj = { a: 1, b: 2, c: 3 };
     var key = "b";
     var d = delete obj[key];
@@ -170,11 +170,11 @@ test("Variant #11b: delete with computed property key", () => {
   expect(evalCode(code)).toEqual([true, true, false, true]);
 });
 
-test("Variant #11c: delete result used inside an expression", () => {
+test("Variant #11c: delete result used inside an expression", async () => {
   // Regression: delete inside a binary expression used to leave a stale value
   // on the stack, causing the callee to be displaced and crash with
   // "callee.apply is not a function".
-  const { code } = virtualize(`
+  const { code } = await obfuscate(`
     var obj = { x: 1 };
     var msg = "deleted=" + delete obj.x;
     var still = "x" in obj;
@@ -184,8 +184,8 @@ test("Variant #11c: delete result used inside an expression", () => {
   expect(evalCode(code)).toEqual(["deleted=true", false]);
 });
 
-test("Variant #11d: delete non-existent property returns true", () => {
-  const { code } = virtualize(`
+test("Variant #11d: delete non-existent property returns true", async () => {
+  const { code } = await obfuscate(`
     var obj = { x: 1 };
     window.TEST_OUTPUT = [delete obj.z, delete obj.x, "x" in obj];
   `);
@@ -193,8 +193,8 @@ test("Variant #11d: delete non-existent property returns true", () => {
   expect(evalCode(code)).toEqual([true, true, false]);
 });
 
-test("Variant #10b: typeof on local variable and function", () => {
-  const { code } = virtualize(`
+test("Variant #10b: typeof on local variable and function", async () => {
+  const { code } = await obfuscate(`
     var n = 42;
     var s = "hi";
     var b = true;
@@ -223,8 +223,8 @@ test("Variant #10b: typeof on local variable and function", () => {
 
 // ── Update ────────────────────────────────────────────────────────
 
-test("Variant #12: Update expressions (++ and --)", () => {
-  const { code } = virtualize(`
+test("Variant #12: Update expressions (++ and --)", async () => {
+  const { code } = await obfuscate(`
     var x = 5;
     x++;
     x++;
@@ -237,8 +237,8 @@ test("Variant #12: Update expressions (++ and --)", () => {
 
 // ── Conditional ───────────────────────────────────────────────────
 
-test("Variant #13: Conditional (ternary) expression", () => {
-  const { code } = virtualize(`
+test("Variant #13: Conditional (ternary) expression", async () => {
+  const { code } = await obfuscate(`
     var x = 10;
     window.TEST_OUTPUT = [
       x > 5  ? "big"  : "small",
@@ -253,8 +253,8 @@ test("Variant #13: Conditional (ternary) expression", () => {
 
 // ── Assignment ────────────────────────────────────────────────────
 
-test("Variant #14: Simple assignment — = is an expression", () => {
-  const { code } = virtualize(`
+test("Variant #14: Simple assignment — = is an expression", async () => {
+  const { code } = await obfuscate(`
     var x;
     var result = (x = 42);
     window.TEST_OUTPUT = [x, result];
@@ -263,8 +263,8 @@ test("Variant #14: Simple assignment — = is an expression", () => {
   expect(evalCode(code)).toEqual([42, 42]);
 });
 
-test("Variant #15: Arithmetic compound assignments (+=, -=, *=, /=, %=)", () => {
-  const { code } = virtualize(`
+test("Variant #15: Arithmetic compound assignments (+=, -=, *=, /=, %=)", async () => {
+  const { code } = await obfuscate(`
     var x = 10;
     x += 5;
     x -= 3;
@@ -278,8 +278,8 @@ test("Variant #15: Arithmetic compound assignments (+=, -=, *=, /=, %=)", () => 
   expect(evalCode(code)).toBe(2);
 });
 
-test("Variant #16: Bitwise compound assignments (&=, |=, ^=, <<=, >>=)", () => {
-  const { code } = virtualize(`
+test("Variant #16: Bitwise compound assignments (&=, |=, ^=, <<=, >>=)", async () => {
+  const { code } = await obfuscate(`
     var x = 0;
     x |= 0xFF;
     x &= 0x0F;
@@ -293,8 +293,8 @@ test("Variant #16: Bitwise compound assignments (&=, |=, ^=, <<=, >>=)", () => {
   expect(evalCode(code)).toBe(20);
 });
 
-test("Variant #17: Member assignment (dot and bracket notation)", () => {
-  const { code } = virtualize(`
+test("Variant #17: Member assignment (dot and bracket notation)", async () => {
+  const { code } = await obfuscate(`
     var obj = {};
     obj.x = 10;
     obj["y"] = 20;
@@ -306,8 +306,8 @@ test("Variant #17: Member assignment (dot and bracket notation)", () => {
   expect(evalCode(code)).toEqual([10, 20, 99]);
 });
 
-test("Variant #18: Sequence expression", () => {
-  const { code } = virtualize(`
+test("Variant #18: Sequence expression", async () => {
+  const { code } = await obfuscate(`
     var x = 0;
     var result = (x = x + 1, x * 2, x - 3);
     window.TEST_OUTPUT = [x, result];

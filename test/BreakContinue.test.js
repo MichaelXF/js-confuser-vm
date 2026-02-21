@@ -1,9 +1,9 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
 // break
-test("Variant #1: break exits a while loop early", () => {
-  const { code } = virtualize(`
+test("Variant #1: break exits a while loop early", async () => {
+  const { code } = await obfuscate(`
     var i = 0;
     while (true) {
       if (i === 5) break;
@@ -15,8 +15,8 @@ test("Variant #1: break exits a while loop early", () => {
   expect(evalCode(code)).toBe(5);
 });
 
-test("Variant #2: break exits a for loop early", () => {
-  const { code } = virtualize(`
+test("Variant #2: break exits a for loop early", async () => {
+  const { code } = await obfuscate(`
     var found = -1;
     for (var i = 0; i < 100; i++) {
       if (i === 7) {
@@ -30,8 +30,8 @@ test("Variant #2: break exits a for loop early", () => {
   expect(evalCode(code)).toBe(7);
 });
 
-test("Variant #3: break exits a do-while loop early", () => {
-  const { code } = virtualize(`
+test("Variant #3: break exits a do-while loop early", async () => {
+  const { code } = await obfuscate(`
     var i = 0;
     do {
       if (i === 3) break;
@@ -45,8 +45,8 @@ test("Variant #3: break exits a do-while loop early", () => {
 
 // continue
 
-test("Variant #4: continue in while skips rest of body, re-evaluates test", () => {
-  const { code } = virtualize(`
+test("Variant #4: continue in while skips rest of body, re-evaluates test", async () => {
+  const { code } = await obfuscate(`
     var sum = 0;
     var i = 0;
     while (i < 10) {
@@ -61,8 +61,8 @@ test("Variant #4: continue in while skips rest of body, re-evaluates test", () =
   expect(evalCode(code)).toBe(25);
 });
 
-test("Variant #5: continue in for loop still runs the update expression", () => {
-  const { code } = virtualize(`
+test("Variant #5: continue in for loop still runs the update expression", async () => {
+  const { code } = await obfuscate(`
     var visited = [];
     for (var i = 0; i < 5; i++) {
       if (i === 2) continue;
@@ -75,8 +75,8 @@ test("Variant #5: continue in for loop still runs the update expression", () => 
   expect(evalCode(code)).toEqual([0, 1, 3, 4]);
 });
 
-test("Variant #6: continue in do-while skips to the test", () => {
-  const { code } = virtualize(`
+test("Variant #6: continue in do-while skips to the test", async () => {
+  const { code } = await obfuscate(`
     var sum = 0;
     var i = 0;
     do {
@@ -92,8 +92,8 @@ test("Variant #6: continue in do-while skips to the test", () => {
 });
 
 // nested loops
-test("Variant #7: break only exits the innermost loop", () => {
-  const { code } = virtualize(`
+test("Variant #7: break only exits the innermost loop", async () => {
+  const { code } = await obfuscate(`
     var result = [];
     for (var i = 0; i < 3; i++) {
       for (var j = 0; j < 3; j++) {
@@ -108,8 +108,8 @@ test("Variant #7: break only exits the innermost loop", () => {
   expect(evalCode(code)).toEqual([0, 10, 20]);
 });
 
-test("Variant #8: continue only affects the innermost loop", () => {
-  const { code } = virtualize(`
+test("Variant #8: continue only affects the innermost loop", async () => {
+  const { code } = await obfuscate(`
     var count = 0;
     for (var i = 0; i < 3; i++) {
       for (var j = 0; j < 3; j++) {

@@ -1,48 +1,48 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
-test("Variant #1: Boolean Literals", () => {
-  const { code } = virtualize(`
+test("Variant #1: Boolean Literals", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = [true, false];
   `);
 
   expect(evalCode(code)).toEqual([true, false]);
 });
 
-test("Variant #2: String Literals", () => {
-  const { code } = virtualize(`
+test("Variant #2: String Literals", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = ["hello", "world"];
   `);
 
   expect(evalCode(code)).toEqual(["hello", "world"]);
 });
 
-test("Variant #3: Numeric Literals", () => {
-  const { code } = virtualize(`
+test("Variant #3: Numeric Literals", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = [42, 3.14, NaN, Infinity, -Infinity];
   `);
 
   expect(evalCode(code)).toEqual([42, 3.14, NaN, Infinity, -Infinity]);
 });
 
-test("Variant #4: Other Literals", () => {
-  const { code } = virtualize(`
+test("Variant #4: Other Literals", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = [null, undefined];
   `);
 
   expect(evalCode(code)).toEqual([null, undefined]);
 });
 
-test("Variant #5: Array expressions", () => {
-  const { code } = virtualize(`
+test("Variant #5: Array expressions", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = [1, "two", true, null, [3, 4], [[5]]];
   `);
 
   expect(evalCode(code)).toEqual([1, "two", true, null, [3, 4], [[5]]]);
 });
 
-test("Variant #6: Object expressions", () => {
-  const { code } = virtualize(`
+test("Variant #6: Object expressions", async () => {
+  const { code } = await obfuscate(`
     window.TEST_OUTPUT = {
       a: 1,
       b: "two",
@@ -63,8 +63,8 @@ test("Variant #6: Object expressions", () => {
   });
 });
 
-test("Variant #8: RegExp literal basic", () => {
-  const { code } = virtualize(`
+test("Variant #8: RegExp literal basic", async () => {
+  const { code } = await obfuscate(`
     var re = /hello/;
     window.TEST_OUTPUT = [re instanceof RegExp, re.source, re.flags];
   `);
@@ -72,8 +72,8 @@ test("Variant #8: RegExp literal basic", () => {
   expect(evalCode(code)).toEqual([true, "hello", ""]);
 });
 
-test("Variant #9: RegExp literal with flags", () => {
-  const { code } = virtualize(`
+test("Variant #9: RegExp literal with flags", async () => {
+  const { code } = await obfuscate(`
     var re = /foo/gi;
     window.TEST_OUTPUT = [re.source, re.flags];
   `);
@@ -81,8 +81,8 @@ test("Variant #9: RegExp literal with flags", () => {
   expect(evalCode(code)).toEqual(["foo", "gi"]);
 });
 
-test("Variant #10: RegExp literal test()", () => {
-  const { code } = virtualize(`
+test("Variant #10: RegExp literal test()", async () => {
+  const { code } = await obfuscate(`
     var re = /^\\d+$/;
     window.TEST_OUTPUT = [re.test("123"), re.test("abc"), re.test("12x")];
   `);
@@ -90,8 +90,8 @@ test("Variant #10: RegExp literal test()", () => {
   expect(evalCode(code)).toEqual([true, false, false]);
 });
 
-test("Variant #11: RegExp literal exec() and match()", () => {
-  const { code } = virtualize(`
+test("Variant #11: RegExp literal exec() and match()", async () => {
+  const { code } = await obfuscate(`
     var m = /(\\w+)\\s(\\w+)/.exec("Hello World");
     window.TEST_OUTPUT = [m[0], m[1], m[2]];
   `);
@@ -99,8 +99,8 @@ test("Variant #11: RegExp literal exec() and match()", () => {
   expect(evalCode(code)).toEqual(["Hello World", "Hello", "World"]);
 });
 
-test("Variant #12: RegExp literal stateful lastIndex with /g", () => {
-  const { code } = virtualize(`
+test("Variant #12: RegExp literal stateful lastIndex with /g", async () => {
+  const { code } = await obfuscate(`
     var re = /a/g;
     var s = "aXaX";
     var r1 = re.test(s);
@@ -113,8 +113,8 @@ test("Variant #12: RegExp literal stateful lastIndex with /g", () => {
   expect(evalCode(code)).toEqual([true, 1, true, 3]);
 });
 
-test("Variant #13: RegExp literal fresh object per evaluation", () => {
-  const { code } = virtualize(`
+test("Variant #13: RegExp literal fresh object per evaluation", async () => {
+  const { code } = await obfuscate(`
     // Each pass through the loop re-evaluates the literal -> fresh lastIndex
     var results = [];
     for (var i = 0; i < 3; i++) {
@@ -130,8 +130,8 @@ test("Variant #13: RegExp literal fresh object per evaluation", () => {
   expect(evalCode(code)).toEqual([0, 1, 0, 1, 0, 1]);
 });
 
-test("Variant #7: Array and object runtime order", () => {
-  const { code } = virtualize(`
+test("Variant #7: Array and object runtime order", async () => {
+  const { code } = await obfuscate(`
     var counter = 0;
     var increment = function (){return counter++;};
 

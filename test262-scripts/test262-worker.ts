@@ -3,7 +3,7 @@ import { readFileSync, readdirSync } from "fs";
 import * as path from "path";
 import * as vm from "vm";
 import { fileURLToPath } from "url";
-import { virtualize } from "../src/index.js";
+import JsConfuserVM from "../src/index.ts";
 
 interface TestResult {
   file: string;
@@ -36,7 +36,7 @@ const harnessFiles = readdirSync(HARNESS_DIR)
     code: readFileSync(path.join(HARNESS_DIR, f), "utf8"),
   }));
 
-function processFile(file: string): TestResult[] {
+async function processFile(file: string): Promise<TestResult[]> {
   const relFile = path.relative(TEST_DIR, file);
   const testCode = readFileSync(file, "utf8");
   const isNegative = /@negative/i.test(testCode);
@@ -67,20 +67,36 @@ function processFile(file: string): TestResult[] {
   try {
     vm.runInContext(CUSTOM_HARNESS, ctx, { timeout: 1000 });
   } catch (e: any) {
-    return [{ file: relFile, id: "harness-error", passed: false, error: `Custom harness setup failed: ${e.message}` }];
+    return [
+      {
+        file: relFile,
+        id: "harness-error",
+        passed: false,
+        error: `Custom harness setup failed: ${e.message}`,
+      },
+    ];
   }
 
   let virtualizedCode: string;
   try {
-    virtualizedCode = virtualize(testCode).code;
+    virtualizedCode = (await JsConfuserVM.obfuscate(testCode)).code;
   } catch (e: any) {
     if (isNegative) return [{ file: relFile, id: "tc1", passed: true }];
-    return [{ file: relFile, id: "compile-error", passed: false, error: `virtualize() threw: ${e.message}` }];
+    return [
+      {
+        file: relFile,
+        id: "compile-error",
+        passed: false,
+        error: `virtualize() threw: ${e.message}`,
+      },
+    ];
   }
 
   try {
     vm.runInContext(virtualizedCode, ctx, { timeout: 5000 });
-    vm.runInContext(`__results__ = ES5Harness.runAll();`, ctx, { timeout: 1000 });
+    vm.runInContext(`__results__ = ES5Harness.runAll();`, ctx, {
+      timeout: 1000,
+    });
 
     const testResults = (ctx as any).__results__ as Array<{
       id: string;
@@ -89,7 +105,15 @@ function processFile(file: string): TestResult[] {
     }>;
 
     if (testResults.length === 0) {
-      if (isNegative) return [{ file: relFile, id: "tc1", passed: false, error: "Expected error but none thrown" }];
+      if (isNegative)
+        return [
+          {
+            file: relFile,
+            id: "tc1",
+            passed: false,
+            error: "Expected error but none thrown",
+          },
+        ];
       return [];
     }
 
@@ -101,10 +125,20 @@ function processFile(file: string): TestResult[] {
     }));
   } catch (e: any) {
     if (isNegative) return [{ file: relFile, id: "tc1", passed: true }];
-    return [{ file: relFile, id: "runtime-error", passed: false, error: `Runtime threw: ${e.message}` }];
+    return [
+      {
+        file: relFile,
+        id: "runtime-error",
+        passed: false,
+        error: `Runtime threw: ${e.message}`,
+      },
+    ];
   }
 }
 
 for (let i = 0; i < files.length; i++) {
-  parentPort!.postMessage({ fileIndex: i, results: processFile(files[i]) });
+  parentPort!.postMessage({
+    fileIndex: i,
+    results: await processFile(files[i]),
+  });
 }

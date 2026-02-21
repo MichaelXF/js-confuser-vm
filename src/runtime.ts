@@ -1,13 +1,14 @@
-import { OP } from "./compiler.ts";
+import { OP_ORIGINAL as OP } from "./compiler.ts";
 const BYTECODE = [];
 const MAIN_START_PC = 0;
 const CONSTANTS = [];
-const PACK = false;
+const ENCODE_BYTECODE = false;
+const TIMING_CHECKS = false;
 // The text above is not included in the compiled output - for type intellisense only
 // @START
 
 function decodeBytecode(s) {
-  if (!PACK) return s;
+  if (!ENCODE_BYTECODE) return s;
 
   var b =
     typeof Buffer !== "undefined"
@@ -55,17 +56,17 @@ Upvalue.prototype.close = function () {
 function Closure(fn) {
   this.fn = fn;
   this.upvalues = [];
-  this.prototype = {}; // ← default prototype object for \`new\`
+  this.prototype = {}; // <- default prototype object for \`new\`
 }
 
 function Frame(closure, returnPc, parent, thisVal?) {
   this.closure = closure;
   this.locals = new Array(closure.fn.localCount).fill(undefined);
-  this.pc = closure.fn.startPc; // ← initialize from fn descriptor
+  this.pc = closure.fn.startPc; // <- initialize from fn descriptor
   this.returnPc = returnPc; // pc to resume in parent frame after RETURN
   this.parent = parent;
   this.thisVal = thisVal !== undefined ? thisVal : undefined;
-  this._newObj = null; // ← set by NEW so RETURN can see it
+  this._newObj = null; // <- set by NEW so RETURN can see it
 }
 
 // VM
@@ -80,7 +81,7 @@ function VM(bytecode, mainStartPc, constants, globals) {
   var mainFn = {
     paramCount: 0,
     localCount: 0,
-    startPc: mainStartPc, // ← where main begins
+    startPc: mainStartPc, // <- where main begins
   };
   this.currentFrame = new Frame(new Closure(mainFn), null, null);
 }
@@ -134,7 +135,7 @@ VM.prototype.run = function () {
     var op, operand;
     var word = bc[frame.pc++];
 
-    if (PACK) {
+    if (ENCODE_BYTECODE) {
       op = word & 0xff;
       operand = word >>> 8;
     } else {
@@ -145,11 +146,13 @@ VM.prototype.run = function () {
     // console.log(frame.pc - 1, op, operand);
 
     // Debugging protection
-    var t2 = now();
-    var isTamper = t2 - t > 1000;
-    t = t2;
-    if (isTamper) {
-      op = OP.RETURN;
+    if (TIMING_CHECKS) {
+      var t2 = now();
+      var isTamper = t2 - t > 1000;
+      t = t2;
+      if (isTamper) {
+        op = OP.POP;
+      }
     }
 
     /* @SWITCH */
@@ -176,7 +179,7 @@ VM.prototype.run = function () {
 
       case OP.GET_PROP: {
         // Stack: [..., obj, key] -> [..., obj, obj[key]]
-        // obj is PEEKED (not popped) — CALL_METHOD needs it as receiver
+        // obj is PEEKED (not popped) - CALL_METHOD needs it as receiver
         var key = this._pop();
         var obj = this.peek();
         this._push(obj[key]);
@@ -291,10 +294,10 @@ VM.prototype.run = function () {
         var ctor = this._pop();
         var obj = this._pop();
         if (typeof ctor === "function") {
-          // Native constructor (e.g. Array, Date) — native instanceof is fine
+          // Native constructor (e.g. Array, Date) - native instanceof is fine
           this._push(obj instanceof ctor);
         } else {
-          // VM Closure — ctor.prototype was set by MAKE_CLOSURE / user assignment.
+          // VM Closure - ctor.prototype was set by MAKE_CLOSURE / user assignment.
           // Walk obj's prototype chain looking for identity with ctor.prototype.
           var proto = ctor.prototype; // the .prototype property on the Closure
           var target = Object.getPrototypeOf(obj);
@@ -334,7 +337,7 @@ VM.prototype.run = function () {
       case OP.TYPEOF_SAFE: {
         // operand is a const index holding the variable name string.
         // Mimics JS semantics: typeof undeclaredVar === "undefined" (no throw).
-        var name = this._pop(); // LOAD_CONST pushed the name — consume it
+        var name = this._pop(); // LOAD_CONST pushed the name - consume it
         var val = Object.prototype.hasOwnProperty.call(this.globals, name)
           ? this.globals[name]
           : undefined;
@@ -351,7 +354,7 @@ VM.prototype.run = function () {
         break;
 
       case OP.JUMP_IF_TRUE_OR_POP:
-        // || semantics: if truthy, we're done — leave value, jump over RHS.
+        // || semantics: if truthy, we're done - leave value, jump over RHS.
         // If falsy, discard it and fall through to evaluate RHS.
         if (this.peek()) {
           frame.pc = operand;
@@ -361,7 +364,7 @@ VM.prototype.run = function () {
         break;
 
       case OP.JUMP_IF_FALSE_OR_POP:
-        // && semantics: if falsy, we're done — leave value, jump over RHS.
+        // && semantics: if falsy, we're done - leave value, jump over RHS.
         // If truthy, discard it and fall through to evaluate RHS.
         if (!this.peek()) {
           frame.pc = operand;
@@ -379,7 +382,7 @@ VM.prototype.run = function () {
             // Capture directly from current frame's local slot
             closure.upvalues.push(this.captureUpvalue(frame, desc._index));
           } else {
-            // Relay — take upvalue from the enclosing closure's list
+            // Relay - take upvalue from the enclosing closure's list
             closure.upvalues.push(frame.closure.upvalues[desc._index]);
           }
         }
@@ -392,7 +395,12 @@ VM.prototype.run = function () {
             var args = Array.prototype.slice.call(arguments);
             var sub = new VM(self.bytecode, 0, self.constants, self.globals);
             // Sloppy-mode: null/undefined thisArg → global object
-            var f = new Frame(c, null, null, this == null ? self.globals : this);
+            var f = new Frame(
+              c,
+              null,
+              null,
+              this == null ? self.globals : this,
+            );
             for (var i = 0; i < args.length; i++) f.locals[i] = args[i];
             f.locals[c.fn.paramCount] = args;
             sub.currentFrame = f;
@@ -433,7 +441,7 @@ VM.prototype.run = function () {
       }
       case OP.SET_PROP: {
         // Stack: [..., obj, key, val]
-        // Leaves val on stack — assignment is an expression in JS.
+        // Leaves val on stack - assignment is an expression in JS.
         var val = this._pop();
         var key = this._pop();
         var obj = this._pop();
@@ -446,7 +454,7 @@ VM.prototype.run = function () {
         break;
       }
       case OP.GET_PROP_COMPUTED: {
-        // Stack: [..., obj, key]  — key is a runtime value (nums[i])
+        // Stack: [..., obj, key]  - key is a runtime value (nums[i])
         // Mirrors GET_PROP but pops the key that was pushed dynamically.
         var key = this._pop();
         var obj = this._pop();
@@ -464,7 +472,7 @@ VM.prototype.run = function () {
         var args = this._stack.splice(this._stack.length - operand);
         var callee = this._pop();
         if (callee && callee[CLOSURE_SYM]) {
-          // VM closure — run directly in this VM, no sub-VM overhead
+          // VM closure - run directly in this VM, no sub-VM overhead
           var c = callee[CLOSURE_SYM];
           // Sloppy-mode: plain function call → global object as this
           var f = new Frame(c, frame.pc, frame, this.globals);
@@ -484,7 +492,7 @@ VM.prototype.run = function () {
         var callee = this._pop();
         var receiver = this._pop(); // left on stack by GET_PROP
         if (callee && callee[CLOSURE_SYM]) {
-          // VM closure — run directly in this VM with receiver as this
+          // VM closure - run directly in this VM with receiver as this
           var c = callee[CLOSURE_SYM];
           var f = new Frame(c, frame.pc, frame, receiver);
           for (var i = 0; i < args.length; i++) f.locals[i] = args[i];
@@ -506,7 +514,7 @@ VM.prototype.run = function () {
         var args = this._stack.splice(this._stack.length - operand);
         var callee = this._pop();
         if (callee && callee[CLOSURE_SYM]) {
-          // VM closure constructor — prototype is unified via shell.prototype = closure.prototype
+          // VM closure constructor - prototype is unified via shell.prototype = closure.prototype
           var c = callee[CLOSURE_SYM];
           var newObj = Object.create(c.prototype || null);
           var f = new Frame(c, frame.pc, frame, newObj);
@@ -517,7 +525,7 @@ VM.prototype.run = function () {
           this.currentFrame = f;
         } else {
           // Native constructor (e.g. new Error(), new Date()).
-          // Reflect.construct is required — Object.create+apply does NOT set
+          // Reflect.construct is required - Object.create+apply does NOT set
           // internal slots ([[NumberData]], [[StringData]], etc.) for built-ins.
           this._push(Reflect.construct(callee, args));
         }
@@ -598,7 +606,7 @@ VM.prototype.run = function () {
         var destPc = this._pop();
         var words = this.constants[operand];
 
-        if (PACK) {
+        if (ENCODE_BYTECODE) {
           words = decodeBytecode(words);
         }
 

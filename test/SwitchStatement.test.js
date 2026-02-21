@@ -1,10 +1,10 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
 // ── Basic switch with break ────────────────────────────────────
 
-test("Variant #1: Basic match with break", () => {
-  const { code } = virtualize(`
+test("Variant #1: Basic match with break", async () => {
+  const { code } = await obfuscate(`
     var x = 2;
     var result = "";
     switch (x) {
@@ -24,8 +24,8 @@ test("Variant #1: Basic match with break", () => {
   expect(evalCode(code)).toBe("two");
 });
 
-test("Variant #2: Default case when no case matches", () => {
-  const { code } = virtualize(`
+test("Variant #2: Default case when no case matches", async () => {
+  const { code } = await obfuscate(`
     var x = 99;
     var result = "";
     switch (x) {
@@ -47,8 +47,8 @@ test("Variant #2: Default case when no case matches", () => {
 
 // ── Fall-through ──────────────────────────────────────────────
 
-test("Variant #3: Fall-through without break", () => {
-  const { code } = virtualize(`
+test("Variant #3: Fall-through without break", async () => {
+  const { code } = await obfuscate(`
     var x = 1;
     var result = "";
     switch (x) {
@@ -68,8 +68,8 @@ test("Variant #3: Fall-through without break", () => {
   expect(evalCode(code)).toBe("ab");
 });
 
-test("Variant #4: Multiple fall-through cases", () => {
-  const { code } = virtualize(`
+test("Variant #4: Multiple fall-through cases", async () => {
+  const { code } = await obfuscate(`
     var x = 2;
     var result = "";
     switch (x) {
@@ -91,8 +91,8 @@ test("Variant #4: Multiple fall-through cases", () => {
 
 // ── No match / no default ──────────────────────────────────────
 
-test("Variant #5: No match, no default (nothing executes)", () => {
-  const { code } = virtualize(`
+test("Variant #5: No match, no default (nothing executes)", async () => {
+  const { code } = await obfuscate(`
     var x = 99;
     var result = "unchanged";
     switch (x) {
@@ -111,8 +111,8 @@ test("Variant #5: No match, no default (nothing executes)", () => {
 
 // ── Default in the middle (order matters) ──────────────────────
 
-test("Variant #6: Default in the middle with fall-through", () => {
-  const { code } = virtualize(`
+test("Variant #6: Default in the middle with fall-through", async () => {
+  const { code } = await obfuscate(`
     var x = 99;
     var result = "";
     switch (x) {
@@ -134,8 +134,8 @@ test("Variant #6: Default in the middle with fall-through", () => {
 
 // ── Switch inside loops ────────────────────────────────────────
 
-test("Variant #7: Switch inside a loop (break exits switch, not loop)", () => {
-  const { code } = virtualize(`
+test("Variant #7: Switch inside a loop (break exits switch, not loop)", async () => {
+  const { code } = await obfuscate(`
     var sum = 0;
     for (var i = 0; i < 3; i++) {
       switch (i) {
@@ -157,8 +157,8 @@ test("Variant #7: Switch inside a loop (break exits switch, not loop)", () => {
   expect(evalCode(code)).toBe(60);
 });
 
-test("Variant #8: Continue inside switch exits switch and continues loop", () => {
-  const { code } = virtualize(`
+test("Variant #8: Continue inside switch exits switch and continues loop", async () => {
+  const { code } = await obfuscate(`
     var sum = 0;
     for (var i = 1; i <= 5; i++) {
       switch (i) {
@@ -178,8 +178,8 @@ test("Variant #8: Continue inside switch exits switch and continues loop", () =>
 
 // ── Expression in switch discriminant ──────────────────────────
 
-test("Variant #9: Expression in switch discriminant", () => {
-  const { code } = virtualize(`
+test("Variant #9: Expression in switch discriminant", async () => {
+  const { code } = await obfuscate(`
     var x = 5;
     var result = "";
     switch (x * 2) {

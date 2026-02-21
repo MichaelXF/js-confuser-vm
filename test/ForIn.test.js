@@ -1,10 +1,10 @@
-import { virtualize } from "../src";
-import { evalCode } from "./test-utils";
+import JsConfuserVM from "../src";
+import { obfuscate, evalCode } from "./test-utils";
 
 // ── For..In ───────────────────────────────────────────────────────
 
-test("Variant #1: For-in — own enumerable keys of a plain object", () => {
-  const { code } = virtualize(`
+test("Variant #1: For-in — own enumerable keys of a plain object", async () => {
+  const { code } = await obfuscate(`
     var obj = { a: 1, b: 2, c: 3 };
     var keys = [];
     for (var k in obj) {
@@ -16,8 +16,8 @@ test("Variant #1: For-in — own enumerable keys of a plain object", () => {
   expect(evalCode(code)).toBe("a,b,c");
 });
 
-test("Variant #2: For-in — values can be read via the key", () => {
-  const { code } = virtualize(`
+test("Variant #2: For-in — values can be read via the key", async () => {
+  const { code } = await obfuscate(`
     var obj = { x: 10, y: 20, z: 30 };
     var sum = 0;
     for (var k in obj) {
@@ -29,8 +29,8 @@ test("Variant #2: For-in — values can be read via the key", () => {
   expect(evalCode(code)).toBe(60);
 });
 
-test("Variant #3: For-in — null object produces no iterations", () => {
-  const { code } = virtualize(`
+test("Variant #3: For-in — null object produces no iterations", async () => {
+  const { code } = await obfuscate(`
     var count = 0;
     for (var k in null) {
       count++;
@@ -41,8 +41,8 @@ test("Variant #3: For-in — null object produces no iterations", () => {
   expect(evalCode(code)).toBe(0);
 });
 
-test("Variant #4: For-in — undefined object produces no iterations", () => {
-  const { code } = virtualize(`
+test("Variant #4: For-in — undefined object produces no iterations", async () => {
+  const { code } = await obfuscate(`
     var count = 0;
     for (var k in undefined) {
       count++;
@@ -53,8 +53,8 @@ test("Variant #4: For-in — undefined object produces no iterations", () => {
   expect(evalCode(code)).toBe(0);
 });
 
-test("Variant #5: For-in — empty object produces no iterations", () => {
-  const { code } = virtualize(`
+test("Variant #5: For-in — empty object produces no iterations", async () => {
+  const { code } = await obfuscate(`
     var count = 0;
     for (var k in {}) {
       count++;
@@ -65,8 +65,8 @@ test("Variant #5: For-in — empty object produces no iterations", () => {
   expect(evalCode(code)).toBe(0);
 });
 
-test("Variant #6: For-in — array yields string indices only (not length)", () => {
-  const { code } = virtualize(`
+test("Variant #6: For-in — array yields string indices only (not length)", async () => {
+  const { code } = await obfuscate(`
     var arr = [10, 20, 30];
     var keys = [];
     for (var k in arr) {
@@ -79,8 +79,8 @@ test("Variant #6: For-in — array yields string indices only (not length)", () 
   expect(evalCode(code)).toBe("0,1,2");
 });
 
-test("Variant #7: For-in — inherited enumerable properties are included", () => {
-  const { code } = virtualize(`
+test("Variant #7: For-in — inherited enumerable properties are included", async () => {
+  const { code } = await obfuscate(`
     function Animal(name) { this.name = name; }
     Animal.prototype.type = "animal";
     var dog = new Animal("rex");
@@ -95,8 +95,8 @@ test("Variant #7: For-in — inherited enumerable properties are included", () =
   expect(evalCode(code)).toBe("name,type");
 });
 
-test("Variant #8: For-in — non-enumerable built-in prototype properties are excluded", () => {
-  const { code } = virtualize(`
+test("Variant #8: For-in — non-enumerable built-in prototype properties are excluded", async () => {
+  const { code } = await obfuscate(`
     var obj = { a: 1, b: 2 };
     var count = 0;
     for (var k in obj) {
@@ -109,8 +109,8 @@ test("Variant #8: For-in — non-enumerable built-in prototype properties are ex
   expect(evalCode(code)).toBe(2);
 });
 
-test("Variant #9: For-in — shadowed prototype property appears only once", () => {
-  const { code } = virtualize(`
+test("Variant #9: For-in — shadowed prototype property appears only once", async () => {
+  const { code } = await obfuscate(`
     function Base() {}
     Base.prototype.x = "proto";
     var child = new Base();
@@ -126,8 +126,8 @@ test("Variant #9: For-in — shadowed prototype property appears only once", () 
   expect(evalCode(code)).toBe(1);
 });
 
-test("Variant #10: For-in — break exits the loop early", () => {
-  const { code } = virtualize(`
+test("Variant #10: For-in — break exits the loop early", async () => {
+  const { code } = await obfuscate(`
     var obj = { a: 1, b: 2, c: 3 };
     var found = null;
     for (var k in obj) {
@@ -142,8 +142,8 @@ test("Variant #10: For-in — break exits the loop early", () => {
   expect(evalCode(code)).toBe("b");
 });
 
-test("Variant #11: For-in — continue skips to the next key", () => {
-  const { code } = virtualize(`
+test("Variant #11: For-in — continue skips to the next key", async () => {
+  const { code } = await obfuscate(`
     var obj = { a: 1, b: 2, c: 3 };
     var result = [];
     for (var k in obj) {
@@ -156,8 +156,8 @@ test("Variant #11: For-in — continue skips to the next key", () => {
   expect(evalCode(code)).toBe("a,c");
 });
 
-test("Variant #12: For-in — nested for-in loops", () => {
-  const { code } = virtualize(`
+test("Variant #12: For-in — nested for-in loops", async () => {
+  const { code } = await obfuscate(`
     var outer = { x: 1, y: 2 };
     var inner = { p: 3, q: 4 };
     var pairs = [];
@@ -172,8 +172,8 @@ test("Variant #12: For-in — nested for-in loops", () => {
   expect(evalCode(code)).toBe("xp,xq,yp,yq");
 });
 
-test("Variant #13: For-in — loop variable without var declaration", () => {
-  const { code } = virtualize(`
+test("Variant #13: For-in — loop variable without var declaration", async () => {
+  const { code } = await obfuscate(`
     var obj = { a: 1, b: 2 };
     var k;
     var keys = [];
@@ -186,8 +186,8 @@ test("Variant #13: For-in — loop variable without var declaration", () => {
   expect(evalCode(code)).toBe("a,b");
 });
 
-test("Variant #14: For-in — works inside a function", () => {
-  const { code } = virtualize(`
+test("Variant #14: For-in — works inside a function", async () => {
+  const { code } = await obfuscate(`
     function collectKeys(obj) {
       var result = [];
       for (var k in obj) {
@@ -201,8 +201,8 @@ test("Variant #14: For-in — works inside a function", () => {
   expect(evalCode(code)).toBe("one,two,three");
 });
 
-test("Variant #15: For-in — multiple sequential for-in loops work independently", () => {
-  const { code } = virtualize(`
+test("Variant #15: For-in — multiple sequential for-in loops work independently", async () => {
+  const { code } = await obfuscate(`
     var a = { x: 1 };
     var b = { y: 2 };
     var first = [];
@@ -216,7 +216,7 @@ test("Variant #15: For-in — multiple sequential for-in loops work independentl
 });
 
 test("Variant #16: For-in bare blockless body", async () => {
-  const { code } = virtualize(`
+  const { code } = await obfuscate(`
     var obj = { a: 1, b: 2, c: 3, d: 4 };
     var keys = [];
     for (var k in obj) if (k !== "d") keys.push(k);

@@ -1,3 +1,10 @@
+import JsConfuserVM from "../src";
+
+export async function obfuscate(source) {
+  const options = global.VM_OPTIONS ?? {};
+  return JsConfuserVM.obfuscate(source, options);
+}
+
 export function evalCode(code) {
   var window = {
     TEST_OUTPUT: null,
