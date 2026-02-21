@@ -130,13 +130,13 @@ function TryCatch(cb) {
 }
 ```
 
-## ES5 Only
+### ES5 Only
 
 This VM Compiler only supports ES5 JavaScript. Most ES6+ features are syntax sugar that can be transpiled down relatively easily. This is a design decision to keep the VM wrapper simple and the bytecode more uniform. Having opcodes dedicated for classes and methods makes them standout more for attackers to debug easier. Keeping things simple enables easier hardening improvements.
 
 Please transpile your code down first using [Babel](https://github.com/babel/babel).
 
-### Project:
+### Project
 
 - Stack based VM
 - Lua-style closure and upvalue model
@@ -144,7 +144,7 @@ Please transpile your code down first using [Babel](https://github.com/babel/bab
 - Compiler is in src/compiler.ts
 - Runtime is in src/runtime.ts
 - "Typescript"
-- - This "Typescript" project uses Node's new flag `--experimental-strip-types`. This is means we can run `node index.ts` directly!
+- - This "Typescript" project uses Node's new flag `--experimental-strip-types`. This means we can run `node index.ts` directly!
 
 ### Use with JS-Confuser
 
