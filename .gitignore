@@ -1,2 +1,7 @@
 node_modules
 dist
+coverage
+
+output.js
+output.min.js
+output.obf.js
