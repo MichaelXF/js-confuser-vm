@@ -3,11 +3,12 @@
 **Requires Node v24.13.1 or higher**
 
 - ES5 support only. No complex features: async, generator, and even try..catch are beyond scope.
+- Experimental. Expect issues.
 
 ### Usage
 
 ```shell
-$ git clone this repo
+$ git clone https://github.com/MichaelXF/js-confuser-vm
 ```
 
 - Example Script:
@@ -138,12 +139,12 @@ Please transpile your code down first using [Babel](https://github.com/babel/bab
 ### Project:
 
 - Stack based VM
-- Lua-style Closure and Upvalue model
+- Lua-style closure and upvalue model
 - CPython-style opcodes and codegen
 - Compiler is in src/compiler.ts
 - Runtime is in src/runtime.ts
 - "Typescript"
-- - This "Typescript" projects uses Node's new flag `--experimental-strip-types`. This is means we can run `node index.ts` directly!
+- - This "Typescript" project uses Node's new flag `--experimental-strip-types`. This is means we can run `node index.ts` directly!
 
 ### Use with JS-Confuser
 
@@ -156,7 +157,7 @@ JS-Confuser is recommended to be applied *after* virtualizing your source code. 
 
 ### Made with AI
 
-This project has been created with the help of AI. Expect bugs.
+This project has been created with the help of AI. Expect issues.
 
 ### License
 

@@ -1,16 +1,26 @@
 {
-  "name": "vm",
-  "version": "1.0.0",
-  "main": "vm.js",
+  "name": "js-confuser-vm",
+  "version": "0.0.1",
+  "main": "src/index.ts",
   "scripts": {
     "index": "NODE_OPTIONS=\"--disable-warning=ExperimentalWarning\" node index.ts",
     "test": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html",
-    "test262": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" node test262-scripts/run-test262.ts"
+    "test262": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" node test262-scripts/run-test262.ts",
+    "prepublishOnly": "npm run test"
   },
   "type": "module",
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
+  "keywords": [
+    "vm",
+    "virtual machine",
+    "obfuscator",
+    "obfuscation",
+    "uglify",
+    "code protection",
+    "javascript obfuscator",
+    "js obfuscator"
+  ],
+  "author": "MichaelXF",
+  "license": "MIT",
   "description": "",
   "dependencies": {
     "@babel/generator": "^7.29.1",
@@ -19,11 +29,13 @@
     "@babel/types": "^7.29.0",
     "google-closure-compiler": "^20260216.0.0",
     "js-confuser": "^2.0.0",
-    "json5": "^2.2.3",
-    "terser": "^5.46.0"
+    "json5": "^2.2.3"
   },
   "devDependencies": {
     "@types/node": "^25.3.0",
     "jest": "^30.2.0"
+  },
+  "engines": {
+    "node": ">=24.0.0"
   }
 }

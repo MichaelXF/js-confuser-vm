@@ -6,4 +6,7 @@ output.js
 output.min.js
 output.obf.js
 .claude
-package-lock.json
+
+test
+test262
+test262-scripts
