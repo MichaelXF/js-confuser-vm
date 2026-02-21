@@ -1,8 +1,15 @@
-function sum() {
-  var total = 0;
-  for (var i = 0; i < arguments.length; i++) {
-    total += arguments[i];
+function fibonacci(num) {
+  var a = 0,
+    b = 1,
+    c = num;
+  while (num-- > 1) {
+    c = a + b;
+    a = b;
+    b = c;
   }
-  return total;
+  return c;
 }
-console.log(sum(1, 2, 3, 4, 6, -10)); // 10
+
+for (var i = 1; i <= 25; i++) {
+  console.log(i, fibonacci(i));
+}

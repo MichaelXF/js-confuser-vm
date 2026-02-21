@@ -1,9 +1,5 @@
-import { compileAndSerialize } from "./compiler";
+import { compileAndSerialize } from "./compiler.ts";
 
 export function virtualize(source) {
-  const output = compileAndSerialize(source);
-
-  return {
-    code: output,
-  };
+  return compileAndSerialize(source);
 }

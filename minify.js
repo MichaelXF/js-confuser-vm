@@ -1,4 +1,4 @@
-const ClosureCompiler = require("google-closure-compiler").default;
+import ClosureCompiler from "google-closure-compiler";
 
 const compiler = new ClosureCompiler({
   js: "output.js",
@@ -7,7 +7,7 @@ const compiler = new ClosureCompiler({
 
   warning_level: "QUIET",
   env: "CUSTOM", // removes all default externs
-  externs: "empty_externs.js", // pass a blank file to satisfy the flag
+  externs: "minify_empty_externs.js", // pass a blank file to satisfy the flag
 });
 
 compiler.run((exitCode, stdOut, stdErr) => {

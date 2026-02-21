@@ -1,16 +1,19 @@
-// transform.js
-// Usage: node transform.js
-// Requires: npm install @babel/parser @babel/traverse @babel/generator
-
 import parser from "@babel/parser";
 import traverseImport from "@babel/traverse";
-import generateImport from "@babel/generator";
+import { generate } from "@babel/generator";
+
+import { readFileSync } from "fs";
+import { join } from "path";
+import { stripTypeScriptTypes } from "module";
+import JSON5 from "json5";
 
 const traverse = traverseImport.default;
-const generate = generateImport;
+
+const SHUFFLE_OPCODES = false;
+const PACK = true;
 
 // ── Opcodes ──────────────────────────────────────────────────────
-const OP = {
+const OP_ORIGINAL = {
   LOAD_CONST: 0,
   LOAD_LOCAL: 1,
   STORE_LOCAL: 2,
@@ -69,9 +72,44 @@ const OP = {
   // ── NEW ────────────────────────────────────────────
   LOAD_THIS: 48, // push frame.thisVal
   NEW: 49, // operand = argCount — construct a new object
+  DUP: 50, // duplicate top of stack
+  THROW: 51, // pop value, throw it
+  LOOSE_EQ: 52, // a == b  (abstract equality)
+  LOOSE_NEQ: 53, // a != b  (abstract inequality)
+
+  FOR_IN_SETUP: 54, // pop obj → build enumerable-key iterator → push {keys,i}
+  FOR_IN_NEXT: 55, // operand=exit_pc; pop iter; if done→jump; else push next key
+
+  // ── Self-modifying bytecode ────────────────────────────────
+  PATCH: 56, // pop destPc; constants[operand]=word[]; write words into bytecode[destPc..]
 };
+
+export let OP: Partial<typeof OP_ORIGINAL> = {};
+// Construct randomized opcode mapping
+if (SHUFFLE_OPCODES) {
+  let used = new Set();
+  for (const key in OP_ORIGINAL) {
+    let val;
+    do {
+      val = Math.floor(Math.random() * 256);
+    } while (used.has(val));
+    used.add(val);
+    OP[key] = val;
+  }
+} else {
+  OP = OP_ORIGINAL;
+}
+
 // Reverse map for comment generation
 const OP_NAME = Object.fromEntries(Object.entries(OP).map(([k, v]) => [v, k]));
+
+const JUMP_OPS = new Set([
+  OP.JUMP,
+  OP.JUMP_IF_FALSE,
+  OP.JUMP_IF_TRUE_OR_POP,
+  OP.JUMP_IF_FALSE_OR_POP,
+  OP.FOR_IN_NEXT,
+]);
 
 // ─────────────────────────────────────────────────────────────────
 // Constant Pool
@@ -79,6 +117,9 @@ const OP_NAME = Object.fromEntries(Object.entries(OP).map(([k, v]) => [v, k]));
 // Object entries (fn descriptors) are always appended — no dedup.
 // ─────────────────────────────────────────────────────────────────
 class ConstantPool {
+  items: any[];
+  _index: Map<string, number>;
+
   constructor() {
     this.items = []; // ordered pool entries
     this._index = new Map(); // primitive dedup map
@@ -107,6 +148,10 @@ class ConstantPool {
 // numeric slots at compile time — zero name lookups at runtime.
 // ─────────────────────────────────────────────────────────────────
 class Scope {
+  parent: Scope | null;
+  _locals: Map<string, number>;
+  _next: number;
+
   constructor(parent = null) {
     this.parent = parent;
     this._locals = new Map(); // name → slot index
@@ -140,11 +185,19 @@ class Scope {
 // Distinct from runtime Frame — this is compile-time only.
 // ─────────────────────────────────────────────────────────────────
 class FnContext {
-  constructor(parentCtx = null) {
+  upvalues: { name: string; isLocal: number; index: number }[];
+  parentCtx: FnContext | null;
+  scope: Scope;
+  compiler: Compiler;
+  bc: any[];
+
+  constructor(compiler, parentCtx = null) {
+    this.compiler = compiler;
     this.parentCtx = parentCtx;
     this.scope = new Scope();
-    this.upvalues = []; // { name, isLocal, index }
+
     this.bc = [];
+    this.upvalues = []; // { name, isLocal, index }
   }
 
   // Find or register a captured variable as an upvalue.
@@ -154,7 +207,7 @@ class FnContext {
     const existing = this.upvalues.findIndex((u) => u.name === name);
     if (existing !== -1) return existing;
     const idx = this.upvalues.length;
-    this.upvalues.push({ name, isLocal, index });
+    this.upvalues.push({ name, isLocal, index: index });
     return idx;
   }
 }
@@ -163,11 +216,36 @@ class FnContext {
 // Compiler
 // ─────────────────────────────────────────────────────────────────
 class Compiler {
-  constructor() {
+  constants: ConstantPool;
+  fnDescriptors: any[];
+  bytecode: any[];
+  mainStartPc: number;
+
+  _currentCtx: FnContext | null;
+  _pendingLabel: string | null;
+  _forInCount: number;
+  _loopStack: {
+    type: "loop" | "switch" | "block";
+    label: string | null;
+    breakJumps: number[];
+    continueJumps: number[];
+  }[];
+
+  options: Options;
+  serializer: Serializer;
+
+  constructor(options: Options) {
+    this.options = options;
     this.constants = new ConstantPool();
     this.fnDescriptors = []; // populated in pass 1
-    this.mainBytecode = [];
+    this.bytecode = [];
+    this.mainStartPc = 0;
     this._currentCtx = null; // FnContext of the function being compiled, null at top-level
+    this._loopStack = []; // { breakJumps: number[], continueJumps: number[] } per active loop
+    this._pendingLabel = null;
+    this._forInCount = 0; // counter for synthetic for-in iterator global names
+
+    this.serializer = new Serializer(this);
   }
 
   // ── Variable resolution ──────────────────────────────────────
@@ -202,6 +280,10 @@ class Compiler {
   compile(source) {
     const ast = parser.parse(source, { sourceType: "script" });
 
+    return this.compileAST(ast);
+  }
+
+  compileAST(ast) {
     // Pass 1 — compile every FunctionDeclaration into a descriptor.
     //           Traverse finds them regardless of nesting depth.
     traverse(ast, {
@@ -214,13 +296,12 @@ class Compiler {
       },
     });
 
-    // Pass 2 — compile top-level statements into MAIN_BYTECODE.
+    // Pass 2 — compile top-level statements into BYTECODE.
     this._compileMain(ast.program.body);
 
     return {
-      constants: this.constants.items,
-      fnDescriptors: this.fnDescriptors,
-      mainBytecode: this.mainBytecode,
+      bytecode: this.bytecode,
+      mainStartPc: this.mainStartPc,
     };
   }
 
@@ -229,7 +310,7 @@ class Compiler {
   _compileFunctionDecl(node) {
     // Create a context whose parent is whatever we're currently compiling.
     // This is what lets _resolve cross function boundaries correctly.
-    const ctx = new FnContext(this._currentCtx);
+    const ctx = new FnContext(this, this._currentCtx);
     const savedCtx = this._currentCtx;
     this._currentCtx = ctx;
 
@@ -279,13 +360,16 @@ class Compiler {
 
     this._currentCtx = savedCtx; // restore before touching fnDescriptors
 
+    var fnIdx = this.fnDescriptors.length;
+    node._fnIdx = fnIdx; // for error messages
+
     const desc = {
-      name: node.id ? node.id.name : "<anonymous>",
+      name: node.id?.name || "<anonymous>",
       paramCount: node.params.length,
       localCount: ctx.scope.localCount,
       upvalueDescriptors: ctx.upvalues.map((u) => ({
         isLocal: u.isLocal,
-        index: u.index,
+        _index: u.index,
       })),
       bytecode: ctx.bc,
       // Indices assigned after pushing into the pool
@@ -301,13 +385,14 @@ class Compiler {
   // ── Main (top-level) ─────────────────────────────────────────
 
   _compileMain(body) {
-    const bc = this.mainBytecode;
+    this.mainStartPc = 0; // ← record main's entry point
+    const bc = this.bytecode;
 
     // Hoist all FunctionDeclarations: MAKE_CLOSURE → STORE_GLOBAL
     // (mirrors JS hoisting — functions are available before other code)
     for (const node of body) {
       if (node.type !== "FunctionDeclaration") continue;
-      const desc = this.fnDescriptors.find((d) => d.name === node.id.name);
+      const desc = this.fnDescriptors.find((d) => d._fnIdx === node._fnIdx);
       const nameIdx = this.constants.intern(node.id.name);
       bc.push([OP.MAKE_CLOSURE, desc._constIdx]);
       bc.push([OP.STORE_GLOBAL, nameIdx]);
@@ -318,12 +403,76 @@ class Compiler {
       if (node.type === "FunctionDeclaration") continue;
       this._compileStatement(node, null, bc); // null scope → global context
     }
+
+    bc.push([OP.RETURN]); // end program
+
+    // Now that main is compiled, we can append all the function bodies at the end of the bytecode.
+    for (const descriptor of this.fnDescriptors) {
+      descriptor.startPc = this.bytecode.length;
+
+      descriptor.bytecode.push([OP.RETURN]); // ensure every function ends with RETURN
+
+      if (this.options.selfModifying) {
+        // Preamble is 2 instructions: LOAD_CONST(destPc) + PATCH(bodyConst)
+        // Real body starts immediately after the preamble.
+        const bodyPc = descriptor.startPc + 2;
+
+        // Build real body with jump targets resolved from bodyPc as the base.
+        const realBodyInstrs = descriptor.bytecode.map((instr) =>
+          this._offsetJump(instr, bodyPc),
+        );
+
+        // Pack each instruction into a 32-bit word and store as a constant.
+        // The PATCH handler will write these words directly into this.bytecode.
+        const realBodyWords =
+          this.serializer._serializeBytecode(realBodyInstrs);
+        const bodyConstIdx = this.constants.addObject(realBodyWords);
+
+        // Emit preamble: push destination PC, then PATCH.
+        const destPcConstIdx = this.constants.intern(bodyPc);
+        this.bytecode.push([OP.LOAD_CONST, destPcConstIdx]);
+        this.bytecode.push([OP.PATCH, bodyConstIdx]);
+
+        // Garbage fill — same length as real body, never executed (PATCH fires first).
+        for (let i = 0; i < realBodyInstrs.length; i++) {
+          this.bytecode.push([OP.LOAD_CONST, 0]);
+        }
+      } else {
+        for (const instr of descriptor.bytecode) {
+          this.bytecode.push(this._offsetJump(instr, descriptor.startPc));
+        }
+      }
+    }
+
+    if (this.bytecode.length > 0xffffff)
+      throw new Error(
+        `Program too large: ${this.bytecode.length} instructions, max 16,777,215`,
+      );
+
+    if (this.constants.items.length > 0xffffff)
+      throw new Error(
+        `Constant pool too large: ${this.constants.items.length} entries, max 16,777,215`,
+      );
+  }
+
+  _offsetJump(instr, offset) {
+    if (JUMP_OPS.has(instr[0]) && instr[1] !== undefined) {
+      return [instr[0], instr[1] + offset];
+    }
+    return instr;
   }
 
   // ── Statements ───────────────────────────────────────────────
 
   _compileStatement(node, scope, bc) {
     switch (node.type) {
+      case "BlockStatement": {
+        for (const stmt of node.body) {
+          this._compileStatement(stmt, scope, bc);
+        }
+        break;
+      }
+
       case "FunctionDeclaration": {
         // Nested function — compile it into a descriptor, then emit
         // MAKE_CLOSURE so it's captured as a live closure at runtime.
@@ -336,6 +485,12 @@ class Compiler {
         } else {
           bc.push([OP.STORE_GLOBAL, this.constants.intern(node.id.name)]);
         }
+        break;
+      }
+
+      case "ThrowStatement": {
+        this._compileExpr(node.argument, scope, bc);
+        bc.push([OP.THROW]);
         break;
       }
 
@@ -381,7 +536,12 @@ class Compiler {
         bc.push([OP.JUMP_IF_FALSE, 0]);
         const jumpIfFalseIdx = bc.length - 1;
         // 3. Compile the consequent block (the "then" branch)
-        for (const stmt of node.consequent.body) {
+        // Consequent may be a BlockStatement or a bare statement (no braces)
+        const consequentBody =
+          node.consequent.type === "BlockStatement"
+            ? node.consequent.body
+            : [node.consequent];
+        for (const stmt of consequentBody) {
           this._compileStatement(stmt, scope, bc);
         }
         if (node.alternate) {
@@ -408,88 +568,373 @@ class Compiler {
       }
 
       case "WhileStatement": {
-        // ┌─ loop header ──────────────────────────────────────────┐
-        // │  Save the address of the test — the back-edge JUMP     │
-        // │  will return here every iteration.                     │
-        // └────────────────────────────────────────────────────────┘
+        const _wLabel = this._pendingLabel;
+        this._pendingLabel = null;
+        this._loopStack.push({
+          type: "loop",
+          label: _wLabel,
+          breakJumps: [],
+          continueJumps: [],
+        });
+        const loopCtxW = this._loopStack[this._loopStack.length - 1];
+
         const loopTop = bc.length;
-        // 1. Compile test → leaves boolean on stack
         this._compileExpr(node.test, scope, bc);
-        // 2. If test is false, jump out — target patched after body
         bc.push([OP.JUMP_IF_FALSE, 0]);
         const exitJumpIdx = bc.length - 1;
-        // 3. Compile body
+
         for (const stmt of node.body.body) {
           this._compileStatement(stmt, scope, bc);
         }
-        // 4. Unconditional back-edge — jump to loop header
+
+        // continue → re-evaluate the test
+        for (const idx of loopCtxW.continueJumps) bc[idx][1] = loopTop;
         bc.push([OP.JUMP, loopTop]);
-        // 5. Patch the exit jump to land here (after the back-edge)
-        bc[exitJumpIdx][1] = bc.length;
+
+        const exitTargetW = bc.length;
+        bc[exitJumpIdx][1] = exitTargetW;
+        for (const idx of loopCtxW.breakJumps) bc[idx][1] = exitTargetW;
+
+        this._loopStack.pop();
         break;
       }
 
       case "DoWhileStatement": {
-        // ┌─ loop body ─────────────────────────────────────────────┐
-        // │  Body runs unconditionally on the first iteration.      │
-        // │  Test sits at the BOTTOM — jump back only if truthy.    │
-        // └─────────────────────────────────────────────────────────┘
-        const loopTop = bc.length; // address of first body instruction
+        const _dwLabel = this._pendingLabel;
+        this._pendingLabel = null;
+        this._loopStack.push({
+          type: "loop",
+          label: _dwLabel,
+          breakJumps: [],
+          continueJumps: [],
+        });
+        const loopCtxDW = this._loopStack[this._loopStack.length - 1];
 
-        // 1. Compile body
+        const loopTopDW = bc.length;
+
         for (const stmt of node.body.body) {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // 2. Compile test — leaves boolean on stack
+        // continue → skip rest of body, fall through to test
+        const continueTargetDW = bc.length;
+        for (const idx of loopCtxDW.continueJumps)
+          bc[idx][1] = continueTargetDW;
+
         this._compileExpr(node.test, scope, bc);
-
-        // 3. If test is falsy → exit loop (jump over back-edge)
         bc.push([OP.JUMP_IF_FALSE, 0]);
-        const exitJumpIdx = bc.length - 1;
+        const exitJumpIdxDW = bc.length - 1;
+        bc.push([OP.JUMP, loopTopDW]);
 
-        // 4. Truthy → back-edge to top of body
-        bc.push([OP.JUMP, loopTop]);
+        const exitTargetDW = bc.length;
+        bc[exitJumpIdxDW][1] = exitTargetDW;
+        for (const idx of loopCtxDW.breakJumps) bc[idx][1] = exitTargetDW;
 
-        // 5. Patch exit jump to land here
-        bc[exitJumpIdx][1] = bc.length;
+        this._loopStack.pop();
         break;
       }
 
       case "ForStatement": {
-        // for (init; test; update) { body }
-        // Compiles to the exact same shape as while, just with
-        // init hoisted before the header and update appended to the body.
-        // 1. Init (e.g. var i = 0) — runs once before the loop
+        const _fLabel = this._pendingLabel;
+        this._pendingLabel = null;
+        this._loopStack.push({
+          type: "loop",
+          label: _fLabel,
+          breakJumps: [],
+          continueJumps: [],
+        });
+        const loopCtxF = this._loopStack[this._loopStack.length - 1];
+
         if (node.init) {
           if (node.init.type === "VariableDeclaration") {
             this._compileStatement(node.init, scope, bc);
           } else {
-            // bare expression init (e.g. i = 0)
             this._compileExpr(node.init, scope, bc);
             bc.push([OP.POP]);
           }
         }
-        // 2. Loop header — test evaluated every iteration
-        const loopTop = bc.length;
+
+        const loopTopF = bc.length;
         if (node.test) {
           this._compileExpr(node.test, scope, bc);
           bc.push([OP.JUMP_IF_FALSE, 0]);
         }
-        const exitJumpIdx = node.test ? bc.length - 1 : null;
-        // 3. Body
+        const exitJumpIdxF = node.test ? bc.length - 1 : null;
+
         for (const stmt of node.body.body) {
           this._compileStatement(stmt, scope, bc);
         }
-        // 4. Update expression (e.g. i++) — runs at end of each iteration
+
+        // continue → run update (if any) then back to test
         if (node.update) {
+          const continueTargetF = bc.length;
+          for (const idx of loopCtxF.continueJumps)
+            bc[idx][1] = continueTargetF;
           this._compileExpr(node.update, scope, bc);
-          bc.push([OP.POP]); // update result is always discarded
+          bc.push([OP.POP]);
+        } else {
+          // No update — continue goes straight to the test
+          for (const idx of loopCtxF.continueJumps) bc[idx][1] = loopTopF;
         }
-        // 5. Back-edge
-        bc.push([OP.JUMP, loopTop]);
-        // 6. Patch exit
-        if (exitJumpIdx !== null) bc[exitJumpIdx][1] = bc.length;
+
+        bc.push([OP.JUMP, loopTopF]);
+
+        const exitTargetF = bc.length;
+        if (exitJumpIdxF !== null) bc[exitJumpIdxF][1] = exitTargetF;
+        for (const idx of loopCtxF.breakJumps) bc[idx][1] = exitTargetF;
+
+        this._loopStack.pop();
+        break;
+      }
+
+      case "BreakStatement": {
+        bc.push([OP.JUMP, 0]);
+        const _bJumpIdx = bc.length - 1;
+        if (node.label) {
+          const _bLabelName = node.label.name;
+          let _bFound = -1;
+          for (let _bi = this._loopStack.length - 1; _bi >= 0; _bi--) {
+            if (this._loopStack[_bi].label === _bLabelName) {
+              _bFound = _bi;
+              break;
+            }
+          }
+          if (_bFound === -1)
+            throw new Error(`Label '${_bLabelName}' not found`);
+          this._loopStack[_bFound].breakJumps.push(_bJumpIdx);
+        } else {
+          if (this._loopStack.length === 0)
+            throw new Error("break outside loop");
+          this._loopStack[this._loopStack.length - 1].breakJumps.push(
+            _bJumpIdx,
+          );
+        }
+        break;
+      }
+
+      case "ContinueStatement": {
+        bc.push([OP.JUMP, 0]);
+        const _cJumpIdx = bc.length - 1;
+        if (node.label) {
+          const _cLabelName = node.label.name;
+          let _cFound = -1;
+          for (let _ci = this._loopStack.length - 1; _ci >= 0; _ci--) {
+            if (
+              this._loopStack[_ci].label === _cLabelName &&
+              this._loopStack[_ci].type === "loop"
+            ) {
+              _cFound = _ci;
+              break;
+            }
+          }
+          if (_cFound === -1)
+            throw new Error(`Label '${_cLabelName}' not found for continue`);
+          this._loopStack[_cFound].continueJumps.push(_cJumpIdx);
+        } else {
+          if (this._loopStack.length === 0)
+            throw new Error("continue outside loop");
+          // Find the innermost loop (skip switch and block contexts)
+          let loopIdx = -1;
+          for (let i = this._loopStack.length - 1; i >= 0; i--) {
+            if (this._loopStack[i].type === "loop") {
+              loopIdx = i;
+              break;
+            }
+          }
+          if (loopIdx === -1) throw new Error("continue outside loop");
+          this._loopStack[loopIdx].continueJumps.push(_cJumpIdx);
+        }
+        break;
+      }
+
+      case "SwitchStatement": {
+        const _swLabel = this._pendingLabel;
+        this._pendingLabel = null;
+        this._loopStack.push({
+          type: "switch",
+          label: _swLabel,
+          breakJumps: [],
+          continueJumps: [],
+        });
+        const switchCtx = this._loopStack[this._loopStack.length - 1];
+
+        // Compile the discriminant and leave it on the stack
+        this._compileExpr(node.discriminant, scope, bc);
+
+        const cases = node.cases;
+        const defaultIdx = cases.findIndex((c) => c.test === null);
+
+        // Dispatch section: emit case checks
+        const bodyJumps = []; // { cas, jumpIdx }
+
+        for (const cas of cases) {
+          if (cas.test === null) continue; // Skip default in dispatch
+
+          // Check this case: DUP; LOAD_CONST; EQ; JUMP_IF_FALSE
+          bc.push([OP.DUP]);
+          this._compileExpr(cas.test, scope, bc);
+          bc.push([OP.EQ]);
+          bc.push([OP.JUMP_IF_FALSE, 0]); // Jump to next check (patched later)
+          const skipIdx = bc.length - 1;
+
+          // If matched, jump to this case's body
+          bc.push([OP.JUMP, 0]); // Jump to body (patched later)
+          bodyJumps.push({ cas, jumpIdx: bc.length - 1 });
+
+          // Patch the JUMP_IF_FALSE to the next check
+          bc[skipIdx][1] = bc.length;
+        }
+
+        // No match found: jump to default (or exit if no default)
+        bc.push([OP.JUMP, 0]);
+        const noMatchJumpIdx = bc.length - 1;
+
+        // Body section: compile all case bodies in source order
+        const bodyStart = new Map();
+        for (const cas of cases) {
+          bodyStart.set(cas, bc.length);
+          for (const stmt of cas.consequent) {
+            this._compileStatement(stmt, scope, bc);
+          }
+        }
+
+        // Patch the no-match jump to default or exit
+        const exitTarget = bc.length;
+        if (defaultIdx !== -1) {
+          bc[noMatchJumpIdx][1] = bodyStart.get(cases[defaultIdx]);
+        } else {
+          bc[noMatchJumpIdx][1] = exitTarget;
+        }
+
+        // Patch all body jumps
+        for (const { cas, jumpIdx } of bodyJumps) {
+          bc[jumpIdx][1] = bodyStart.get(cas);
+        }
+
+        // Exit: pop the discriminant and patch break jumps
+        bc.push([OP.POP]);
+        for (const idx of switchCtx.breakJumps) {
+          bc[idx][1] = bc.length - 1; // Point to the POP instruction
+        }
+
+        this._loopStack.pop();
+        break;
+      }
+
+      case "LabeledStatement": {
+        const _lName = node.label.name;
+        const _lBody = node.body;
+        const _lIsLoop =
+          _lBody.type === "ForStatement" ||
+          _lBody.type === "WhileStatement" ||
+          _lBody.type === "DoWhileStatement" ||
+          _lBody.type === "ForInStatement";
+        const _lIsSwitch = _lBody.type === "SwitchStatement";
+
+        if (_lIsLoop || _lIsSwitch) {
+          // Pass label down to the loop/switch handler via _pendingLabel
+          this._pendingLabel = _lName;
+          this._compileStatement(_lBody, scope, bc);
+          this._pendingLabel = null; // safety clear if handler didn't consume it
+        } else {
+          // Non-loop labeled statement (e.g. labeled block) — only break is valid
+          this._loopStack.push({
+            type: "block",
+            label: _lName,
+            breakJumps: [],
+            continueJumps: [],
+          });
+          this._compileStatement(_lBody, scope, bc);
+          const _lEntry = this._loopStack.pop()!;
+          const _lExit = bc.length;
+          for (const _lIdx of _lEntry.breakJumps) bc[_lIdx][1] = _lExit;
+        }
+        break;
+      }
+
+      case "ForInStatement": {
+        const _fiLabel = this._pendingLabel;
+        this._pendingLabel = null;
+
+        // Evaluate the object expression → on stack
+        this._compileExpr(node.right, scope, bc);
+        // FOR_IN_SETUP: pops obj, pushes iterator {keys, i}
+        bc.push([OP.FOR_IN_SETUP]);
+
+        // Store iterator in a hidden slot so break/continue need no cleanup
+        let emitLoadIter: () => void;
+        let emitStoreIter: () => void;
+        if (scope) {
+          // Reserve a hidden local slot (no name mapping needed)
+          const iterSlot = scope._next++;
+          emitLoadIter = () => bc.push([OP.LOAD_LOCAL, iterSlot]);
+          emitStoreIter = () => bc.push([OP.STORE_LOCAL, iterSlot]);
+        } else {
+          // Top level — use a synthetic global that won't collide with user code
+          const iterNameIdx = this.constants.intern(
+            "__fi" + this._forInCount++,
+          );
+          emitLoadIter = () => bc.push([OP.LOAD_GLOBAL, iterNameIdx]);
+          emitStoreIter = () => bc.push([OP.STORE_GLOBAL, iterNameIdx]);
+        }
+        emitStoreIter();
+
+        this._loopStack.push({
+          type: "loop",
+          label: _fiLabel,
+          breakJumps: [],
+          continueJumps: [],
+        });
+        const loopCtxFI = this._loopStack[this._loopStack.length - 1];
+
+        const loopTopFI = bc.length;
+
+        // Load iterator, attempt to get next key
+        emitLoadIter();
+        bc.push([OP.FOR_IN_NEXT, 0]); // exit target patched below
+        const forInNextPatch = bc.length - 1;
+
+        // Assign the key (now on top of stack) to the loop variable
+        if (node.left.type === "VariableDeclaration") {
+          const name = node.left.declarations[0].id.name;
+          if (scope) {
+            const slot = scope.define(name);
+            bc.push([OP.STORE_LOCAL, slot]);
+          } else {
+            bc.push([OP.STORE_GLOBAL, this.constants.intern(name)]);
+          }
+        } else if (node.left.type === "Identifier") {
+          const res = this._resolve(node.left.name, this._currentCtx);
+          if (res.kind === "local") {
+            bc.push([OP.STORE_LOCAL, res.slot]);
+          } else if (res.kind === "upvalue") {
+            bc.push([OP.STORE_UPVALUE, res.index]);
+          } else {
+            bc.push([OP.STORE_GLOBAL, this.constants.intern(node.left.name)]);
+          }
+        } else {
+          const src = generate(node.left).code;
+          throw new Error(
+            `Unsupported for-in left-hand side: ${node.left.type}\n  → ${src}`,
+          );
+        }
+
+        // Compile the loop body
+        const fiBody =
+          node.body.type === "BlockStatement" ? node.body.body : [node.body];
+        for (const stmt of fiBody) {
+          this._compileStatement(stmt, scope, bc);
+        }
+
+        // continue → re-load iterator and check next key
+        for (const idx of loopCtxFI.continueJumps) bc[idx][1] = loopTopFI;
+        bc.push([OP.JUMP, loopTopFI]);
+
+        const exitTargetFI = bc.length;
+        bc[forInNextPatch][1] = exitTargetFI;
+        for (const idx of loopCtxFI.breakJumps) bc[idx][1] = exitTargetFI;
+
+        this._loopStack.pop();
         break;
       }
 
@@ -632,11 +1077,11 @@ class Compiler {
           "<": OP.LT,
           ">": OP.GT,
           "===": OP.EQ,
-          "==": OP.EQ,
+          "==": OP.LOOSE_EQ,
           "<=": OP.LTE,
           ">=": OP.GTE,
           "!==": OP.NEQ,
-          "!=": OP.NEQ,
+          "!=": OP.LOOSE_NEQ,
           in: OP.IN, // ← add
           instanceof: OP.INSTANCEOF, // ← add
         }[node.operator];
@@ -650,28 +1095,38 @@ class Compiler {
 
       case "UpdateExpression": {
         const res = this._resolve(node.argument.name, this._currentCtx);
-        const bump = node.operator === "++" ? [OP.ADD] : [OP.SUB];
+        const bumpOp = node.operator === "++" ? OP.ADD : OP.SUB;
         const one = this.constants.intern(1);
-        if (res.kind === "local") {
-          bc.push([OP.LOAD_LOCAL, res.slot]);
-          bc.push([OP.LOAD_CONST, one]);
-          bc.push(bump);
-          bc.push([OP.STORE_LOCAL, res.slot]);
-          bc.push([OP.LOAD_LOCAL, res.slot]);
-        } else if (res.kind === "upvalue") {
-          bc.push([OP.LOAD_UPVALUE, res.index]);
-          bc.push([OP.LOAD_CONST, one]);
-          bc.push(bump);
-          bc.push([OP.STORE_UPVALUE, res.index]);
-          bc.push([OP.LOAD_UPVALUE, res.index]);
-        } else {
-          const nameIdx = this.constants.intern(node.argument.name);
-          bc.push([OP.LOAD_GLOBAL, nameIdx]);
-          bc.push([OP.LOAD_CONST, one]);
-          bc.push(bump);
-          bc.push([OP.STORE_GLOBAL, nameIdx]);
-          bc.push([OP.LOAD_GLOBAL, nameIdx]);
-        }
+
+        // Helper closures: emit load / store for whichever resolution kind we have
+        const emitLoad = () => {
+          if (res.kind === "local") bc.push([OP.LOAD_LOCAL, res.slot]);
+          else if (res.kind === "upvalue")
+            bc.push([OP.LOAD_UPVALUE, res.index]);
+          else
+            bc.push([
+              OP.LOAD_GLOBAL,
+              this.constants.intern(node.argument.name),
+            ]);
+        };
+        const emitStore = () => {
+          if (res.kind === "local") bc.push([OP.STORE_LOCAL, res.slot]);
+          else if (res.kind === "upvalue")
+            bc.push([OP.STORE_UPVALUE, res.index]);
+          else
+            bc.push([
+              OP.STORE_GLOBAL,
+              this.constants.intern(node.argument.name),
+            ]);
+        };
+
+        emitLoad();
+        if (!node.prefix) bc.push([OP.DUP]); // post: save old value before mutating
+        bc.push([OP.LOAD_CONST, one]);
+        bc.push([bumpOp]);
+        emitStore();
+        if (node.prefix) emitLoad(); // pre: reload new value as result
+
         break;
       }
 
@@ -933,9 +1388,18 @@ class Compiler {
 // Turns the compiled output into a commented JS source string.
 // ─────────────────────────────────────────────────────────────────
 class Serializer {
-  constructor(constants, fnDescriptors) {
-    this.constants = constants;
-    this.fnDescriptors = fnDescriptors;
+  compiler: Compiler;
+
+  constructor(compiler: Compiler) {
+    this.compiler = compiler;
+  }
+
+  get constants() {
+    return this.compiler.constants.items;
+  }
+
+  get fnDescriptors() {
+    return this.compiler.fnDescriptors;
   }
 
   // Produce a JS literal for a constant pool entry
@@ -949,7 +1413,9 @@ class Serializer {
   }
 
   // One instruction → "[op, operand]  // MNEMONIC description"
-  _serializeInstr(instr, constants) {
+  _serializeInstr(instr) {
+    const constants = this.constants;
+
     const [op, operand] = instr;
     const name = OP_NAME[op] || `OP_${op}`;
     let comment = name;
@@ -1000,26 +1466,46 @@ class Serializer {
       }
     }
 
-    const instrText = operand !== undefined ? `[${op}, ${operand}]` : `[${op}]`;
+    // Pack a [op, operand?] instruction pair into a single 32-bit word.
+    // Shared between the Serializer and the obfuscation path in _compileMain.
 
-    return `      ${instrText.padEnd(12)}, // ${comment}`;
+    if (!PACK) {
+      const instrText =
+        operand !== undefined ? `[${op}, ${operand}]` : `[${op}]`;
+
+      return {
+        text: `      ${instrText.padEnd(12)}, // ${comment}`,
+        value: operand !== undefined ? [op, operand] : [op],
+      };
+    }
+
+    function packInstr(instr) {
+      const [op, operand] = instr;
+      if (operand !== undefined && !Number.isInteger(operand))
+        throw new Error(`Non-integer operand: ${operand}`);
+      if (operand !== undefined && operand < 0)
+        throw new Error(`Negative operand: ${operand}`);
+      if (operand !== undefined && operand > 0xffffff)
+        throw new Error(`Operand overflow (max 0xFFFFFF): ${operand}`);
+      return operand !== undefined ? (operand << 8) | op : op;
+    }
+
+    return {
+      text: "",
+      value: packInstr(instr),
+    };
   }
 
   // Serialize one fn descriptor into its FN[n] block
   _serializeFn(desc) {
     const lines = [
       `  {                       // FN[${desc._fnIdx}] — ${desc.name}`,
-      `    name:       ${JSON.stringify(desc.name)},`,
       `    paramCount: ${desc.paramCount},`,
       `    localCount: ${desc.localCount},`,
-      `    upvalueDescriptors: ${JSON.stringify(desc.upvalueDescriptors)},`,
-      `    bytecode: [`,
+      `    upvalueDescriptors: ${JSON5.stringify(desc.upvalueDescriptors)},`,
+      `    startPc: ${desc.startPc},`,
+      `  },`,
     ];
-    for (const instr of desc.bytecode) {
-      lines.push(this._serializeInstr(instr, this.constants));
-    }
-    lines.push("    ],");
-    lines.push("  },");
     return lines.join("\n");
   }
 
@@ -1033,7 +1519,32 @@ class Serializer {
     return lines.join("\n");
   }
 
-  serialize(mainBytecode) {
+  _serializeBytecode(bytecode) {
+    if (!PACK) {
+      return bytecode.map((instr) => this._serializeInstr(instr).value);
+    }
+
+    let words = [];
+
+    // ── BYTECODE
+    for (const instr of bytecode) {
+      words.push(this._serializeInstr(instr).value);
+    }
+
+    // Convert packed words → raw 4-byte little-endian binary → base64
+    const buf = new Uint8Array(words.length * 4);
+    words.forEach((w, i) => {
+      buf[i * 4] = w & 0xff;
+      buf[i * 4 + 1] = (w >>> 8) & 0xff;
+      buf[i * 4 + 2] = (w >>> 16) & 0xff;
+      buf[i * 4 + 3] = (w >>> 24) & 0xff;
+    });
+    const b64 = Buffer.from(buf).toString("base64");
+
+    return b64;
+  }
+
+  serialize(bytecode, mainStartPc) {
     const sections = [];
 
     // ── FN array
@@ -1047,13 +1558,18 @@ class Serializer {
     // ── CONSTANTS
     sections.push(this._serializeConstants());
 
-    // ── MAIN_BYTECODE
-    const mainLines = ["var MAIN_BYTECODE = ["];
-    for (const instr of mainBytecode) {
-      mainLines.push(this._serializeInstr(instr, this.constants));
+    if (PACK) {
+      sections.push(`var BYTECODE = "${this._serializeBytecode(bytecode)}";`);
+    } else {
+      sections.push(
+        `var BYTECODE = [\n  ${bytecode.map((instr) => this._serializeInstr(instr).text).join(",\n  ")}\n];`,
+      );
     }
-    mainLines.push("];");
-    sections.push(mainLines.join("\n"));
+
+    // ── MAIN_START_PC
+    sections.push(`var MAIN_START_PC = ${mainStartPc};`);
+
+    sections.push(`var PACK = ${PACK};`);
 
     // ── VM runtime
     sections.push(VM_RUNTIME);
@@ -1067,375 +1583,35 @@ class Serializer {
 // ─────────────────────────────────────────────────────────────────
 const VM_RUNTIME = `
 // ── Opcodes ──────────────────────────────────────────────────────
-var OP = ${JSON.stringify(OP)};
-
-// ── Upvalue ───────────────────────────────────────────────────────
-// While the outer frame is alive: reads/writes go to frame.locals[slot].
-// After the outer frame returns (closed): reads/writes hit this.value.
-function Upvalue(frame, slot) {
-  this.frame  = frame;
-  this.slot   = slot;
-  this.closed = false;
-  this.value  = undefined;
-}
-Upvalue.prototype.read  = function()  {
-  return this.closed ? this.value : this.frame.locals[this.slot];
-};
-Upvalue.prototype.write = function(v) {
-  if (this.closed) this.value = v;
-  else this.frame.locals[this.slot] = v;
-};
-Upvalue.prototype.close = function()  {
-  this.value  = this.frame.locals[this.slot];
-  this.closed = true;
-};
-
-// ── Closure & Frame ───────────────────────────────────────────────
-function Closure(fn) {
-  this.fn = fn;
-  this.upvalues = [];
-  this.prototype = {};   // ← default prototype object for \`new\`
-}
-
-function Frame(closure, returnPc, parent, thisVal) {
-  this.closure   = closure;
-  this.locals    = new Array(closure.fn.localCount).fill(undefined);
-  this.pc        = 0;
-  this.returnPc  = returnPc;  // pc to resume in parent frame after RETURN
-  this.parent    = parent;
-  this.thisVal  = thisVal !== undefined ? thisVal : undefined; 
-  this._newObj  = null;   // ← set by NEW so RETURN can see it
-}
-
-// ── VM ────────────────────────────────────────────────────────────
-function VM(mainBytecode, constants, globals) {
-  this.constants  = constants;
-  this.globals    = globals;
-  this.stack      = [];
-  this.frameStack = [];
-  this.openUpvalues = [];  // all currently open Upvalue objects across all frames
-
-  var mainFn = { name:'<main>', paramCount:0, localCount:0, bytecode:mainBytecode };
-  this.currentFrame = new Frame(new Closure(mainFn), null, null);
-}
-
-VM.prototype.push = function(v) { this.stack.push(v); };
-VM.prototype.pop  = function()  { return this.stack.pop(); };
-VM.prototype.peek = function()  { return this.stack[this.stack.length - 1]; };
-
-VM.prototype.captureUpvalue = function(frame, slot) {
-  // Reuse existing open upvalue for this frame+slot if one exists.
-  // This is what makes two closures share the same mutable cell.
-  for (var i = 0; i < this.openUpvalues.length; i++) {
-    var uv = this.openUpvalues[i];
-    if (uv.frame === frame && uv.slot === slot) return uv;
-  }
-  var uv = new Upvalue(frame, slot);
-  this.openUpvalues.push(uv);
-  return uv;
-};
-
-VM.prototype.closeUpvaluesFor = function(frame) {
-  // Called on RETURN — close every upvalue that was pointing into this frame.
-  // After this, closures that captured from the frame read from upvalue.value.
-  this.openUpvalues = this.openUpvalues.filter(function(uv) {
-    if (uv.frame === frame) { uv.close(); return false; }
-    return true;
-  });
-};
-
-VM.prototype.run = function() {
-  while (true) {
-    var frame = this.currentFrame;
-    var bc    = frame.closure.fn.bytecode;
-    if (frame.pc >= bc.length) break;
-
-    var instr   = bc[frame.pc++];
-    var op      = instr[0];
-    var operand = instr[1];
-
-    switch (op) {
-
-      case OP.LOAD_CONST:
-        this.push(this.constants[operand]);
-        break;
-
-      case OP.LOAD_LOCAL:
-        this.push(frame.locals[operand]);
-        break;
-
-      case OP.STORE_LOCAL:
-        frame.locals[operand] = this.pop();
-        break;
-
-      case OP.LOAD_GLOBAL:
-        this.push(this.globals[this.constants[operand]]);
-        break;
-
-      case OP.STORE_GLOBAL:
-        this.globals[this.constants[operand]] = this.pop();
-        break;
-
-      case OP.GET_PROP: {
-        // Stack: [..., obj, key] → [..., obj, obj[key]]
-        // obj is PEEKED (not popped) — CALL_METHOD needs it as receiver
-        var key = this.pop();
-        var obj = this.peek();
-        this.push(obj[key]);
-        break;
-      }
-
-      case OP.ADD: { var b = this.pop(); this.push(this.pop() + b); break; }
-      case OP.SUB: { var b = this.pop(); this.push(this.pop() - b); break; }
-      case OP.MUL: { var b = this.pop(); this.push(this.pop() * b); break; }
-      case OP.DIV: { var b = this.pop(); this.push(this.pop() / b); break; }
-      case OP.MOD:  { var b = this.pop(); this.push(this.pop() % b);   break; }
-      case OP.BAND: { var b = this.pop(); this.push(this.pop() & b);   break; }
-      case OP.BOR:  { var b = this.pop(); this.push(this.pop() | b);   break; }
-      case OP.BXOR: { var b = this.pop(); this.push(this.pop() ^ b);   break; }
-      case OP.SHL:  { var b = this.pop(); this.push(this.pop() << b);  break; }
-      case OP.SHR:  { var b = this.pop(); this.push(this.pop() >> b);  break; }
-      case OP.USHR: { var b = this.pop(); this.push(this.pop() >>> b); break; }
-
-      case OP.LT: { var b = this.pop(); this.push(this.pop() < b);  break; }
-      case OP.GT: { var b = this.pop(); this.push(this.pop() > b);  break; }
-      case OP.EQ: { var b = this.pop(); this.push(this.pop() === b); break; }
-
-      case OP.LTE: { var b = this.pop(); this.push(this.pop() <= b); break; }
-      case OP.GTE: { var b = this.pop(); this.push(this.pop() >= b); break; }
-      case OP.NEQ: { var b = this.pop(); this.push(this.pop() !== b); break; }
-
-      case OP.IN: {
-        var b = this.pop();
-        this.push(this.pop() in b);
-        break;
-      }
-
-      case OP.INSTANCEOF: {
-        var ctor = this.pop();
-        var obj  = this.pop();
-        if (typeof ctor === 'function') {
-          // Native constructor (e.g. Array, Date) — native instanceof is fine
-          this.push(obj instanceof ctor);
-        } else {
-          // VM Closure — ctor.prototype was set by MAKE_CLOSURE / user assignment.
-          // Walk obj's prototype chain looking for identity with ctor.prototype.
-          var proto  = ctor.prototype;          // the .prototype property on the Closure
-          var target = Object.getPrototypeOf(obj);
-          var result = false;
-          while (target !== null) {
-            if (target === proto) { result = true; break; }
-            target = Object.getPrototypeOf(target);
-          }
-          this.push(result);
-        }
-        break;
-      }
-
-      case OP.UNARY_NEG:    this.push(-this.pop());          break;
-      case OP.UNARY_POS:    this.push(this.pop());          break;
-      case OP.UNARY_NOT:    this.push(!this.pop());          break;
-      case OP.UNARY_BITNOT: this.push(~this.pop());          break;
-      case OP.TYPEOF:       this.push(typeof this.pop());    break;
-      case OP.VOID:         this.pop(); this.push(undefined); break;
-
-      case OP.TYPEOF_SAFE: {
-        // operand is a const index holding the variable name string.
-        // Mimics JS semantics: typeof undeclaredVar === "undefined" (no throw).
-        var name = this.pop();  // LOAD_CONST pushed the name — consume it
-        var val  = Object.prototype.hasOwnProperty.call(this.globals, name)
-          ? this.globals[name]
-          : undefined;
-        this.push(typeof val);
-        break;
-      }
-
-      case OP.JUMP:
-        frame.pc = operand;
-        break;
-
-      case OP.JUMP_IF_FALSE:
-        if (!this.pop()) frame.pc = operand;
-        break;
-
-      case OP.JUMP_IF_TRUE_OR_POP:
-        // || semantics: if truthy, we're done — leave value, jump over RHS.
-        // If falsy, discard it and fall through to evaluate RHS.
-        if (this.peek()) { frame.pc = operand; } else { this.pop(); }
-        break;
-
-      case OP.JUMP_IF_FALSE_OR_POP:
-        // && semantics: if falsy, we're done — leave value, jump over RHS.
-        // If truthy, discard it and fall through to evaluate RHS.
-        if (!this.peek()) { frame.pc = operand; } else { this.pop(); }
-        break;
-
-      case OP.MAKE_CLOSURE: {
-        var fn       = this.constants[operand];
-        var closure  = new Closure(fn);
-        for (var i = 0; i < fn.upvalueDescriptors.length; i++) {
-          var desc = fn.upvalueDescriptors[i];
-          if (desc.isLocal) {
-            // Capture directly from current frame's local slot
-            closure.upvalues.push(this.captureUpvalue(frame, desc.index));
-          } else {
-            // Relay — take upvalue from the enclosing closure's list
-            closure.upvalues.push(frame.closure.upvalues[desc.index]);
-          }
-        }
-        this.push(closure);
-        break;
-      }
-
-      case OP.LOAD_UPVALUE:
-        this.push(frame.closure.upvalues[operand].read());
-        break;
-
-      case OP.STORE_UPVALUE:
-        frame.closure.upvalues[operand].write(this.pop());
-        break;
-
-      case OP.BUILD_ARRAY: {
-        // Pop \`operand\` values off the stack in reverse, assemble array.
-        var elems = this.stack.splice(this.stack.length - operand);
-        this.push(elems);
-        break;
-      }
-      
-      case OP.BUILD_OBJECT: {
-        // Stack has: key0, val0, key1, val1 ... keyN, valN  (pushed left→right)
-        // Pop all pairs and build the object.
-        var pairs = this.stack.splice(this.stack.length - operand * 2);
-        var o = {};
-        for (var i = 0; i < pairs.length; i += 2) {
-          o[pairs[i]] = pairs[i + 1];   // key at even index, val at odd
-        }
-        this.push(o);
-        break;
-      }
-      case OP.SET_PROP: {
-        // Stack: [..., obj, key, val]
-        // Leaves val on stack — assignment is an expression in JS.
-        var val = this.pop();
-        var key = this.pop();
-        var obj = this.pop();   
-        obj[key] = val;
-        this.push(val);          // assignment expression evaluates to the assigned value
-        break;
-      }
-      case OP.GET_PROP_COMPUTED: {
-        // Stack: [..., obj, key]  — key is a runtime value (nums[i])
-        // Mirrors GET_PROP but pops the key that was pushed dynamically.
-        var key = this.pop();
-        var obj = this.pop();
-        this.push(obj[key]);
-        break;
-      }
-      case OP.DELETE_PROP: {
-        var key = this.pop();
-        var obj = this.pop();
-        this.push(delete obj[key]);
-        break;
-      }
-
-      case OP.CALL: {
-        var args   = this.stack.splice(this.stack.length - operand);
-        var callee = this.pop();
-        if (typeof callee === 'function') {
-          this.push(callee.apply(null, args));
-        } else {
-          var f = new Frame(callee, frame.pc, frame, undefined); // ← pass undefined as thisVal
-          for (var i = 0; i < args.length; i++) f.locals[i] = args[i];
-          f.locals[callee.fn.paramCount] = args;  // ← arguments slot
-          this.frameStack.push(this.currentFrame);
-          this.currentFrame = f;
-        }
-        break;
-      }
-
-      case OP.CALL_METHOD: {
-        var args     = this.stack.splice(this.stack.length - operand);
-        var callee   = this.pop();
-        var receiver = this.pop();  // left on stack by GET_PROP
-        if (typeof callee === 'function') {
-          this.push(callee.apply(receiver, args));
-        } else {
-          var f = new Frame(callee, frame.pc, frame, receiver); // ← pass receiver as thisVal
-          for (var i = 0; i < args.length; i++) f.locals[i] = args[i];
-          f.locals[callee.fn.paramCount] = args;  // ← arguments slot
-          this.frameStack.push(this.currentFrame);
-          this.currentFrame = f;
-        }
-        break;
-      }
-
-      case OP.LOAD_THIS:
-        this.push(frame.thisVal);
-        break;
-
-      case OP.NEW: {
-        var args    = this.stack.splice(this.stack.length - operand);
-        var callee  = this.pop();
-        var newObj  = Object.create(callee.prototype || null);  // respects MyClass.prototype
-        if (typeof callee === 'function') {
-          // Native function constructor (e.g. new Date())
-          var result = callee.apply(newObj, args);
-          this.push((typeof result === 'object' && result !== null) ? result : newObj);
-        } else {
-          // VM closure constructor
-          var f = new Frame(callee, frame.pc, frame, newObj);   // this = newObj
-          f._newObj = newObj;                                    // remember for RETURN
-          for (var i = 0; i < args.length; i++) f.locals[i] = args[i];
-          f.locals[callee.fn.paramCount] = args;  // ← arguments slot
-          this.frameStack.push(this.currentFrame);
-          this.currentFrame = f;
-        }
-        break;
-      } 
-
-
-      case OP.RETURN: {
-        var retVal = this.pop();
-        this.closeUpvaluesFor(frame);  // must happen before frame is abandoned
-        if (this.frameStack.length === 0) return retVal;
-
-        // new-call rule: primitive return → discard, use the constructed object instead
-        if (frame._newObj !== null) {
-          if (typeof retVal !== 'object' || retVal === null) retVal = frame._newObj;
-        }
-
-        this.currentFrame = this.frameStack.pop();
-        this.push(retVal);
-        break;
-      }
-
-      case OP.POP:
-        this.pop();
-        break;
-
-      default:
-        throw new Error('Unknown opcode: ' + op + ' at pc ' + (frame.pc - 1));
-    }
-  }
-};
-
-// ── Boot ─────────────────────────────────────────────────────────
-var globals = typeof window !== 'undefined' ? window : global; // global object for globals
-
-globals.undefined = undefined; 
-globals.null = null;            
-globals.Infinity = Infinity;     
-globals.NaN = NaN; 
-
-var vm = new VM(MAIN_BYTECODE, CONSTANTS, globals);
-vm.run();
+var OP = ${JSON5.stringify(OP)};
+${stripTypeScriptTypes(
+  readFileSync(join(import.meta.dirname, "./runtime.ts"), "utf-8").split(
+    "@START",
+  )[1],
+)}
 `;
 
-export function compileAndSerialize(SOURCE) {
-  const compiler = new Compiler();
-  const result = compiler.compile(SOURCE);
-  const serializer = new Serializer(result.constants, result.fnDescriptors);
-  const output = serializer.serialize(result.mainBytecode);
+interface Options {
+  sourceMap?: boolean;
+  selfModifying?: boolean;
+}
 
-  return output;
+export function compileAndSerialize(
+  sourceCode: string,
+  options: Options = {
+    selfModifying: true,
+  },
+) {
+  const compiler = new Compiler(options);
+  const result = compiler.compile(sourceCode);
+  const output = compiler.serializer.serialize(
+    result.bytecode,
+    result.mainStartPc,
+  );
+
+  const finalOutput = output;
+
+  return {
+    code: finalOutput,
+  };
 }

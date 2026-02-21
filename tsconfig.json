@@ -1,0 +1,12 @@
+{
+  "compilerOptions": {
+    "target": "esnext",
+    "module": "nodenext",
+    "outDir": "./dist",
+    "rootDir": "./",
+    "strict": false,
+    "noEmit": true,
+    "types": ["node"],
+    "allowImportingTsExtensions": true
+  }
+}
