@@ -5,6 +5,16 @@ const OPTIONS_MATRIX = [
   { displayName: "encodeBytecode", VM_OPTIONS: { encodeBytecode: true } },
   { displayName: "selfModifying", VM_OPTIONS: { selfModifying: true } },
   { displayName: "timingChecks", VM_OPTIONS: { timingChecks: true } },
+  {
+    displayName: "all",
+    VM_OPTIONS: {
+      randomizeOpcodes: true,
+      shuffleOpcodes: true,
+      encodeBytecode: true,
+      selfModifying: true,
+      timingChecks: true,
+    },
+  },
 ];
 
 export default {

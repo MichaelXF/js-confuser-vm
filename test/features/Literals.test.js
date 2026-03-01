@@ -1,12 +1,12 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 test("Variant #1: Boolean Literals", async () => {
   const { code } = await obfuscate(`
     window.TEST_OUTPUT = [true, false];
   `);
 
-  expect(evalCode(code)).toEqual([true, false]);
+  expect(await evalCode(code)).toEqual([true, false]);
 });
 
 test("Variant #2: String Literals", async () => {
@@ -14,7 +14,7 @@ test("Variant #2: String Literals", async () => {
     window.TEST_OUTPUT = ["hello", "world"];
   `);
 
-  expect(evalCode(code)).toEqual(["hello", "world"]);
+  expect(await evalCode(code)).toEqual(["hello", "world"]);
 });
 
 test("Variant #3: Numeric Literals", async () => {
@@ -22,7 +22,7 @@ test("Variant #3: Numeric Literals", async () => {
     window.TEST_OUTPUT = [42, 3.14, NaN, Infinity, -Infinity];
   `);
 
-  expect(evalCode(code)).toEqual([42, 3.14, NaN, Infinity, -Infinity]);
+  expect(await evalCode(code)).toEqual([42, 3.14, NaN, Infinity, -Infinity]);
 });
 
 test("Variant #4: Other Literals", async () => {
@@ -30,7 +30,7 @@ test("Variant #4: Other Literals", async () => {
     window.TEST_OUTPUT = [null, undefined];
   `);
 
-  expect(evalCode(code)).toEqual([null, undefined]);
+  expect(await evalCode(code)).toEqual([null, undefined]);
 });
 
 test("Variant #5: Array expressions", async () => {
@@ -38,7 +38,7 @@ test("Variant #5: Array expressions", async () => {
     window.TEST_OUTPUT = [1, "two", true, null, [3, 4], [[5]]];
   `);
 
-  expect(evalCode(code)).toEqual([1, "two", true, null, [3, 4], [[5]]]);
+  expect(await evalCode(code)).toEqual([1, "two", true, null, [3, 4], [[5]]]);
 });
 
 test("Variant #6: Object expressions", async () => {
@@ -53,7 +53,7 @@ test("Variant #6: Object expressions", async () => {
     };
   `);
 
-  expect(evalCode(code)).toEqual({
+  expect(await evalCode(code)).toEqual({
     a: 1,
     b: "two",
     c: true,
@@ -69,7 +69,7 @@ test("Variant #8: RegExp literal basic", async () => {
     window.TEST_OUTPUT = [re instanceof RegExp, re.source, re.flags];
   `);
 
-  expect(evalCode(code)).toEqual([true, "hello", ""]);
+  expect(await evalCode(code)).toEqual([true, "hello", ""]);
 });
 
 test("Variant #9: RegExp literal with flags", async () => {
@@ -78,7 +78,7 @@ test("Variant #9: RegExp literal with flags", async () => {
     window.TEST_OUTPUT = [re.source, re.flags];
   `);
 
-  expect(evalCode(code)).toEqual(["foo", "gi"]);
+  expect(await evalCode(code)).toEqual(["foo", "gi"]);
 });
 
 test("Variant #10: RegExp literal test()", async () => {
@@ -87,7 +87,7 @@ test("Variant #10: RegExp literal test()", async () => {
     window.TEST_OUTPUT = [re.test("123"), re.test("abc"), re.test("12x")];
   `);
 
-  expect(evalCode(code)).toEqual([true, false, false]);
+  expect(await evalCode(code)).toEqual([true, false, false]);
 });
 
 test("Variant #11: RegExp literal exec() and match()", async () => {
@@ -96,7 +96,7 @@ test("Variant #11: RegExp literal exec() and match()", async () => {
     window.TEST_OUTPUT = [m[0], m[1], m[2]];
   `);
 
-  expect(evalCode(code)).toEqual(["Hello World", "Hello", "World"]);
+  expect(await evalCode(code)).toEqual(["Hello World", "Hello", "World"]);
 });
 
 test("Variant #12: RegExp literal stateful lastIndex with /g", async () => {
@@ -110,7 +110,7 @@ test("Variant #12: RegExp literal stateful lastIndex with /g", async () => {
     window.TEST_OUTPUT = [r1, i1, r2, i2];
   `);
 
-  expect(evalCode(code)).toEqual([true, 1, true, 3]);
+  expect(await evalCode(code)).toEqual([true, 1, true, 3]);
 });
 
 test("Variant #13: RegExp literal fresh object per evaluation", async () => {
@@ -127,7 +127,7 @@ test("Variant #13: RegExp literal fresh object per evaluation", async () => {
   `);
 
   // lastIndex starts at 0 each iteration because a new object is created
-  expect(evalCode(code)).toEqual([0, 1, 0, 1, 0, 1]);
+  expect(await evalCode(code)).toEqual([0, 1, 0, 1, 0, 1]);
 });
 
 test("Variant #7: Array and object runtime order", async () => {
@@ -154,7 +154,7 @@ test("Variant #7: Array and object runtime order", async () => {
     window.TEST_OUTPUT = { arr, obj };
   `);
 
-  var result = evalCode(code);
+  var result = await evalCode(code);
 
   expect(result.arr).toEqual([0, [1, 2, 3], 4, [5, [6]]]);
 

@@ -8,3 +8,5 @@ export interface Options {
   timingChecks?: boolean; // add timing checks to detect debuggers?
   minify?: boolean; // pass final output through Google Closure Compiler? (Renames VM class properties)
 }
+
+export const DEFAULT_OPTIONS = {};

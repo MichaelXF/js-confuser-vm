@@ -1,4 +1,4 @@
-import parser from "@babel/parser";
+import { parse } from "@babel/parser";
 import traverseImport from "@babel/traverse";
 import { generate } from "@babel/generator";
 
@@ -6,23 +6,31 @@ import { readFileSync } from "fs";
 import { join } from "path";
 import { stripTypeScriptTypes } from "module";
 import JSON5 from "json5";
-import { choice, getRandomInt } from "./random.ts";
 import * as t from "@babel/types";
 import { ok } from "assert";
 import { obfuscateRuntime } from "./runtimeObf.ts";
-import type { Options } from "./options.ts";
+import { DEFAULT_OPTIONS, type Options } from "./options.ts";
+import { resolveLabels } from "./transforms/resolveLabels.ts";
+import { resolveConstants } from "./transforms/resolveContants.ts";
+import { selfModifying } from "./transforms/selfModifying.ts";
+import * as b from "./types.ts";
 
-const traverse = traverseImport.default;
+const traverse = (traverseImport.default ||
+  traverseImport) as typeof traverseImport.default;
 
 const readVMRuntimeFile = () => {
+  let code;
   try {
-    return readFileSync(join(import.meta.dirname, "./runtime.ts"), "utf-8");
+    code = readFileSync(join(import.meta.dirname, "./runtime.ts"), "utf-8");
   } catch (e) {
-    return readFileSync(join(import.meta.dirname, "./runtime.js"), "utf-8");
+    code = readFileSync(join(import.meta.dirname, "./runtime.js"), "utf-8");
   }
+
+  return stripTypeScriptTypes?.(code) || code;
 };
 
-const VM_RUNTIME = stripTypeScriptTypes(readVMRuntimeFile().split("@START")[1]);
+const VM_RUNTIME = readVMRuntimeFile().split("@START")[1];
+export const SOURCE_NODE_SYM = Symbol("SOURCE_NODE"); // Attach source node location to pseudo bytecode instructions
 
 // Opcodes
 export const OP_ORIGINAL = {
@@ -94,36 +102,26 @@ export const OP_ORIGINAL = {
 
   // Self-modifying bytecode
   PATCH: 56, // pop destPc; constants[operand]=word[]; write words into bytecode[destPc..]
+
+  // Try-Catch
+  TRY_SETUP: 57, // operand = catch_pc; push exception handler onto frame._handlerStack
+  TRY_END: 58, // pop exception handler (normal exit from try body)
+
+  // Getter / Setter (ES5 object literal accessor syntax)
+  DEFINE_GETTER: 59, // pop fn, pop key, pop obj -> Object.defineProperty(obj, key, {get: fn})
+  DEFINE_SETTER: 60, // pop fn, pop key, pop obj -> Object.defineProperty(obj, key, {set: fn})
+
+  DEBUGGER: 61, // for dev/testing -- emits a "debugger" statement with a comment of the original source location
+
+  // Push the raw integer operand directly onto the stack (no constant pool lookup).
+  // Identical pipeline to JUMP ops: {type:"label"} pseudo-operands resolve to a
+  // raw PC number that becomes the operand, which is pushed as-is at runtime.
+  LOAD_INT: 62,
+
+  // Reserved / unused opcode slot (formerly the inline DATA header word).
+  // Kept to avoid renumbering; should never appear in compiled output.
+  DATA: 63,
 };
-
-// Constant Pool
-// Primitives (string/number/bool) are interned (deduped).
-// Object entries (fn descriptors) are always appended - no dedup.
-class ConstantPool {
-  items: any[];
-  _index: Map<string, number>;
-
-  constructor() {
-    this.items = []; // ordered pool entries
-    this._index = new Map(); // primitive dedup map
-  }
-
-  intern(val) {
-    // Only intern primitives -- objects must use addObject()
-    const key = `${typeof val}:${val}`;
-    if (this._index.has(key)) return this._index.get(key);
-    const idx = this.items.length;
-    this.items.push(val);
-    this._index.set(key, idx);
-    return idx;
-  }
-
-  addObject(obj) {
-    const idx = this.items.length;
-    this.items.push(obj);
-    return idx;
-  }
-}
 
 // Scope
 // Each function call gets its own Scope. Locals are resolved to
@@ -168,7 +166,7 @@ class FnContext {
   parentCtx: FnContext | null;
   scope: Scope;
   compiler: Compiler;
-  bc: any[];
+  bc: b.Instruction[];
 
   constructor(compiler, parentCtx = null) {
     this.compiler = compiler;
@@ -192,20 +190,22 @@ class FnContext {
 }
 
 // Compiler
-class Compiler {
-  constants: ConstantPool;
+export class Compiler {
   fnDescriptors: any[];
-  bytecode: any[];
+  bytecode: b.Bytecode;
   mainStartPc: number;
 
   _currentCtx: FnContext | null;
   _pendingLabel: string | null;
   _forInCount: number;
+  _labelCount: number;
   _loopStack: {
     type: "loop" | "switch" | "block";
     label: string | null;
-    breakJumps: number[];
-    continueJumps: number[];
+    // Label that break statements targeting this entry should jump to.
+    breakLabel: string;
+    // Label that continue statements targeting this entry should jump to.
+    continueLabel: string;
   }[];
 
   options: Options;
@@ -215,16 +215,26 @@ class Compiler {
   OP_NAME: Record<number, string>;
   JUMP_OPS: Set<number>;
 
-  constructor(options: Options) {
+  emit(bc: b.Bytecode, instr: b.Instruction, node: t.Node) {
+    bc.push(instr);
+
+    instr[SOURCE_NODE_SYM] = node;
+  }
+
+  // DO NOT USE THIS KEY UNLESS YOU ARE "RESOLVE CONSTANTS"
+  // CONSTANTS DURING COMPILATION MUST BE USED BY REFERENCE WITH b.constantOperand("myConstantHere")
+  constants: any[];
+
+  constructor(options: Options = DEFAULT_OPTIONS) {
     this.options = options;
-    this.constants = new ConstantPool();
     this.fnDescriptors = []; // populated in pass 1
     this.bytecode = [];
     this.mainStartPc = 0;
     this._currentCtx = null; // FnContext of the function being compiled, null at top-level
-    this._loopStack = []; // { breakJumps: number[], continueJumps: number[] } per active loop
+    this._loopStack = []; // per active loop/switch/block/try
     this._pendingLabel = null;
     this._forInCount = 0; // counter for synthetic for-in iterator global names
+    this._labelCount = 0; // monotonically increasing counter for unique label names
 
     this.serializer = new Serializer(this);
 
@@ -255,7 +265,14 @@ class Compiler {
       this.OP.JUMP_IF_TRUE_OR_POP,
       this.OP.JUMP_IF_FALSE_OR_POP,
       this.OP.FOR_IN_NEXT,
+      this.OP.TRY_SETUP, // catch_pc operand needs offset adjustment like jump targets
     ]);
+  }
+
+  // Generate a globally unique label string with an optional hint for readability.
+  _makeLabel(hint = ""): string {
+    var id = this._labelCount++;
+    return `${hint || "L"}_${id}`;
   }
 
   // Variable resolution
@@ -287,7 +304,7 @@ class Compiler {
 
   // Entry point
   compile(source: string) {
-    const ast = parser.parse(source, { sourceType: "script" });
+    const ast = parse(source, { sourceType: "script" });
 
     return this.compileAST(ast);
   }
@@ -308,20 +325,31 @@ class Compiler {
     // Pass 2 -- compile top-level statements into BYTECODE.
     this._compileMain(ast.program.body);
 
-    return {
-      bytecode: this.bytecode,
-      mainStartPc: this.mainStartPc,
-    };
+    return this.bytecode;
   }
 
   // Function Declaration
 
   _compileFunctionDecl(node: t.FunctionDeclaration | t.FunctionExpression) {
+    // Reserve a slot in fnDescriptors NOW, before compiling the body, so that
+    // any nested _compileFunctionDecl calls see the correct .length and get a
+    // distinct _fnIdx.  The placeholder object is mutated in-place below once
+    // the body and header are ready.
+    var fnIdx = this.fnDescriptors.length;
+    const entryLabel = this._makeLabel(`fn_${fnIdx}`);
+    var desc: any = {}; // placeholder — filled in after compilation
+    this.fnDescriptors.push(desc);
+
     // Create a context whose parent is whatever we're currently compiling.
     // This is what lets _resolve cross function boundaries correctly.
     const ctx = new FnContext(this, this._currentCtx);
     const savedCtx = this._currentCtx;
     this._currentCtx = ctx;
+
+    // Isolate the loop stack so that try/loop entries from the outer scope
+    // don't cause spurious TRY_END / extra jumps inside this function body.
+    const savedLoopStack = this._loopStack;
+    this._loopStack = [];
 
     // Params occupy the first N local slots (args are copied in on CALL)
     for (const param of node.params) {
@@ -341,24 +369,34 @@ class Compiler {
     // Pass 2: emit default-value guards at top of fn body
     // Mirrors what JS engines do: if the caller passed undefined (or
     // nothing), evaluate the default expression and overwrite the slot.
-    // Default expressions are full expressions, so f(x = a + b) and
-    // f(x = foo()) both work correctly.
     for (const param of node.params) {
       if (param.type !== "AssignmentPattern") continue;
 
       const slot = ctx.scope._locals.get((param.left as t.Identifier).name);
+      const skipLabel = this._makeLabel("param_skip");
 
       // if (param === undefined) param = <default expr>
-      ctx.bc.push([this.OP.LOAD_LOCAL, slot]);
-      ctx.bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
-      ctx.bc.push([this.OP.EQ]);
-      ctx.bc.push([this.OP.JUMP_IF_FALSE, 0]);
-      const skipIdx = ctx.bc.length - 1;
+      this.emit(ctx.bc, [this.OP.LOAD_LOCAL, slot], param);
+      this.emit(
+        ctx.bc,
+        [this.OP.LOAD_CONST, b.constantOperand(undefined)],
+        param,
+      );
+      this.emit(ctx.bc, [this.OP.EQ], param);
+      this.emit(
+        ctx.bc,
+        [this.OP.JUMP_IF_FALSE, { type: "label", label: skipLabel }],
+        param,
+      );
 
       this._compileExpr(param.right, ctx.scope, ctx.bc); // eval default
-      ctx.bc.push([this.OP.STORE_LOCAL, slot]);
+      this.emit(ctx.bc, [this.OP.STORE_LOCAL, slot], param);
 
-      ctx.bc[skipIdx][1] = ctx.bc.length; // patch skip jump
+      this.emit(
+        ctx.bc,
+        [null, { type: "defineLabel", label: skipLabel }],
+        param,
+      );
     }
 
     for (const stmt of node.body.body) {
@@ -366,36 +404,48 @@ class Compiler {
     }
 
     // If we fall off the end of the function, implicitly return undefined.
-    ctx.bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
-    ctx.bc.push([this.OP.RETURN]);
+    this.emit(ctx.bc, [this.OP.LOAD_CONST, b.constantOperand(undefined)], node);
+    this.emit(ctx.bc, [this.OP.RETURN], node);
 
     this._currentCtx = savedCtx; // restore before touching fnDescriptors
+    this._loopStack = savedLoopStack;
 
-    var fnIdx = this.fnDescriptors.length;
-    (node as any)._fnIdx = fnIdx; // for error messages
+    (node as any)._fnIdx = fnIdx;
 
-    const desc = {
-      name: node.id?.name || "<anonymous>",
-      paramCount: node.params.length,
-      localCount: ctx.scope.localCount,
-      upvalueDescriptors: ctx.upvalues.map((u) => ({
-        isLocal: u.isLocal,
-        _index: u.index,
-      })),
-      bytecode: ctx.bc,
-      // Indices assigned after pushing into the pool
-      _fnIdx: this.fnDescriptors.length,
-      _constIdx: null,
-    };
+    // Fill the placeholder that was reserved at the top of this function.
+    // Metadata (paramCount, localCount, upvalues) is stored on desc and emitted
+    // as LOAD_INT instructions onto the value stack at each MAKE_CLOSURE call
+    // site — the runtime reads them from the stack, not from DATA words.
+    desc.name = node.id?.name || "<anonymous>";
+    desc.entryLabel = entryLabel;
+    desc.bytecode = ctx.bc as b.Bytecode;
+    desc._fnIdx = fnIdx;
+    desc.paramCount = node.params.length;
+    desc.localCount = ctx.scope.localCount;
+    desc.upvalues = ctx.upvalues.slice();
 
-    this.fnDescriptors.push(desc);
-    desc._constIdx = this.constants.addObject(desc); // object entry, no dedup
     return desc;
+  }
+
+  // Emit LOAD_INT instructions that push closure metadata onto the value stack
+  // immediately before a MAKE_CLOSURE instruction.  The runtime pops these
+  // values in MAKE_CLOSURE instead of reading DATA words from bytecode.
+  //
+  // Stack layout when MAKE_CLOSURE executes (top is rightmost):
+  //   [isLocal_0, idx_0, ..., isLocal_N-1, idx_N-1, uvCount, localCount, paramCount]
+  _emitClosureMetadata(desc: any, node: t.Node, bc: b.Bytecode) {
+    // Push each upvalue descriptor in order; runtime pops them in reverse.
+    for (const uv of desc.upvalues) {
+      this.emit(bc, [this.OP.LOAD_INT, uv.isLocal ? 1 : 0], node);
+      this.emit(bc, [this.OP.LOAD_INT, uv.index], node);
+    }
+    this.emit(bc, [this.OP.LOAD_INT, desc.upvalues.length], node);
+    this.emit(bc, [this.OP.LOAD_INT, desc.localCount], node);
+    this.emit(bc, [this.OP.LOAD_INT, desc.paramCount], node);
   }
 
   // Main (top-level)
   _compileMain(body: t.Statement[]) {
-    this.mainStartPc = 0; // ← record main's entry point
     const bc = this.bytecode;
 
     // Hoist all FunctionDeclarations: MAKE_CLOSURE -> STORE_GLOBAL
@@ -405,9 +455,14 @@ class Compiler {
       const desc = this.fnDescriptors.find(
         (d) => d._fnIdx === (node as any)._fnIdx,
       );
-      const nameIdx = this.constants.intern(node.id.name);
-      bc.push([this.OP.MAKE_CLOSURE, desc._constIdx]);
-      bc.push([this.OP.STORE_GLOBAL, nameIdx]);
+      const nameRef = b.constantOperand(node.id.name);
+      this._emitClosureMetadata(desc, node, bc);
+      this.emit(
+        bc,
+        [this.OP.MAKE_CLOSURE, { type: "label", label: desc.entryLabel }],
+        node,
+      );
+      this.emit(bc, [this.OP.STORE_GLOBAL, nameRef], node);
     }
 
     // Compile everything else in order
@@ -416,46 +471,18 @@ class Compiler {
       this._compileStatement(node, null, bc); // null scope -> global context
     }
 
-    bc.push([this.OP.RETURN]); // end program
+    this.emit(bc, [this.OP.RETURN], null); // end program
 
-    // Now that main is compiled, we can append all the function bodies at the end of the bytecode.
+    // Append all function bodies. Each function's entryLabel (already generated
+    // in _compileFunctionDecl) points directly to the first body instruction;
+    // metadata is pushed onto the stack at each call site, not stored inline.
     for (const descriptor of this.fnDescriptors) {
-      descriptor.startPc = this.bytecode.length;
-
-      descriptor.bytecode.push([this.OP.RETURN]); // ensure every function ends with RETURN
-
-      if (this.options.selfModifying) {
-        // Preamble is 2 instructions: LOAD_CONST(destPc) + PATCH(bodyConst)
-        // Real body starts immediately after the preamble.
-        const bodyPc = descriptor.startPc + 2;
-
-        // Build real body with jump targets resolved from bodyPc as the base.
-        const realBodyInstrs = descriptor.bytecode.map((instr) =>
-          this._offsetJump(instr, bodyPc),
-        );
-
-        // Pack each instruction into a 32-bit word and store as a constant.
-        // The PATCH handler will write these words directly into this.bytecode.
-        const realBodyWords =
-          this.serializer._serializeBytecode(realBodyInstrs);
-        const bodyConstIdx = this.constants.addObject(realBodyWords);
-
-        // Emit preamble: push destination PC, then PATCH.
-        const destPcConstIdx = this.constants.intern(bodyPc);
-        this.bytecode.push([this.OP.LOAD_CONST, destPcConstIdx]);
-        this.bytecode.push([this.OP.PATCH, bodyConstIdx]);
-
-        // Garbage fill -- same length as real body, never executed (PATCH fires first).
-        for (let i = 0; i < realBodyInstrs.length; i++) {
-          this.bytecode.push([
-            choice(Object.values(this.OP)),
-            getRandomInt(0, 255),
-          ]);
-        }
-      } else {
-        for (const instr of descriptor.bytecode) {
-          this.bytecode.push(this._offsetJump(instr, descriptor.startPc));
-        }
+      this.bytecode.push([
+        null,
+        { type: "defineLabel", label: descriptor.entryLabel },
+      ]);
+      for (const instr of descriptor.bytecode) {
+        this.bytecode.push(instr);
       }
     }
 
@@ -464,26 +491,23 @@ class Compiler {
         `Program too large: ${this.bytecode.length} instructions, max 16,777,215`,
       );
 
-    if (this.constants.items.length > 0xffffff)
-      throw new Error(
-        `Constant pool too large: ${this.constants.items.length} entries, max 16,777,215`,
-      );
-  }
-
-  _offsetJump(instr, offset) {
-    if (this.JUMP_OPS.has(instr[0]) && instr[1] !== undefined) {
-      return [instr[0], instr[1] + offset];
-    }
-    return instr;
+    // if (this.constants.items.length > 0xffffff)
+    //   throw new Error(
+    //     `Constant pool too large: ${this.constants.items.length} entries, max 16,777,215`,
+    //   );
   }
 
   // Statements
-  _compileStatement(node: t.Statement, scope, bc) {
+  _compileStatement(node: t.Statement, scope: Scope, bc: b.Bytecode) {
     switch (node.type) {
       case "EmptyStatement": {
         // nothing to emit -- bare semicolon is a no-op
         break;
       }
+
+      case "DebuggerStatement":
+        this.emit(bc, [this.OP.DEBUGGER], node);
+        break;
 
       case "BlockStatement": {
         for (const stmt of node.body) {
@@ -497,19 +521,28 @@ class Compiler {
         // MAKE_CLOSURE so it's captured as a live closure at runtime.
         // (_compileFunctionDecl pushes/pops _currentCtx internally)
         const desc = this._compileFunctionDecl(node);
-        bc.push([this.OP.MAKE_CLOSURE, desc._constIdx]);
+        this._emitClosureMetadata(desc, node, bc);
+        this.emit(
+          bc,
+          [this.OP.MAKE_CLOSURE, { type: "label", label: desc.entryLabel }],
+          node,
+        );
         if (scope) {
           const slot = scope.define(node.id.name);
-          bc.push([this.OP.STORE_LOCAL, slot]);
+          this.emit(bc, [this.OP.STORE_LOCAL, slot], node);
         } else {
-          bc.push([this.OP.STORE_GLOBAL, this.constants.intern(node.id.name)]);
+          this.emit(
+            bc,
+            [this.OP.STORE_GLOBAL, b.constantOperand(node.id.name)],
+            node,
+          );
         }
         break;
       }
 
       case "ThrowStatement": {
         this._compileExpr(node.argument, scope, bc);
-        bc.push([this.OP.THROW]);
+        this.emit(bc, [this.OP.THROW], node);
         break;
       }
 
@@ -517,15 +550,27 @@ class Compiler {
         if (node.argument) {
           this._compileExpr(node.argument, scope, bc);
         } else {
-          bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
+          this.emit(
+            bc,
+            [this.OP.LOAD_CONST, b.constantOperand(undefined)],
+            node,
+          );
         }
-        bc.push([this.OP.RETURN]);
+        // Disarm any open try handlers before leaving the function.
+        // TRY_END only touches frame._handlerStack, not the value stack,
+        // so the return value sitting on top is safe.
+        for (let _ri = this._loopStack.length - 1; _ri >= 0; _ri--) {
+          if ((this._loopStack[_ri].type as any) === "try") {
+            this.emit(bc, [this.OP.TRY_END], node);
+          }
+        }
+        this.emit(bc, [this.OP.RETURN], node);
         break;
       }
 
       case "ExpressionStatement": {
         this._compileExpr(node.expression, scope, bc);
-        bc.push([this.OP.POP]); // discard return value of statement-level expressions
+        this.emit(bc, [this.OP.POP], node); // discard return value of statement-level expressions
         break;
       }
 
@@ -535,7 +580,11 @@ class Compiler {
           if (decl.init) {
             this._compileExpr(decl.init, scope, bc);
           } else {
-            bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
+            this.emit(
+              bc,
+              [this.OP.LOAD_CONST, b.constantOperand(undefined)],
+              node,
+            );
           }
 
           ok(
@@ -546,25 +595,29 @@ class Compiler {
           // Store: local slot if inside a function, global name otherwise
           if (scope) {
             const slot = scope.define(decl.id.name);
-            bc.push([this.OP.STORE_LOCAL, slot]);
+            this.emit(bc, [this.OP.STORE_LOCAL, slot], node);
           } else {
-            bc.push([
-              this.OP.STORE_GLOBAL,
-              this.constants.intern(decl.id.name),
-            ]);
+            this.emit(
+              bc,
+              [this.OP.STORE_GLOBAL, b.constantOperand(decl.id.name)],
+              node,
+            );
           }
         }
         break;
       }
 
       case "IfStatement": {
+        const elseOrEndLabel = this._makeLabel("if_else");
         // 1. Compile the test expression -> leaves a value on the stack
         this._compileExpr(node.test, scope, bc);
-        // 2. Emit JUMP_IF_FALSE with placeholder target
-        bc.push([this.OP.JUMP_IF_FALSE, 0]);
-        const jumpIfFalseIdx = bc.length - 1;
+        // 2. Emit JUMP_IF_FALSE to the else branch (or end if no else)
+        this.emit(
+          bc,
+          [this.OP.JUMP_IF_FALSE, { type: "label", label: elseOrEndLabel }],
+          node,
+        );
         // 3. Compile the consequent block (the "then" branch)
-        // Consequent may be a BlockStatement or a bare statement (no braces)
         const consequentBody =
           node.consequent.type === "BlockStatement"
             ? node.consequent.body
@@ -574,10 +627,18 @@ class Compiler {
         }
         if (node.alternate) {
           // 4a. Consequent needs to jump OVER the else block when done
-          bc.push([this.OP.JUMP, 0]);
-          const jumpOverElseIdx = bc.length - 1;
-          // Patch JUMP_IF_FALSE to land here (start of else)
-          bc[jumpIfFalseIdx][1] = bc.length;
+          const endLabel = this._makeLabel("if_end");
+          this.emit(
+            bc,
+            [this.OP.JUMP, { type: "label", label: endLabel }],
+            node,
+          );
+          // Mark start of else
+          this.emit(
+            bc,
+            [null, { type: "defineLabel", label: elseOrEndLabel }],
+            node,
+          );
           // 5. Compile the alternate (else) block
           const altBody =
             node.alternate.type === "BlockStatement"
@@ -586,11 +647,15 @@ class Compiler {
           for (const stmt of altBody) {
             this._compileStatement(stmt, scope, bc);
           }
-          // Patch the JUMP to land after the else block
-          bc[jumpOverElseIdx][1] = bc.length;
+          // Mark end (consequent's jump lands here)
+          this.emit(bc, [null, { type: "defineLabel", label: endLabel }], node);
         } else {
-          // 4b. No else -- patch JUMP_IF_FALSE to land right after the then block
-          bc[jumpIfFalseIdx][1] = bc.length;
+          // 4b. No else -- label lands right after the then block
+          this.emit(
+            bc,
+            [null, { type: "defineLabel", label: elseOrEndLabel }],
+            node,
+          );
         }
         break;
       }
@@ -598,18 +663,28 @@ class Compiler {
       case "WhileStatement": {
         const _wLabel = this._pendingLabel;
         this._pendingLabel = null;
+
+        const loopTopLabel = this._makeLabel("while_top");
+        const exitLabel = this._makeLabel("while_exit");
+
         this._loopStack.push({
           type: "loop",
           label: _wLabel,
-          breakJumps: [],
-          continueJumps: [],
+          breakLabel: exitLabel,
+          continueLabel: loopTopLabel, // continue re-evaluates the test
         });
-        const loopCtxW = this._loopStack[this._loopStack.length - 1];
 
-        const loopTop = bc.length;
+        this.emit(
+          bc,
+          [null, { type: "defineLabel", label: loopTopLabel }],
+          node,
+        );
         this._compileExpr(node.test, scope, bc);
-        bc.push([this.OP.JUMP_IF_FALSE, 0]);
-        const exitJumpIdx = bc.length - 1;
+        this.emit(
+          bc,
+          [this.OP.JUMP_IF_FALSE, { type: "label", label: exitLabel }],
+          node,
+        );
 
         const whileBody =
           node.body.type === "BlockStatement" ? node.body.body : [node.body];
@@ -617,13 +692,12 @@ class Compiler {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // continue -> re-evaluate the test
-        for (const idx of loopCtxW.continueJumps) bc[idx][1] = loopTop;
-        bc.push([this.OP.JUMP, loopTop]);
-
-        const exitTargetW = bc.length;
-        bc[exitJumpIdx][1] = exitTargetW;
-        for (const idx of loopCtxW.breakJumps) bc[idx][1] = exitTargetW;
+        this.emit(
+          bc,
+          [this.OP.JUMP, { type: "label", label: loopTopLabel }],
+          node,
+        );
+        this.emit(bc, [null, { type: "defineLabel", label: exitLabel }], node);
 
         this._loopStack.pop();
         break;
@@ -632,15 +706,23 @@ class Compiler {
       case "DoWhileStatement": {
         const _dwLabel = this._pendingLabel;
         this._pendingLabel = null;
+
+        const loopTopLabel = this._makeLabel("dowhile_top");
+        const continueLabel = this._makeLabel("dowhile_cont");
+        const exitLabel = this._makeLabel("dowhile_exit");
+
         this._loopStack.push({
           type: "loop",
           label: _dwLabel,
-          breakJumps: [],
-          continueJumps: [],
+          breakLabel: exitLabel,
+          continueLabel: continueLabel, // continue falls to the test
         });
-        const loopCtxDW = this._loopStack[this._loopStack.length - 1];
 
-        const loopTopDW = bc.length;
+        this.emit(
+          bc,
+          [null, { type: "defineLabel", label: loopTopLabel }],
+          node,
+        );
 
         const doWhileBody =
           node.body.type === "BlockStatement" ? node.body.body : [node.body];
@@ -649,18 +731,24 @@ class Compiler {
         }
 
         // continue -> skip rest of body, fall through to test
-        const continueTargetDW = bc.length;
-        for (const idx of loopCtxDW.continueJumps)
-          bc[idx][1] = continueTargetDW;
-
+        this.emit(
+          bc,
+          [null, { type: "defineLabel", label: continueLabel }],
+          node,
+        );
         this._compileExpr(node.test, scope, bc);
-        bc.push([this.OP.JUMP_IF_FALSE, 0]);
-        const exitJumpIdxDW = bc.length - 1;
-        bc.push([this.OP.JUMP, loopTopDW]);
+        this.emit(
+          bc,
+          [this.OP.JUMP_IF_FALSE, { type: "label", label: exitLabel }],
+          node,
+        );
+        this.emit(
+          bc,
+          [this.OP.JUMP, { type: "label", label: loopTopLabel }],
+          node,
+        );
 
-        const exitTargetDW = bc.length;
-        bc[exitJumpIdxDW][1] = exitTargetDW;
-        for (const idx of loopCtxDW.breakJumps) bc[idx][1] = exitTargetDW;
+        this.emit(bc, [null, { type: "defineLabel", label: exitLabel }], node);
 
         this._loopStack.pop();
         break;
@@ -669,29 +757,43 @@ class Compiler {
       case "ForStatement": {
         const _fLabel = this._pendingLabel;
         this._pendingLabel = null;
+
+        const loopTopLabel = this._makeLabel("for_top");
+        const exitLabel = this._makeLabel("for_exit");
+        // continue jumps to the update clause if present, else straight to test
+        const updateLabel = node.update
+          ? this._makeLabel("for_update")
+          : loopTopLabel;
+
         this._loopStack.push({
           type: "loop",
           label: _fLabel,
-          breakJumps: [],
-          continueJumps: [],
+          breakLabel: exitLabel,
+          continueLabel: updateLabel,
         });
-        const loopCtxF = this._loopStack[this._loopStack.length - 1];
 
         if (node.init) {
           if (node.init.type === "VariableDeclaration") {
             this._compileStatement(node.init, scope, bc);
           } else {
             this._compileExpr(node.init, scope, bc);
-            bc.push([this.OP.POP]);
+            this.emit(bc, [this.OP.POP], node);
           }
         }
 
-        const loopTopF = bc.length;
+        this.emit(
+          bc,
+          [null, { type: "defineLabel", label: loopTopLabel }],
+          node,
+        );
         if (node.test) {
           this._compileExpr(node.test, scope, bc);
-          bc.push([this.OP.JUMP_IF_FALSE, 0]);
+          this.emit(
+            bc,
+            [this.OP.JUMP_IF_FALSE, { type: "label", label: exitLabel }],
+            node,
+          );
         }
-        const exitJumpIdxF = node.test ? bc.length - 1 : null;
 
         const forBody =
           node.body.type === "BlockStatement" ? node.body.body : [node.body];
@@ -701,96 +803,126 @@ class Compiler {
 
         // continue -> run update (if any) then back to test
         if (node.update) {
-          const continueTargetF = bc.length;
-          for (const idx of loopCtxF.continueJumps)
-            bc[idx][1] = continueTargetF;
+          this.emit(
+            bc,
+            [null, { type: "defineLabel", label: updateLabel }],
+            node,
+          );
           this._compileExpr(node.update, scope, bc);
-          bc.push([this.OP.POP]);
-        } else {
-          // No update -- continue goes straight to the test
-          for (const idx of loopCtxF.continueJumps) bc[idx][1] = loopTopF;
+          this.emit(bc, [this.OP.POP], node);
         }
 
-        bc.push([this.OP.JUMP, loopTopF]);
-
-        const exitTargetF = bc.length;
-        if (exitJumpIdxF !== null) bc[exitJumpIdxF][1] = exitTargetF;
-        for (const idx of loopCtxF.breakJumps) bc[idx][1] = exitTargetF;
+        this.emit(
+          bc,
+          [this.OP.JUMP, { type: "label", label: loopTopLabel }],
+          node,
+        );
+        this.emit(bc, [null, { type: "defineLabel", label: exitLabel }], node);
 
         this._loopStack.pop();
         break;
       }
 
       case "BreakStatement": {
-        bc.push([this.OP.JUMP, 0]);
-        const _bJumpIdx = bc.length - 1;
+        // Find the jump target in the loop stack.
+        let _bTargetIdx = -1;
         if (node.label) {
           const _bLabelName = node.label.name;
-          let _bFound = -1;
           for (let _bi = this._loopStack.length - 1; _bi >= 0; _bi--) {
             if (this._loopStack[_bi].label === _bLabelName) {
-              _bFound = _bi;
+              _bTargetIdx = _bi;
               break;
             }
           }
-          if (_bFound === -1)
-            throw new Error(`Label '${_bLabelName}' not found`);
-          this._loopStack[_bFound].breakJumps.push(_bJumpIdx);
+          if (_bTargetIdx === -1)
+            throw new Error(`Label '${node.label.name}' not found`);
         } else {
-          if (this._loopStack.length === 0)
-            throw new Error("break outside loop");
-          this._loopStack[this._loopStack.length - 1].breakJumps.push(
-            _bJumpIdx,
-          );
+          // Find innermost loop/switch/block (skip "try" entries)
+          for (let _bi = this._loopStack.length - 1; _bi >= 0; _bi--) {
+            if ((this._loopStack[_bi].type as any) !== "try") {
+              _bTargetIdx = _bi;
+              break;
+            }
+          }
+          if (_bTargetIdx === -1) throw new Error("break outside loop");
         }
+        // Emit TRY_END for every open try block between here and the target.
+        for (let _bi = this._loopStack.length - 1; _bi > _bTargetIdx; _bi--) {
+          if ((this._loopStack[_bi].type as any) === "try") {
+            this.emit(bc, [this.OP.TRY_END], node);
+          }
+        }
+        this.emit(
+          bc,
+          [
+            this.OP.JUMP,
+            { type: "label", label: this._loopStack[_bTargetIdx].breakLabel },
+          ],
+          node,
+        );
         break;
       }
 
       case "ContinueStatement": {
-        bc.push([this.OP.JUMP, 0]);
-        const _cJumpIdx = bc.length - 1;
+        // Find the target loop in the loop stack.
+        let _cTargetIdx = -1;
         if (node.label) {
           const _cLabelName = node.label.name;
-          let _cFound = -1;
           for (let _ci = this._loopStack.length - 1; _ci >= 0; _ci--) {
             if (
               this._loopStack[_ci].label === _cLabelName &&
               this._loopStack[_ci].type === "loop"
             ) {
-              _cFound = _ci;
+              _cTargetIdx = _ci;
               break;
             }
           }
-          if (_cFound === -1)
-            throw new Error(`Label '${_cLabelName}' not found for continue`);
-          this._loopStack[_cFound].continueJumps.push(_cJumpIdx);
+          if (_cTargetIdx === -1)
+            throw new Error(
+              `Label '${node.label.name}' not found for continue`,
+            );
         } else {
-          if (this._loopStack.length === 0)
-            throw new Error("continue outside loop");
-          // Find the innermost loop (skip switch and block contexts)
-          let loopIdx = -1;
-          for (let i = this._loopStack.length - 1; i >= 0; i--) {
-            if (this._loopStack[i].type === "loop") {
-              loopIdx = i;
+          // Find the innermost loop (skip switch, block, and try contexts)
+          for (let _ci = this._loopStack.length - 1; _ci >= 0; _ci--) {
+            if (this._loopStack[_ci].type === "loop") {
+              _cTargetIdx = _ci;
               break;
             }
           }
-          if (loopIdx === -1) throw new Error("continue outside loop");
-          this._loopStack[loopIdx].continueJumps.push(_cJumpIdx);
+          if (_cTargetIdx === -1) throw new Error("continue outside loop");
         }
+        // Emit TRY_END for every open try block between here and the target loop.
+        for (let _ci = this._loopStack.length - 1; _ci > _cTargetIdx; _ci--) {
+          if ((this._loopStack[_ci].type as any) === "try") {
+            this.emit(bc, [this.OP.TRY_END], node);
+          }
+        }
+        this.emit(
+          bc,
+          [
+            this.OP.JUMP,
+            {
+              type: "label",
+              label: this._loopStack[_cTargetIdx].continueLabel,
+            },
+          ],
+          node,
+        );
         break;
       }
 
       case "SwitchStatement": {
         const _swLabel = this._pendingLabel;
         this._pendingLabel = null;
+
+        const switchBreakLabel = this._makeLabel("sw_break");
+
         this._loopStack.push({
           type: "switch",
           label: _swLabel,
-          breakJumps: [],
-          continueJumps: [],
+          breakLabel: switchBreakLabel,
+          continueLabel: switchBreakLabel, // not used for switch
         });
-        const switchCtx = this._loopStack[this._loopStack.length - 1];
 
         // Compile the discriminant and leave it on the stack
         this._compileExpr(node.discriminant, scope, bc);
@@ -798,58 +930,70 @@ class Compiler {
         const cases = node.cases;
         const defaultIdx = cases.findIndex((c) => c.test === null);
 
-        // Dispatch section: emit case checks
-        const bodyJumps = []; // { cas, jumpIdx }
+        // Pre-allocate a label for each case body so dispatch can reference them
+        const caseLabels = cases.map((_, i) => this._makeLabel(`sw_case_${i}`));
 
-        for (const cas of cases) {
-          if (cas.test === null) continue; // Skip default in dispatch
+        // Dispatch section: for each non-default case, check and jump to its body
+        for (let i = 0; i < cases.length; i++) {
+          const cas = cases[i];
+          if (cas.test === null) continue; // skip default in dispatch
 
-          // Check this case: DUP; LOAD_CONST; EQ; JUMP_IF_FALSE
-          bc.push([this.OP.DUP]);
+          const nextCheckLabel = this._makeLabel("sw_next");
+          this.emit(bc, [this.OP.DUP], node);
           this._compileExpr(cas.test, scope, bc);
-          bc.push([this.OP.EQ]);
-          bc.push([this.OP.JUMP_IF_FALSE, 0]); // Jump to next check (patched later)
-          const skipIdx = bc.length - 1;
-
-          // If matched, jump to this case's body
-          bc.push([this.OP.JUMP, 0]); // Jump to body (patched later)
-          bodyJumps.push({ cas, jumpIdx: bc.length - 1 });
-
-          // Patch the JUMP_IF_FALSE to the next check
-          bc[skipIdx][1] = bc.length;
+          this.emit(bc, [this.OP.EQ], node);
+          // If not matched, fall through to the next check
+          this.emit(
+            bc,
+            [this.OP.JUMP_IF_FALSE, { type: "label", label: nextCheckLabel }],
+            node,
+          );
+          // If matched, jump directly to this case's body
+          this.emit(
+            bc,
+            [this.OP.JUMP, { type: "label", label: caseLabels[i] }],
+            node,
+          );
+          this.emit(
+            bc,
+            [null, { type: "defineLabel", label: nextCheckLabel }],
+            node,
+          );
         }
 
-        // No match found: jump to default (or exit if no default)
-        bc.push([this.OP.JUMP, 0]);
-        const noMatchJumpIdx = bc.length - 1;
+        // No case matched: jump to default body or exit (which pops discriminant)
+        this.emit(
+          bc,
+          [
+            this.OP.JUMP,
+            {
+              type: "label",
+              label:
+                defaultIdx !== -1 ? caseLabels[defaultIdx] : switchBreakLabel,
+            },
+          ],
+          node,
+        );
 
-        // Body section: compile all case bodies in source order
-        const bodyStart = new Map();
-        for (const cas of cases) {
-          bodyStart.set(cas, bc.length);
-          for (const stmt of cas.consequent) {
+        // Body section: compile all case bodies in source order (fallthrough intact)
+        for (let i = 0; i < cases.length; i++) {
+          this.emit(
+            bc,
+            [null, { type: "defineLabel", label: caseLabels[i] }],
+            node,
+          );
+          for (const stmt of cases[i].consequent) {
             this._compileStatement(stmt, scope, bc);
           }
         }
 
-        // Patch the no-match jump to default or exit
-        const exitTarget = bc.length;
-        if (defaultIdx !== -1) {
-          bc[noMatchJumpIdx][1] = bodyStart.get(cases[defaultIdx]);
-        } else {
-          bc[noMatchJumpIdx][1] = exitTarget;
-        }
-
-        // Patch all body jumps
-        for (const { cas, jumpIdx } of bodyJumps) {
-          bc[jumpIdx][1] = bodyStart.get(cas);
-        }
-
-        // Exit: pop the discriminant and patch break jumps
-        bc.push([this.OP.POP]);
-        for (const idx of switchCtx.breakJumps) {
-          bc[idx][1] = bc.length - 1; // Point to the POP instruction
-        }
+        // break label lands here; pop the discriminant and continue after switch
+        this.emit(
+          bc,
+          [null, { type: "defineLabel", label: switchBreakLabel }],
+          node,
+        );
+        this.emit(bc, [this.OP.POP], node);
 
         this._loopStack.pop();
         break;
@@ -872,16 +1016,20 @@ class Compiler {
           this._pendingLabel = null; // safety clear if handler didn't consume it
         } else {
           // Non-loop labeled statement (e.g. labeled block) -- only break is valid
+          const blockBreakLabel = this._makeLabel("block_break");
           this._loopStack.push({
             type: "block",
             label: _lName,
-            breakJumps: [],
-            continueJumps: [],
+            breakLabel: blockBreakLabel,
+            continueLabel: blockBreakLabel, // unused
           });
           this._compileStatement(_lBody, scope, bc);
-          const _lEntry = this._loopStack.pop()!;
-          const _lExit = bc.length;
-          for (const _lIdx of _lEntry.breakJumps) bc[_lIdx][1] = _lExit;
+          this._loopStack.pop();
+          this.emit(
+            bc,
+            [null, { type: "defineLabel", label: blockBreakLabel }],
+            node,
+          );
         }
         break;
       }
@@ -893,7 +1041,7 @@ class Compiler {
         // Evaluate the object expression -> on stack
         this._compileExpr(node.right, scope, bc);
         // FOR_IN_SETUP: pops obj, pushes iterator {keys, i}
-        bc.push([this.OP.FOR_IN_SETUP]);
+        this.emit(bc, [this.OP.FOR_IN_SETUP], node);
 
         // Store iterator in a hidden slot so break/continue need no cleanup
         let emitLoadIter: () => void;
@@ -901,32 +1049,43 @@ class Compiler {
         if (scope) {
           // Reserve a hidden local slot (no name mapping needed)
           const iterSlot = scope._next++;
-          emitLoadIter = () => bc.push([this.OP.LOAD_LOCAL, iterSlot]);
-          emitStoreIter = () => bc.push([this.OP.STORE_LOCAL, iterSlot]);
+          emitLoadIter = () =>
+            this.emit(bc, [this.OP.LOAD_LOCAL, iterSlot], node);
+          emitStoreIter = () =>
+            this.emit(bc, [this.OP.STORE_LOCAL, iterSlot], node);
         } else {
           // Top level -- use a synthetic global that won't collide with user code
-          const iterNameIdx = this.constants.intern(
-            "__fi" + this._forInCount++,
-          );
-          emitLoadIter = () => bc.push([this.OP.LOAD_GLOBAL, iterNameIdx]);
-          emitStoreIter = () => bc.push([this.OP.STORE_GLOBAL, iterNameIdx]);
+          const iterNameIdx = b.constantOperand("__fi" + this._forInCount++);
+          emitLoadIter = () =>
+            this.emit(bc, [this.OP.LOAD_GLOBAL, iterNameIdx], node);
+          emitStoreIter = () =>
+            this.emit(bc, [this.OP.STORE_GLOBAL, iterNameIdx], node);
         }
         emitStoreIter();
+
+        const loopTopLabel = this._makeLabel("forin_top");
+        const exitLabel = this._makeLabel("forin_exit");
 
         this._loopStack.push({
           type: "loop",
           label: _fiLabel,
-          breakJumps: [],
-          continueJumps: [],
+          breakLabel: exitLabel,
+          continueLabel: loopTopLabel, // continue re-checks the iterator
         });
-        const loopCtxFI = this._loopStack[this._loopStack.length - 1];
 
-        const loopTopFI = bc.length;
+        this.emit(
+          bc,
+          [null, { type: "defineLabel", label: loopTopLabel }],
+          node,
+        );
 
         // Load iterator, attempt to get next key
         emitLoadIter();
-        bc.push([this.OP.FOR_IN_NEXT, 0]); // exit target patched below
-        const forInNextPatch = bc.length - 1;
+        this.emit(
+          bc,
+          [this.OP.FOR_IN_NEXT, { type: "label", label: exitLabel }],
+          node,
+        );
 
         // Assign the key (now on top of stack) to the loop variable
         if (node.left.type === "VariableDeclaration") {
@@ -938,21 +1097,26 @@ class Compiler {
           const name = identifier.name;
           if (scope) {
             const slot = scope.define(name);
-            bc.push([this.OP.STORE_LOCAL, slot]);
+            this.emit(bc, [this.OP.STORE_LOCAL, slot], node);
           } else {
-            bc.push([this.OP.STORE_GLOBAL, this.constants.intern(name)]);
+            this.emit(
+              bc,
+              [this.OP.STORE_GLOBAL, b.constantOperand(name)],
+              node,
+            );
           }
         } else if (node.left.type === "Identifier") {
           const res = this._resolve(node.left.name, this._currentCtx);
           if (res.kind === "local") {
-            bc.push([this.OP.STORE_LOCAL, res.slot]);
+            this.emit(bc, [this.OP.STORE_LOCAL, res.slot], node);
           } else if (res.kind === "upvalue") {
-            bc.push([this.OP.STORE_UPVALUE, res.index]);
+            this.emit(bc, [this.OP.STORE_UPVALUE, res.index], node);
           } else {
-            bc.push([
-              this.OP.STORE_GLOBAL,
-              this.constants.intern(node.left.name),
-            ]);
+            this.emit(
+              bc,
+              [this.OP.STORE_GLOBAL, b.constantOperand(node.left.name)],
+              node,
+            );
           }
         } else {
           const src = generate(node.left).code;
@@ -968,15 +1132,101 @@ class Compiler {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // continue -> re-load iterator and check next key
-        for (const idx of loopCtxFI.continueJumps) bc[idx][1] = loopTopFI;
-        bc.push([this.OP.JUMP, loopTopFI]);
-
-        const exitTargetFI = bc.length;
-        bc[forInNextPatch][1] = exitTargetFI;
-        for (const idx of loopCtxFI.breakJumps) bc[idx][1] = exitTargetFI;
+        this.emit(
+          bc,
+          [this.OP.JUMP, { type: "label", label: loopTopLabel }],
+          node,
+        );
+        this.emit(bc, [null, { type: "defineLabel", label: exitLabel }], node);
 
         this._loopStack.pop();
+        break;
+      }
+
+      case "TryStatement": {
+        if (node.finalizer) {
+          throw new Error(
+            "try..finally is not supported. Use a helper function instead",
+          );
+        }
+        if (!node.handler) {
+          // try without catch requires finally — not supported
+          throw new Error(
+            "try without catch is not supported (requires finally).",
+          );
+        }
+
+        const catchLabel = this._makeLabel("catch");
+        const afterCatchLabel = this._makeLabel("after_catch");
+
+        // Emit TRY_SETUP with the catch block's label as the handler PC.
+        // At runtime: saves stack depth + frame stack depth, pushes handler.
+        this.emit(
+          bc,
+          [this.OP.TRY_SETUP, { type: "label", label: catchLabel }],
+          node,
+        );
+
+        // Track the open try block so that break/continue/return inside the
+        // try body can emit the matching TRY_END before their jump.
+        this._loopStack.push({
+          type: "try" as any,
+          label: null,
+          breakLabel: "", // unused
+          continueLabel: "", // unused
+        });
+
+        // Compile try body
+        for (const stmt of node.block.body) {
+          this._compileStatement(stmt, scope, bc);
+        }
+
+        // Done compiling the try body — pop the tracking entry.
+        this._loopStack.pop();
+
+        // Normal exit: disarm the exception handler.
+        this.emit(bc, [this.OP.TRY_END], node);
+
+        // Jump over the catch block on normal path.
+        this.emit(
+          bc,
+          [this.OP.JUMP, { type: "label", label: afterCatchLabel }],
+          node,
+        );
+
+        // Catch block: exception is on top of the stack (pushed by the VM).
+        this.emit(bc, [null, { type: "defineLabel", label: catchLabel }], node);
+
+        const handler = node.handler;
+        if (handler.param) {
+          // Bind the exception value to the catch variable.
+          const name = (handler.param as t.Identifier).name;
+          if (scope) {
+            const slot = scope.define(name);
+            this.emit(bc, [this.OP.STORE_LOCAL, slot], node);
+          } else {
+            this.emit(
+              bc,
+              [this.OP.STORE_GLOBAL, b.constantOperand(name)],
+              node,
+            );
+          }
+        } else {
+          // Optional catch binding (catch without a variable — ES2019+)
+          this.emit(bc, [this.OP.POP], node);
+        }
+
+        // Compile catch body
+        for (const stmt of handler.body.body) {
+          this._compileStatement(stmt, scope, bc);
+        }
+
+        // Normal-path jump lands here (after the catch block).
+        this.emit(
+          bc,
+          [null, { type: "defineLabel", label: afterCatchLabel }],
+          node,
+        );
         break;
       }
 
@@ -994,17 +1244,25 @@ class Compiler {
     switch (node.type) {
       case "NumericLiteral":
       case "StringLiteral": {
-        bc.push([this.OP.LOAD_CONST, this.constants.intern(node.value)]);
+        this.emit(
+          bc,
+          [this.OP.LOAD_CONST, b.constantOperand(node.value)],
+          node,
+        );
         break;
       }
 
       case "BooleanLiteral": {
-        bc.push([this.OP.LOAD_CONST, this.constants.intern(node.value)]);
+        this.emit(
+          bc,
+          [this.OP.LOAD_CONST, b.constantOperand(node.value)],
+          node,
+        );
         break;
       }
 
       case "NullLiteral": {
-        bc.push([this.OP.LOAD_CONST, this.constants.intern(null)]);
+        this.emit(bc, [this.OP.LOAD_CONST, b.constantOperand(null)], node);
         break;
       }
 
@@ -1012,17 +1270,21 @@ class Compiler {
         // scope=null means we're at the top-level -> always global
         const res = this._resolve(node.name, this._currentCtx);
         if (res.kind === "local") {
-          bc.push([this.OP.LOAD_LOCAL, res.slot]);
+          this.emit(bc, [this.OP.LOAD_LOCAL, res.slot], node);
         } else if (res.kind === "upvalue") {
-          bc.push([this.OP.LOAD_UPVALUE, res.index]);
+          this.emit(bc, [this.OP.LOAD_UPVALUE, res.index], node);
         } else {
-          bc.push([this.OP.LOAD_GLOBAL, this.constants.intern(node.name)]);
+          this.emit(
+            bc,
+            [this.OP.LOAD_GLOBAL, b.constantOperand(node.name)],
+            node,
+          );
         }
         break;
       }
 
       case "ThisExpression": {
-        bc.push([this.OP.LOAD_THIS]);
+        this.emit(bc, [this.OP.LOAD_THIS], node);
         break;
       }
 
@@ -1030,16 +1292,15 @@ class Compiler {
         // Push callee, then args -- identical layout to CALL but uses NEW opcode
         this._compileExpr(node.callee, scope, bc);
         for (const arg of node.arguments) this._compileExpr(arg, scope, bc);
-        bc.push([this.OP.NEW, node.arguments.length]);
+        this.emit(bc, [this.OP.NEW, node.arguments.length], node);
         break;
       }
 
       case "SequenceExpression": {
         // (a, b, c)  ->  eval a -> POP, eval b -> POP, eval c -> leave on stack
-        // Matches CPython's BINARY_OP / POP_TOP pattern for comma expressions.
         for (let i = 0; i < node.expressions.length - 1; i++) {
           this._compileExpr(node.expressions[i], scope, bc);
-          bc.push([this.OP.POP]); // discard intermediate result
+          this.emit(bc, [this.OP.POP], node); // discard intermediate result
         }
         // Last expression -- its value is the result of the whole sequence
         this._compileExpr(
@@ -1052,21 +1313,23 @@ class Compiler {
 
       case "ConditionalExpression": {
         // test ? consequent : alternate
-        // Identical to IfStatement codegen, just lives in expression context.
-        this._compileExpr(node.test, scope, bc);
+        const elseLabel = this._makeLabel("ternary_else");
+        const endLabel = this._makeLabel("ternary_end");
 
-        bc.push([this.OP.JUMP_IF_FALSE, 0]);
-        const jumpToElse = bc.length - 1;
+        this._compileExpr(node.test, scope, bc);
+        this.emit(
+          bc,
+          [this.OP.JUMP_IF_FALSE, { type: "label", label: elseLabel }],
+          node,
+        );
 
         this._compileExpr(node.consequent, scope, bc);
+        this.emit(bc, [this.OP.JUMP, { type: "label", label: endLabel }], node);
 
-        bc.push([this.OP.JUMP, 0]);
-        const jumpToEnd = bc.length - 1;
-
-        bc[jumpToElse][1] = bc.length; // patch: false -> alternate
+        this.emit(bc, [null, { type: "defineLabel", label: elseLabel }], node);
         this._compileExpr(node.alternate, scope, bc);
 
-        bc[jumpToEnd][1] = bc.length; // patch: after consequent -> end
+        this.emit(bc, [null, { type: "defineLabel", label: endLabel }], node);
         break;
       }
 
@@ -1081,16 +1344,24 @@ class Compiler {
 
         if (node.operator === "||") {
           // Short-circuit if LHS is TRUTHY -- keep it, skip RHS
-          bc.push([this.OP.JUMP_IF_TRUE_OR_POP, 0]);
-          const jumpIdx = bc.length - 1;
+          const endLabel = this._makeLabel("or_end");
+          this.emit(
+            bc,
+            [this.OP.JUMP_IF_TRUE_OR_POP, { type: "label", label: endLabel }],
+            node,
+          );
           this._compileExpr(node.right, scope, bc);
-          bc[jumpIdx][1] = bc.length; // patch target to after RHS
+          this.emit(bc, [null, { type: "defineLabel", label: endLabel }], node);
         } else if (node.operator === "&&") {
           // Short-circuit if LHS is FALSY -- keep it, skip RHS
-          bc.push([this.OP.JUMP_IF_FALSE_OR_POP, 0]);
-          const jumpIdx = bc.length - 1;
+          const endLabel = this._makeLabel("and_end");
+          this.emit(
+            bc,
+            [this.OP.JUMP_IF_FALSE_OR_POP, { type: "label", label: endLabel }],
+            node,
+          );
           this._compileExpr(node.right, scope, bc);
-          bc[jumpIdx][1] = bc.length; // patch target to after RHS
+          this.emit(bc, [null, { type: "defineLabel", label: endLabel }], node);
         } else {
           throw new Error(`Unsupported logical operator: ${node.operator}`);
         }
@@ -1129,7 +1400,7 @@ class Compiler {
         const resolvedOp = arithOp ?? cmpOp;
         if (resolvedOp === undefined)
           throw new Error(`Unsupported operator: ${node.operator}`);
-        bc.push([resolvedOp]);
+        this.emit(bc, [resolvedOp], node);
 
         break;
       }
@@ -1137,34 +1408,38 @@ class Compiler {
       case "UpdateExpression": {
         const res = this._resolve(node.argument.name, this._currentCtx);
         const bumpOp = node.operator === "++" ? this.OP.ADD : this.OP.SUB;
-        const one = this.constants.intern(1);
+        const one = b.constantOperand(1);
 
         // Helper closures: emit load / store for whichever resolution kind we have
         const emitLoad = () => {
-          if (res.kind === "local") bc.push([this.OP.LOAD_LOCAL, res.slot]);
+          if (res.kind === "local")
+            this.emit(bc, [this.OP.LOAD_LOCAL, res.slot], node);
           else if (res.kind === "upvalue")
-            bc.push([this.OP.LOAD_UPVALUE, res.index]);
+            this.emit(bc, [this.OP.LOAD_UPVALUE, res.index], node);
           else
-            bc.push([
-              this.OP.LOAD_GLOBAL,
-              this.constants.intern(node.argument.name),
-            ]);
+            this.emit(
+              bc,
+              [this.OP.LOAD_GLOBAL, b.constantOperand(node.argument.name)],
+              node,
+            );
         };
         const emitStore = () => {
-          if (res.kind === "local") bc.push([this.OP.STORE_LOCAL, res.slot]);
+          if (res.kind === "local")
+            this.emit(bc, [this.OP.STORE_LOCAL, res.slot], node);
           else if (res.kind === "upvalue")
-            bc.push([this.OP.STORE_UPVALUE, res.index]);
+            this.emit(bc, [this.OP.STORE_UPVALUE, res.index], node);
           else
-            bc.push([
-              this.OP.STORE_GLOBAL,
-              this.constants.intern(node.argument.name),
-            ]);
+            this.emit(
+              bc,
+              [this.OP.STORE_GLOBAL, b.constantOperand(node.argument.name)],
+              node,
+            );
         };
 
         emitLoad();
-        if (!node.prefix) bc.push([this.OP.DUP]); // post: save old value before mutating
-        bc.push([this.OP.LOAD_CONST, one]);
-        bc.push([bumpOp]);
+        if (!node.prefix) this.emit(bc, [this.OP.DUP], node); // post: save old value before mutating
+        this.emit(bc, [this.OP.LOAD_CONST, one], node);
+        this.emit(bc, [bumpOp], node);
         emitStore();
         if (node.prefix) emitLoad(); // pre: reload new value as result
 
@@ -1199,10 +1474,11 @@ class Compiler {
           if (node.left.computed) {
             this._compileExpr(node.left.property, scope, bc); // push key (runtime)
           } else {
-            bc.push([
-              this.OP.LOAD_CONST,
-              this.constants.intern(node.left.property.name),
-            ]);
+            this.emit(
+              bc,
+              [this.OP.LOAD_CONST, b.constantOperand(node.left.property.name)],
+              node,
+            );
           }
 
           if (isCompound) {
@@ -1215,19 +1491,23 @@ class Compiler {
             if (node.left.computed) {
               this._compileExpr(node.left.property, scope, bc);
             } else {
-              bc.push([
-                this.OP.LOAD_CONST,
-                this.constants.intern(node.left.property.name),
-              ]);
+              this.emit(
+                bc,
+                [
+                  this.OP.LOAD_CONST,
+                  b.constantOperand(node.left.property.name),
+                ],
+                node,
+              );
             }
-            bc.push([this.OP.GET_PROP_COMPUTED]); // [..., obj, key, currentVal]
+            this.emit(bc, [this.OP.GET_PROP_COMPUTED], node); // [..., obj, key, currentVal]
             this._compileExpr(node.right, scope, bc); // [..., obj, key, currentVal, rhs]
-            bc.push([compoundOp]); // [..., obj, key, newVal]
+            this.emit(bc, [compoundOp], node); // [..., obj, key, newVal]
           } else {
             this._compileExpr(node.right, scope, bc); // [..., obj, key, val]
           }
 
-          bc.push([this.OP.SET_PROP]); // obj[key] = val, leaves val on stack
+          this.emit(bc, [this.OP.SET_PROP], node); // obj[key] = val, leaves val on stack
           break;
         }
 
@@ -1237,34 +1517,35 @@ class Compiler {
         if (isCompound) {
           // Load the current value of the target first
           if (res.kind === "local") {
-            bc.push([this.OP.LOAD_LOCAL, res.slot]);
+            this.emit(bc, [this.OP.LOAD_LOCAL, res.slot], node);
           } else if (res.kind === "upvalue") {
-            bc.push([this.OP.LOAD_UPVALUE, res.index]);
+            this.emit(bc, [this.OP.LOAD_UPVALUE, res.index], node);
           } else {
-            bc.push([
-              this.OP.LOAD_GLOBAL,
-              this.constants.intern(node.left.name),
-            ]);
+            this.emit(
+              bc,
+              [this.OP.LOAD_GLOBAL, b.constantOperand(node.left.name)],
+              node,
+            );
           }
         }
 
         this._compileExpr(node.right, scope, bc); // push RHS
 
         if (isCompound) {
-          bc.push([compoundOp]); // apply binary op -> leaves newVal on stack
+          this.emit(bc, [compoundOp], node); // apply binary op -> leaves newVal on stack
         }
 
         // Store & leave value on stack (assignment is an expression)
         if (res.kind === "local") {
-          bc.push([this.OP.STORE_LOCAL, res.slot]);
-          bc.push([this.OP.LOAD_LOCAL, res.slot]);
+          this.emit(bc, [this.OP.STORE_LOCAL, res.slot], node);
+          this.emit(bc, [this.OP.LOAD_LOCAL, res.slot], node);
         } else if (res.kind === "upvalue") {
-          bc.push([this.OP.STORE_UPVALUE, res.index]);
-          bc.push([this.OP.LOAD_UPVALUE, res.index]);
+          this.emit(bc, [this.OP.STORE_UPVALUE, res.index], node);
+          this.emit(bc, [this.OP.LOAD_UPVALUE, res.index], node);
         } else {
-          const nameIdx = this.constants.intern(node.left.name);
-          bc.push([this.OP.STORE_GLOBAL, nameIdx]);
-          bc.push([this.OP.LOAD_GLOBAL, nameIdx]);
+          const nameIdx = b.constantOperand(node.left.name);
+          this.emit(bc, [this.OP.STORE_GLOBAL, nameIdx], node);
+          this.emit(bc, [this.OP.LOAD_GLOBAL, nameIdx], node);
         }
         break;
       }
@@ -1275,16 +1556,16 @@ class Compiler {
           // Push receiver first (GET_PROP leaves it; CALL_METHOD pops it as `this`)
           this._compileExpr(node.callee.object, scope, bc);
           const prop = node.callee.property.name;
-          const propIdx = this.constants.intern(prop);
-          bc.push([this.OP.LOAD_CONST, propIdx]);
-          bc.push([this.OP.GET_PROP]);
+          const propIdx = b.constantOperand(prop);
+          this.emit(bc, [this.OP.LOAD_CONST, propIdx], node);
+          this.emit(bc, [this.OP.GET_PROP], node);
           for (const arg of node.arguments) this._compileExpr(arg, scope, bc);
-          bc.push([this.OP.CALL_METHOD, node.arguments.length]);
+          this.emit(bc, [this.OP.CALL_METHOD, node.arguments.length], node);
         } else {
           // ── Plain call: add(5, 10)
           this._compileExpr(node.callee, scope, bc);
           for (const arg of node.arguments) this._compileExpr(arg, scope, bc);
-          bc.push([this.OP.CALL, node.arguments.length]);
+          this.emit(bc, [this.OP.CALL, node.arguments.length], node);
         }
         break;
       }
@@ -1297,19 +1578,18 @@ class Compiler {
           const res = this._resolve(node.argument.name, this._currentCtx);
           if (res.kind === "global") {
             // Potentially undeclared -- let VM guard it
-            bc.push([
-              this.OP.LOAD_CONST,
-              this.constants.intern(node.argument.name),
-            ]);
-            bc.push([this.OP.TYPEOF_SAFE]);
+            this.emit(
+              bc,
+              [this.OP.LOAD_CONST, b.constantOperand(node.argument.name)],
+              node,
+            );
+            this.emit(bc, [this.OP.TYPEOF_SAFE], node);
             break;
           }
           // Known local or upvalue -- safe to load first, then typeof
         }
 
         // Special case: delete -- argument must NOT be pre-evaluated.
-        // The generic path below compiles the argument first, which would leave
-        // a stale value on the stack before the delete result, corrupting it.
         if (node.operator === "delete") {
           const arg = node.argument;
           if (arg.type === "MemberExpression") {
@@ -1317,15 +1597,16 @@ class Compiler {
             if (arg.computed) {
               this._compileExpr(arg.property, scope, bc);
             } else {
-              bc.push([
-                this.OP.LOAD_CONST,
-                this.constants.intern(arg.property.name),
-              ]);
+              this.emit(
+                bc,
+                [this.OP.LOAD_CONST, b.constantOperand(arg.property.name)],
+                node,
+              );
             }
-            bc.push([this.OP.DELETE_PROP]);
+            this.emit(bc, [this.OP.DELETE_PROP], node);
           } else {
             // delete x, delete 0, etc. -- always true in non-strict, just push true
-            bc.push([this.OP.LOAD_CONST, this.constants.intern(true)]);
+            this.emit(bc, [this.OP.LOAD_CONST, b.constantOperand(true)], node);
           }
           break;
         }
@@ -1334,22 +1615,22 @@ class Compiler {
         this._compileExpr(node.argument, scope, bc);
         switch (node.operator) {
           case "-":
-            bc.push([this.OP.UNARY_NEG]);
+            this.emit(bc, [this.OP.UNARY_NEG], node);
             break;
           case "+":
-            bc.push([this.OP.UNARY_POS]);
+            this.emit(bc, [this.OP.UNARY_POS], node);
             break;
           case "!":
-            bc.push([this.OP.UNARY_NOT]);
+            this.emit(bc, [this.OP.UNARY_NOT], node);
             break;
           case "~":
-            bc.push([this.OP.UNARY_BITNOT]);
+            this.emit(bc, [this.OP.UNARY_BITNOT], node);
             break;
           case "typeof":
-            bc.push([this.OP.TYPEOF]);
+            this.emit(bc, [this.OP.TYPEOF], node);
             break;
           case "void":
-            bc.push([this.OP.VOID]);
+            this.emit(bc, [this.OP.VOID], node);
             break;
 
           default:
@@ -1361,10 +1642,18 @@ class Compiler {
       case "RegExpLiteral": {
         // Emit: new RegExp(pattern, flags)
         // Fresh object per evaluation -- correct for stateful g/y flags.
-        bc.push([this.OP.LOAD_GLOBAL, this.constants.intern("RegExp")]);
-        bc.push([this.OP.LOAD_CONST, this.constants.intern(node.pattern)]);
-        bc.push([this.OP.LOAD_CONST, this.constants.intern(node.flags)]);
-        bc.push([this.OP.NEW, 2]);
+        this.emit(bc, [this.OP.LOAD_GLOBAL, b.constantOperand("RegExp")], node);
+        this.emit(
+          bc,
+          [this.OP.LOAD_CONST, b.constantOperand(node.pattern)],
+          node,
+        );
+        this.emit(
+          bc,
+          [this.OP.LOAD_CONST, b.constantOperand(node.flags)],
+          node,
+        );
+        this.emit(bc, [this.OP.NEW, 2], node);
         break;
       }
 
@@ -1373,7 +1662,12 @@ class Compiler {
         // but leave the resulting closure ON THE STACK -- no store.
         // The surrounding expression (assignment, call arg, return) consumes it.
         const desc = this._compileFunctionDecl(node);
-        bc.push([this.OP.MAKE_CLOSURE, desc._constIdx]);
+        this._emitClosureMetadata(desc, node, bc);
+        this.emit(
+          bc,
+          [this.OP.MAKE_CLOSURE, { type: "label", label: desc.entryLabel }],
+          node,
+        );
         break;
       }
 
@@ -1384,16 +1678,17 @@ class Compiler {
           this._compileExpr(node.property, scope, bc);
         } else {
           // point.x -- push key as string, same opcode handles both
-          bc.push([
-            this.OP.LOAD_CONST,
-            this.constants.intern(node.property.name),
-          ]);
+          this.emit(
+            bc,
+            [this.OP.LOAD_CONST, b.constantOperand(node.property.name)],
+            node,
+          );
         }
 
         // GET_PROP_COMPUTED pops the object -- correct for value access.
         // GET_PROP (peek) is only used in CallExpression's method call path
         // where the receiver must survive on the stack for CALL_METHOD.
-        bc.push([this.OP.GET_PROP_COMPUTED]);
+        this.emit(bc, [this.OP.GET_PROP_COMPUTED], node);
         break;
       }
 
@@ -1403,45 +1698,114 @@ class Compiler {
         for (const el of node.elements) {
           if (el === null) {
             // hole: e.g. [1,,3]
-            bc.push([this.OP.LOAD_CONST, this.constants.intern(undefined)]);
+            this.emit(
+              bc,
+              [this.OP.LOAD_CONST, b.constantOperand(undefined)],
+              node,
+            );
           } else {
             this._compileExpr(el, scope, bc);
           }
         }
-        bc.push([this.OP.BUILD_ARRAY, node.elements.length]);
+        this.emit(bc, [this.OP.BUILD_ARRAY, node.elements.length], node);
         break;
       }
       case "ObjectExpression": {
-        // For each property: push key (always as string), push value.
-        // BUILD_OBJECT pops pairs right->left and assembles the object.
+        // Separate regular data properties from ES5 accessor methods (get/set).
+        const regularProps: t.ObjectProperty[] = [];
+        const accessorProps: t.ObjectMethod[] = [];
+
         for (const prop of node.properties) {
           if (prop.type === "SpreadElement") {
             throw new Error("Object spread not supported");
           }
-          // Key -- identifier shorthand (`{x:1}`) or string/number literal
+          if (prop.type === "ObjectMethod") {
+            if (prop.kind === "get" || prop.kind === "set") {
+              if (prop.computed) {
+                throw new Error(
+                  "Computed getter/setter keys are not supported",
+                );
+              }
+              accessorProps.push(prop);
+            } else {
+              throw new Error(`Shorthand method syntax is not supported`);
+            }
+          } else {
+            regularProps.push(prop as t.ObjectProperty);
+          }
+        }
+
+        // Build the base object from data properties.
+        for (const prop of regularProps) {
           const key = prop.key;
-          let keyStr;
+          let keyStr: string;
           if (key.type === "Identifier") {
-            keyStr = key.name; // {x: 1} -> key is "x"
+            keyStr = key.name;
           } else if (
             key.type === "StringLiteral" ||
             key.type === "NumericLiteral"
           ) {
-            keyStr = String(key.value); // {"x": 1} or {0: 1}
+            keyStr = String(key.value);
           } else {
             throw new Error(`Unsupported object key type: ${key.type}`);
           }
-          bc.push([this.OP.LOAD_CONST, this.constants.intern(keyStr)]);
-          // Value -- any expression, including FunctionExpression
+          this.emit(bc, [this.OP.LOAD_CONST, b.constantOperand(keyStr)], node);
           this._compileExpr(prop.value, scope, bc);
         }
-        bc.push([this.OP.BUILD_OBJECT, node.properties.length]);
+        this.emit(bc, [this.OP.BUILD_OBJECT, regularProps.length], node);
+
+        // Define each accessor on the object that is now on top of the stack.
+        // Stack after BUILD_OBJECT: [..., obj]
+        // For each accessor: DUP obj, push key, compile fn, DEFINE_GETTER/DEFINE_SETTER
+        // DEFINE_GETTER/DEFINE_SETTER pops fn+key+obj, leaving the original obj.
+        for (const prop of accessorProps) {
+          const key = prop.key;
+          let keyStr: string;
+          if (key.type === "Identifier") {
+            keyStr = key.name;
+          } else if (
+            key.type === "StringLiteral" ||
+            key.type === "NumericLiteral"
+          ) {
+            keyStr = String(key.value);
+          } else {
+            throw new Error(`Unsupported object key type: ${key.type}`);
+          }
+
+          this.emit(bc, [this.OP.DUP], node); // dup so the original obj stays after the define
+          this.emit(bc, [this.OP.LOAD_CONST, b.constantOperand(keyStr)], node);
+
+          // Compile the accessor body as an anonymous function descriptor.
+          const desc = this._compileFunctionDecl(prop as any);
+          this._emitClosureMetadata(desc, prop as any, bc);
+          this.emit(
+            bc,
+            [
+              this.OP.MAKE_CLOSURE,
+              {
+                type: "label",
+                label: desc.entryLabel,
+              },
+            ],
+            node,
+          );
+
+          this.emit(
+            bc,
+            [
+              prop.kind === "get"
+                ? this.OP.DEFINE_GETTER
+                : this.OP.DEFINE_SETTER,
+            ],
+            node,
+          );
+        }
+
         break;
       }
 
       default: {
-        const src = generate(node).code;
-        throw new Error(`Unsupported expression: ${node.type}\n  -> ${src}`);
+        throw new Error(`Unsupported expression: ${node.type}`);
       }
     }
   }
@@ -1449,6 +1813,8 @@ class Compiler {
 
 // Serializer
 // Turns the compiled output into a commented JS source string.
+// Expects fully-resolved bytecode (all label refs and constant refs already
+// converted to plain integers by resolveLabels + resolveConstants passes).
 class Serializer {
   compiler: Compiler;
 
@@ -1472,43 +1838,52 @@ class Serializer {
     return this.compiler.JUMP_OPS;
   }
 
-  get constants() {
-    return this.compiler.constants.items;
-  }
-
-  get fnDescriptors() {
-    return this.compiler.fnDescriptors;
-  }
-
   // Produce a JS literal for a constant pool entry
   _serializeConst(val) {
     if (val === null) return "null";
     if (val === undefined) return "undefined";
-    if (typeof val === "object" && val._fnIdx !== undefined) {
-      return `FN[${val._fnIdx}]`; // fn descriptor -> reference by FN index
-    }
     return JSON.stringify(val); // number / string / bool
   }
 
   // One instruction -> "[op, operand]  // MNEMONIC description"
-  _serializeInstr(instr) {
-    const constants = this.constants;
+  // Expects a fully-resolved instruction: operand is a plain number or undefined.
+  _serializeInstr(instr: b.Instruction, constants: any[]) {
+    const [op, rawOperand] = instr;
 
-    const [op, operand] = instr;
+    ok(
+      rawOperand === undefined || typeof rawOperand === "number",
+      "Unresolved operand: " + JSON.stringify(rawOperand),
+    );
+    const operand = rawOperand as number | undefined;
+
     const name = this.OP_NAME[op] || `OP_${op}`;
     let comment = name;
+
+    const sourceNode = instr[SOURCE_NODE_SYM];
+    const sourceLocation = sourceNode
+      ? sourceNode.loc.start?.line +
+        ":" +
+        sourceNode.loc.start?.column +
+        "-" +
+        (sourceNode.loc.end?.line + ":" + sourceNode.loc.end?.column)
+      : "";
 
     // Annotate operand with its meaning
     if (operand !== undefined) {
       switch (op) {
-        case this.OP.LOAD_CONST:
-        case this.OP.MAKE_CLOSURE: {
+        case this.OP.LOAD_CONST: {
           const val = constants[operand];
-          if (val && typeof val === "object" && val.name) {
-            comment += `  FN[${val._fnIdx}] -> fn:${val.name}`;
-          } else {
-            comment += `  ${JSON.stringify(val)}`;
-          }
+          comment += `  ${this._serializeConst(val)}`;
+          break;
+        }
+        case this.OP.MAKE_CLOSURE: {
+          // operand is the absolute PC of the function body's first instruction
+          comment += `  PC ${operand}`;
+          break;
+        }
+        case this.OP.DATA: {
+          // Inline function header word — value is a raw integer
+          comment += `  ${operand}`;
           break;
         }
         case this.OP.LOAD_LOCAL:
@@ -1544,15 +1919,17 @@ class Serializer {
       }
     }
 
+    comment = comment.padEnd(40) + sourceLocation;
+
     // Pack a [op, operand?] instruction pair into a single 32-bit word.
     // Shared between the Serializer and the obfuscation path in _compileMain.
 
-    if (!this.options.encodeBytecode) {
-      const instrText =
-        operand !== undefined ? `[${op}, ${operand}]` : `[${op}]`;
+    const instrText = operand !== undefined ? `[${op}, ${operand}]` : `[${op}]`;
+    const text = `${(instrText + ",").padEnd(12)} ${comment}`;
 
+    if (!this.options.encodeBytecode) {
       return {
-        text: `      ${instrText.padEnd(12)}, // ${comment}`,
+        text: text,
         value: operand !== undefined ? [op, operand] : [op],
       };
     }
@@ -1569,44 +1946,35 @@ class Serializer {
     }
 
     return {
-      text: "",
+      text: text,
       value: packInstr(instr),
     };
   }
 
-  // Serialize one fn descriptor into its FN[n] block
-  _serializeFn(desc) {
-    const lines = [
-      `  {                       // FN[${desc._fnIdx}] -- ${desc.name}`,
-      `    paramCount: ${desc.paramCount},`,
-      `    localCount: ${desc.localCount},`,
-      `    upvalueDescriptors: ${JSON5.stringify(desc.upvalueDescriptors)},`,
-      `    startPc: ${desc.startPc},`,
-      `  },`,
-    ];
-    return lines.join("\n");
-  }
-
-  // Serialize the CONSTANTS array, showing FN[n] references
-  _serializeConstants() {
+  // Serialize the CONSTANTS array
+  _serializeConstants(constants: any[]) {
     const lines = ["var CONSTANTS = ["];
-    this.constants.forEach((val, idx) => {
+    constants.forEach((val, idx) => {
       lines.push(`  /* ${idx} */  ${this._serializeConst(val)},`);
     });
     lines.push("];");
     return lines.join("\n");
   }
 
-  _serializeBytecode(bytecode) {
-    if (!this.options.encodeBytecode) {
-      return bytecode.map((instr) => this._serializeInstr(instr).value);
-    }
+  // Filter out any remaining null-opcode pseudo-instructions.
+  // (defineLabel pseudo-ops are already stripped by resolveLabels.)
+  _serializeBytecode(bytecode: b.Bytecode): { bytecode: b.Bytecode } {
+    return {
+      bytecode: bytecode.filter((instr) => instr[0] !== null),
+    };
+  }
 
+  __serializeBytecode(bytecode: b.Bytecode, constants: any[]) {
     let words = [];
 
     // BYTECODE
     for (const instr of bytecode) {
-      words.push(this._serializeInstr(instr).value);
+      words.push(this._serializeInstr(instr, constants).value);
     }
 
     // Convert packed words -> raw 4-byte little-endian binary -> base64
@@ -1617,30 +1985,32 @@ class Serializer {
       buf[i * 4 + 2] = (w >>> 16) & 0xff;
       buf[i * 4 + 3] = (w >>> 24) & 0xff;
     });
-    const b64 = Buffer.from(buf).toString("base64");
-
-    return b64;
+    return Buffer.from(buf).toString("base64");
   }
 
-  serialize(bytecode, mainStartPc) {
-    const sections = [];
+  serialize(bytecode: b.Bytecode, constants: any[], compiler: Compiler) {
+    const mainStartPc = compiler.mainStartPc;
+    let sections = [];
 
-    // ── FN array
-    const fnLines = ["var FN = ["];
-    for (const desc of this.fnDescriptors) {
-      fnLines.push(this._serializeFn(desc));
+    var textForm = [];
+    var initBody = [];
+
+    var bytecodeResult = this._serializeBytecode(bytecode);
+
+    for (const instr of bytecodeResult.bytecode) {
+      const serialized = this._serializeInstr(instr, constants);
+      textForm.push(serialized.text);
     }
-    fnLines.push("];");
-    sections.push(fnLines.join("\n"));
 
-    // ── CONSTANTS
-    sections.push(this._serializeConstants());
+    initBody.push(textForm.map((line) => `// ${line}`).join("\n"));
 
     if (this.options.encodeBytecode) {
-      sections.push(`var BYTECODE = "${this._serializeBytecode(bytecode)}";`);
+      sections.push(
+        `var BYTECODE = "${this.__serializeBytecode(bytecodeResult.bytecode, constants)}";`,
+      );
     } else {
       sections.push(
-        `var BYTECODE = [\n  ${bytecode.map((instr) => this._serializeInstr(instr).text).join(",\n  ")}\n];`,
+        `var BYTECODE = [${bytecodeResult.bytecode.map((v) => "[" + v[0] + ", " + v[1] + "]").join(",")}]`,
       );
     }
 
@@ -1650,6 +2020,11 @@ class Serializer {
     sections.push(`var TIMING_CHECKS = ${!!this.options.timingChecks};`);
     // Opcodes
     sections.push(`var OP = ${JSON5.stringify(this.OP)};`);
+
+    // Constants must be defined before the bytecode
+    initBody.push(this._serializeConstants(constants));
+
+    sections = [...initBody, ...sections];
 
     // VM runtime
     sections.push(VM_RUNTIME);
@@ -1663,10 +2038,24 @@ export async function compileAndSerialize(
   options: Options,
 ) {
   const compiler = new Compiler(options);
-  const result = compiler.compile(sourceCode);
+  let bytecode = compiler.compile(sourceCode);
+
+  // User transform passes (operate on unresolved IR with label/constant refs)
+  const passes = [...(options.selfModifying ? [selfModifying] : [])];
+  for (const pass of passes) {
+    const passResult = pass(bytecode, compiler);
+    bytecode = passResult.bytecode;
+  }
+
+  // Assembler phases: resolve IR operands to plain integers before printing
+  const { bytecode: labelResolved } = resolveLabels(bytecode, compiler);
+  const { bytecode: finalBytecode, constants } =
+    resolveConstants(labelResolved);
+
   const output = compiler.serializer.serialize(
-    result.bytecode,
-    result.mainStartPc,
+    finalBytecode,
+    constants,
+    compiler,
   );
 
   const finalOutput = await obfuscateRuntime(output, options);

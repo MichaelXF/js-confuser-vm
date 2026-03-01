@@ -1,11 +1,12 @@
 # JS Confuser VM
 
-  [![NPM](https://img.shields.io/badge/NPM-%23000000.svg?style=for-the-badge&logo=npm&logoColor=white)](https://npmjs.com/package/js-confuser-vm) [![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/MichaelXF/js-confuser-vm)
+  [![NPM](https://img.shields.io/badge/NPM-%23000000.svg?style=for-the-badge&logo=npm&logoColor=white)](https://npmjs.com/package/js-confuser-vm) [![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/MichaelXF/js-confuser-vm) [![Netlify](https://img.shields.io/badge/netlify-%23000000.svg?style=for-the-badge&logo=netlify&logoColor=#00C7B7)](https://development--confuser.netlify.app/vm)
 
 
 - **Requires Node v24.13.1 or higher**
-- ES5 support only. No complex features: async, generator, and even try..catch are beyond scope.
+- ES5 support only. No complex features: async, generator, and even try..finally are beyond scope.
 - Experimental. Expect issues.
+- [Try the web version.](https://development--confuser.netlify.app/vm)
 
 ### Installation
 
@@ -89,13 +90,15 @@ G(new x(d("4AMAANUEAAAjAQAA1QUAAKEFAAAjBgAAGQAAAK0YAAChBwAAIwgAAEsAAAChBQAAoQQAA
 - [x] labeled statements
 - [x] for..in loop
 - [x] RegExp literals
+- [x] try..catch
+- [x] getter/setters
+- [x] debugger;
 
 ### Missing
 
-- [ ] try..catch
+- [ ] try..finally
 - [ ] with statement
 - [ ] arguments.callee, argument parameter syncing   
-- [ ] getter/setters
 
 ### Hardening
 
@@ -117,16 +120,18 @@ G(new x(d("4AMAANUEAAAjAQAA1QUAAKEFAAAjBgAAGQAAAK0YAAChBwAAIwgAAEsAAAChBQAAoQQAA
 
 The `minify` option uses Google Closure Compiler to minify the JS VM and renames (most) VM property names. This approach helps keep the VM Compiler simple and lets Google do the heavy lifting.
 
-### No Try Catch
+### No Try Finally
 
-Try..Catch is complex operator that may not get added. You can use Try..Catch by defining an outside helper function:
+While Try Catch is supported, Try..Finally is not. You can use Try..Finally by defining an outside helper function:
 
 ```js
-function TryCatch(cb) {
+function TryFinally(cb, _finally) {
   try {
-    return { value: cb() };
+    return { value: cb() }
   } catch (error) {
     return { error };
+  } finally {
+    _finally()
   }
 }
 ```
@@ -180,8 +185,8 @@ main().catch(console.error);
 
 ### WIP
 
-- 146 tests, 91.18% coverage
-- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 52.39%
+- 178 tests, 91.18% coverage
+- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 66.67%
 
 ### Made with AI
 

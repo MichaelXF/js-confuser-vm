@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 test("Variant #1: Basic if — condition true, body executes", async () => {
   const { code } = await obfuscate(`
@@ -10,7 +10,7 @@ test("Variant #1: Basic if — condition true, body executes", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("yes");
+  expect(await evalCode(code)).toBe("yes");
 });
 
 test("Variant #2: Basic if — condition false, body is skipped", async () => {
@@ -22,7 +22,7 @@ test("Variant #2: Basic if — condition false, body is skipped", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("original");
+  expect(await evalCode(code)).toBe("original");
 });
 
 test("Variant #3: If-else — true branch taken", async () => {
@@ -37,7 +37,7 @@ test("Variant #3: If-else — true branch taken", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("big");
+  expect(await evalCode(code)).toBe("big");
 });
 
 test("Variant #4: If-else — false branch taken", async () => {
@@ -52,7 +52,7 @@ test("Variant #4: If-else — false branch taken", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("small");
+  expect(await evalCode(code)).toBe("small");
 });
 
 test("Variant #5: If-else-if chain hits each branch", async () => {
@@ -73,7 +73,7 @@ test("Variant #5: If-else-if chain hits each branch", async () => {
     window.TEST_OUTPUT = [grade(95), grade(85), grade(75), grade(50)];
   `);
 
-  expect(evalCode(code)).toEqual(["A", "B", "C", "F"]);
+  expect(await evalCode(code)).toEqual(["A", "B", "C", "F"]);
 });
 
 test("Variant #6: Nested if statements — all four paths", async () => {
@@ -98,7 +98,7 @@ test("Variant #6: Nested if statements — all four paths", async () => {
     window.TEST_OUTPUT = [classify(1, 1), classify(-1, 1), classify(-1, -1), classify(1, -1)];
   `);
 
-  expect(evalCode(code)).toEqual(["Q1", "Q2", "Q3", "Q4"]);
+  expect(await evalCode(code)).toEqual(["Q1", "Q2", "Q3", "Q4"]);
 });
 
 test("Variant #7: Compact body (no braces) on if", async () => {
@@ -109,7 +109,7 @@ test("Variant #7: Compact body (no braces) on if", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("yes");
+  expect(await evalCode(code)).toBe("yes");
 });
 
 test("Variant #8: Compact body (no braces) on if-else-if", async () => {
@@ -124,5 +124,5 @@ test("Variant #8: Compact body (no braces) on if-else-if", async () => {
     window.TEST_OUTPUT = [sign(5), sign(-3), sign(0)];
   `);
 
-  expect(evalCode(code)).toEqual(["positive", "negative", "zero"]);
+  expect(await evalCode(code)).toEqual(["positive", "negative", "zero"]);
 });

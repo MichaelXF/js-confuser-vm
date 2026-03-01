@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 // ── While ─────────────────────────────────────────────────────────
 
@@ -14,7 +14,7 @@ test("Variant #1: While — accumulates a sum", async () => {
     window.TEST_OUTPUT = sum;
   `);
 
-  expect(evalCode(code)).toBe(55);
+  expect(await evalCode(code)).toBe(55);
 });
 
 test("Variant #2: While — condition false from the start, body never runs", async () => {
@@ -26,7 +26,7 @@ test("Variant #2: While — condition false from the start, body never runs", as
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("untouched");
+  expect(await evalCode(code)).toBe("untouched");
 });
 
 test("Variant #3: While — builds an array via index assignment", async () => {
@@ -40,7 +40,7 @@ test("Variant #3: While — builds an array via index assignment", async () => {
     window.TEST_OUTPUT = squares;
   `);
 
-  expect(evalCode(code)).toEqual([0, 1, 4, 9, 16]);
+  expect(await evalCode(code)).toEqual([0, 1, 4, 9, 16]);
 });
 
 test("Variant #4: While — compound condition (&&)", async () => {
@@ -57,7 +57,7 @@ test("Variant #4: While — compound condition (&&)", async () => {
   `);
 
   // Both conditions satisfied for 5 iterations, then i=5 makes i<5 false
-  expect(evalCode(code)).toBe(5);
+  expect(await evalCode(code)).toBe(5);
 });
 
 // ── Do-While ──────────────────────────────────────────────────────
@@ -71,7 +71,7 @@ test("Variant #5: Do-while — body executes at least once even when condition i
     window.TEST_OUTPUT = ran;
   `);
 
-  expect(evalCode(code)).toBe(true);
+  expect(await evalCode(code)).toBe(true);
 });
 
 test("Variant #6: Do-while — accumulates a sum", async () => {
@@ -85,7 +85,7 @@ test("Variant #6: Do-while — accumulates a sum", async () => {
     window.TEST_OUTPUT = sum;
   `);
 
-  expect(evalCode(code)).toBe(55);
+  expect(await evalCode(code)).toBe(55);
 });
 
 test("Variant #7: Do-while — runs exactly N times, test at the bottom", async () => {
@@ -99,7 +99,7 @@ test("Variant #7: Do-while — runs exactly N times, test at the bottom", async 
     window.TEST_OUTPUT = count;
   `);
 
-  expect(evalCode(code)).toBe(3);
+  expect(await evalCode(code)).toBe(3);
 });
 
 // ── For ───────────────────────────────────────────────────────────
@@ -113,7 +113,7 @@ test("Variant #8: For — basic sum with var init and ++ update", async () => {
     window.TEST_OUTPUT = sum;
   `);
 
-  expect(evalCode(code)).toBe(15);
+  expect(await evalCode(code)).toBe(15);
 });
 
 test("Variant #9: For — builds an array", async () => {
@@ -125,7 +125,7 @@ test("Variant #9: For — builds an array", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toEqual([0, 2, 4, 6, 8]);
+  expect(await evalCode(code)).toEqual([0, 2, 4, 6, 8]);
 });
 
 test("Variant #10: For — bare expression init (not a var declaration)", async () => {
@@ -139,7 +139,7 @@ test("Variant #10: For — bare expression init (not a var declaration)", async 
   `);
 
   // 0+1+2+3+4
-  expect(evalCode(code)).toBe(10);
+  expect(await evalCode(code)).toBe(10);
 });
 
 test("Variant #11: For — no update clause", async () => {
@@ -152,7 +152,7 @@ test("Variant #11: For — no update clause", async () => {
     window.TEST_OUTPUT = sum;
   `);
 
-  expect(evalCode(code)).toBe(10);
+  expect(await evalCode(code)).toBe(10);
 });
 
 test("Variant #12: Nested for loops", async () => {
@@ -166,7 +166,7 @@ test("Variant #12: Nested for loops", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toEqual([0, 1, 2, 10, 11, 12, 20, 21, 22]);
+  expect(await evalCode(code)).toEqual([0, 1, 2, 10, 11, 12, 20, 21, 22]);
 });
 
 test("Variant #13: Loops with blockless bodies (no braces)", async () => {
@@ -182,5 +182,5 @@ test("Variant #13: Loops with blockless bodies (no braces)", async () => {
     window.TEST_OUTPUT = [wSum, fSum, dSum];
   `);
 
-  expect(evalCode(code)).toEqual([10, 10, 35]);
+  expect(await evalCode(code)).toEqual([10, 10, 35]);
 });

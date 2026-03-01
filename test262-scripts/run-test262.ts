@@ -3,6 +3,7 @@ import { glob } from "glob";
 import { fileURLToPath } from "url";
 import { Worker } from "worker_threads";
 import * as os from "os";
+import { isReadable } from "stream";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -25,92 +26,182 @@ console.log(
   `Running ${files.length} test files across ${NUM_WORKERS} workers...`,
 );
 
-function chunk<T>(arr: T[], n: number): T[][] {
-  const size = Math.ceil(arr.length / n);
-  return Array.from({ length: n }, (_, i) =>
-    arr.slice(i * size, (i + 1) * size),
-  ).filter((c) => c.length > 0);
+interface Chunk {
+  items: string[];
+  offset: number;
+}
+
+function chunk(files: string[], chunkSize: number): Chunk[] {
+  const size = Math.ceil(files.length / chunkSize);
+  const chunks: Chunk[] = [];
+
+  for (var i = 0; i < files.length; i += size) {
+    let items = files.slice(i, i + size);
+
+    chunks.push({ items, offset: i });
+  }
+
+  return chunks;
 }
 
 const allResults: TestResult[][] = new Array(files.length);
-let totalCompleted = 0;
+let totalFilesCompleted = 0;
+let chunksDone = 0;
+let lastProgressAt = Date.now();
 
-await new Promise<void>((resolve) => {
-  function record(globalIndex: number, results: TestResult[]) {
-    allResults[globalIndex] = results;
-    ++totalCompleted;
-    if (totalCompleted % 50 === 0 || totalCompleted === files.length) {
-      const pct = ((totalCompleted / files.length) * 100).toFixed(1);
-      console.log(`Progress: ${totalCompleted}/${files.length} (${pct}%)`);
-    }
-    if (totalCompleted === files.length) resolve();
-  }
-
-  function spawnWorker(chunk: string[], startGlobalIndex: number) {
-    let localDone = 0;
-    let timer: NodeJS.Timeout;
-
-    const worker = new Worker(WORKER_URL, {
-      workerData: { TEST_DIR, files: chunk },
-    });
-
-    function armTimeout() {
-      timer = setTimeout(() => {
-        worker.terminate();
-        record(startGlobalIndex + localDone, [
-          {
-            file: path.relative(TEST_DIR, chunk[localDone]),
-            id: "timeout",
-            passed: false,
-            error: `Timed out after ${FILE_TIMEOUT_MS}ms`,
-          },
-        ]);
-        localDone++;
-        if (localDone < chunk.length) {
-          spawnWorker(chunk.slice(localDone), startGlobalIndex + localDone);
-        }
-      }, FILE_TIMEOUT_MS);
-    }
-
-    worker.on(
-      "message",
-      ({
-        fileIndex,
-        results,
-      }: {
-        fileIndex: number;
-        results: TestResult[];
-      }) => {
-        clearTimeout(timer);
-        record(startGlobalIndex + fileIndex, results);
-        localDone = fileIndex + 1;
-        if (localDone < chunk.length) armTimeout();
+function createChunk(chunk: Chunk, chunkIndex: number): Promise<void> {
+  return new Promise((resolve, reject) => {
+    setTimeout(
+      () => {
+        markDone();
+        reject("Chunk timed out after 5 minutes");
       },
-    );
+      1000 * 60 * 5,
+    ); // Chunk has a max of 5 minutes to complete, just in case
 
-    worker.on("error", (err: Error) => {
-      clearTimeout(timer);
-      for (let i = localDone; i < chunk.length; i++) {
-        record(startGlobalIndex + i, [
-          {
-            file: path.relative(TEST_DIR, chunk[i]),
-            id: "worker-crash",
-            passed: false,
-            error: err.message,
-          },
-        ]);
+    var isDone = false;
+    var retryCount = 0;
+
+    function markDone() {
+      if (isDone) return;
+      isDone = true;
+
+      chunksDone++;
+      if (chunksDone === NUM_WORKERS - 1) {
+        reject("Finished.");
       }
-    });
+    }
 
-    armTimeout();
-  }
+    function record(fileIndex: number, results: TestResult[]) {
+      if (!running) return;
+      if (allResults[chunk.offset + fileIndex]) return;
 
-  let offset = 0;
-  for (const c of chunk(files, NUM_WORKERS)) {
-    spawnWorker(c, offset);
-    offset += c.length;
-  }
-});
+      allResults[chunk.offset + fileIndex] = results || [];
+      totalFilesCompleted += 1;
+
+      if (totalFilesCompleted >= files.length - 1) {
+        reject("Finished.");
+        running = false;
+        return;
+      }
+
+      if (
+        totalFilesCompleted % 50 === 0 ||
+        Date.now() - lastProgressAt > 1000 * 5
+      ) {
+        lastProgressAt = Date.now();
+        console.log(
+          `Completed ${totalFilesCompleted} / ${files.length} tests... (${((totalFilesCompleted / files.length) * 100).toFixed(2)}%)`,
+        );
+      }
+
+      if (fileIndex >= chunk.items.length - 1) {
+        markDone();
+      }
+    }
+
+    let localDone = 0;
+
+    function spawnWorker(offset = 0) {
+      let timer: NodeJS.Timeout;
+
+      armTimeout();
+
+      let worker = new Worker(WORKER_URL, {
+        workerData: { TEST_DIR, files: chunk.items.slice(offset) },
+      });
+
+      function armTimeout() {
+        timer = setTimeout(() => {
+          worker.terminate();
+          worker = null;
+
+          record(localDone, [
+            {
+              file: chunk.items[localDone],
+              id: "timeout",
+              passed: false,
+              error: `Timed out after ${FILE_TIMEOUT_MS}ms`,
+            },
+          ]);
+          localDone++;
+
+          if (retryCount++ < 5) {
+            console.log(
+              "Chunk",
+              chunkIndex,
+              "timed out, creating new worker to continue...",
+            );
+            retryFrom(localDone);
+          } else {
+            console.log(
+              "Chunk",
+              chunkIndex,
+              "timed out, failing remaining tests",
+            );
+            markRemainingError(
+              new Error(`Worker timed out after ${FILE_TIMEOUT_MS}ms`),
+            );
+          }
+        }, FILE_TIMEOUT_MS);
+      }
+
+      worker.on(
+        "message",
+        ({
+          fileIndex,
+          results,
+        }: {
+          fileIndex: number;
+          results: TestResult[];
+        }) => {
+          clearTimeout(timer);
+          record(offset + fileIndex, results);
+          localDone = offset + fileIndex + 1;
+          if (localDone <= chunk.items.length) armTimeout();
+        },
+      );
+
+      worker.on("error", (err: Error) => {
+        clearTimeout(timer);
+
+        markRemainingError(err);
+      });
+
+      function markRemainingError(err) {
+        for (let i = localDone; i < chunk.items.length; i++) {
+          record(i, [
+            {
+              file: chunk.items[i],
+              id: "worker-crash",
+              passed: false,
+              error: err.message,
+            },
+          ]);
+        }
+        markDone();
+      }
+
+      function retryFrom(localDone) {
+        if (localDone < chunk.items.length) {
+          spawnWorker(localDone);
+        }
+      }
+    }
+
+    spawnWorker();
+  });
+}
+
+const chunks = chunk(files, NUM_WORKERS);
+
+let running = true;
+try {
+  await Promise.all(chunks.map((chunk, i) => createChunk(chunk, i)));
+} catch (err) {
+  console.error("Failed to complete all chunks", err);
+}
+running = false;
 
 const results: TestResult[] = allResults.flat();
 
@@ -135,7 +226,7 @@ if (Object.keys(errors).length > 0) {
   for (const r of results) {
     if (r.error?.includes("TryStatement")) continue;
     if (!r.passed) {
-      console.log(`  [${r.id}] ${r.file}`);
+      console.log(`  [${r.id}] ${r.file || ""}`);
       if (r.error) console.log(`    → ${r.error}`);
     }
   }

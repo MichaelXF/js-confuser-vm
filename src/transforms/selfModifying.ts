@@ -1,0 +1,124 @@
+import type { Bytecode, Instruction } from "../types.ts";
+import { Compiler } from "../compiler.ts";
+
+export function selfModifying(
+  bc: Bytecode,
+  compiler: Compiler,
+): { bytecode: Bytecode } {
+  // Walk the bytecode looking for "defineLabel" pseudo-ops, which start basic
+  // blocks. For each block we collect the body (instructions between the label
+  // and the next label/jump terminator), move it to the end of the bytecode
+  // under a fresh "patch_LXX" label, and replace it in-place with:
+  //
+  //   defineLabel ("originalLabel")         ← kept as-is (pseudo-op)
+  //   LOAD_INT  { label: patch_LXX, offset: N }   ← push slice-end PC
+  //   LOAD_INT  { label: patch_LXX }               ← push slice-start PC
+  //   PATCH     { label: originalLabel, offset: 3 } ← destPc = L+3
+  //   LOAD_INT 0  × N                              ← N placeholder instructions
+  //
+  // PATCH pops (start, end) from the stack and copies bytecode[start..end) to
+  // bytecode[destPc..]. Since destPc = L+3 = first placeholder, the body is
+  // written exactly over the placeholder region on the first call.  Subsequent
+  // calls are idempotent (same bytes written again).  Execution falls through
+  // from PATCH into the freshly-patched body at L+3, then continues naturally
+  // to whatever terminator (JUMP/RETURN) follows at L+3+N.
+
+  const { OP, JUMP_OPS } = compiler;
+
+  const result: Bytecode = [];
+  const appended: Bytecode = [];
+  let patchCount = 0;
+
+  let i = 0;
+  while (i < bc.length) {
+    const instr = bc[i];
+    const [op, operand] = instr;
+
+    // Detect a defineLabel pseudo-op — start of a new basic block.
+    if (
+      op === null &&
+      operand !== null &&
+      typeof operand === "object" &&
+      (operand as any).type === "defineLabel"
+    ) {
+      const originalLabel = (operand as any).label as string;
+      result.push(instr); // keep the defineLabel marker
+      i++;
+
+      // Collect body: everything after the label until the next terminator.
+      let j = i;
+      while (j < bc.length) {
+        const [nextOp, nextOperand] = bc[j];
+
+        // Another defineLabel = boundary of the next block.
+        if (
+          nextOp === null &&
+          typeof nextOperand === "object" &&
+          (nextOperand as any)?.type === "defineLabel"
+        ) {
+          break;
+        }
+
+        // Jump instructions, RETURN, and DATA (function header words) all
+        // terminate the body without being included in it.
+        if (
+          nextOp !== null &&
+          (JUMP_OPS.has(nextOp) || nextOp === OP.RETURN || nextOp === OP.DATA)
+        ) {
+          break;
+        }
+
+        j++;
+      }
+
+      const body = bc.slice(i, j);
+      const N = body.length;
+
+      if (N === 0) {
+        // Nothing to transform — label is immediately followed by a terminator.
+        continue;
+      }
+
+      const patchLabel = `patch_${originalLabel}_${patchCount++}`;
+
+      // ── Stub (3 real instructions) ──────────────────────────────────────
+      // LOAD_INT pushes the end-index of the body slice (patchLabel_pc + N).
+      // LOAD_INT pushes the start-index (patchLabel_pc).
+      // Stack before PATCH: [end (bottom), start (top)].
+      // PATCH: slice(pop()=start, pop()=end) copies the body to destPc = L+3.
+      result.push([
+        OP.LOAD_INT as number,
+        { type: "label", label: patchLabel, offset: N },
+      ]);
+      result.push([
+        OP.LOAD_INT as number,
+        { type: "label", label: patchLabel },
+      ]);
+      result.push([
+        OP.PATCH as number,
+        { type: "label", label: originalLabel, offset: 3 },
+      ]);
+
+      // ── Placeholders (N instructions) ───────────────────────────────────
+      // These are overwritten by PATCH on the first execution.  They never
+      // execute as LOAD_INT 0 in a correct run.
+      for (let p = 0; p < N; p++) {
+        result.push([OP.LOAD_INT as number, 0]);
+      }
+
+      // ── Append real body at end ─────────────────────────────────────────
+      appended.push([null, { type: "defineLabel", label: patchLabel }]);
+      for (const bodyInstr of body) {
+        appended.push(bodyInstr);
+      }
+
+      i = j; // skip over the original body in the input array
+      continue;
+    }
+
+    result.push(instr);
+    i++;
+  }
+
+  return { bytecode: [...result, ...appended] };
+}

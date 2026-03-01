@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 test("Variant #1: break with label — exits outer for loop from inner loop", async () => {
   const { code } = await obfuscate(`
@@ -15,7 +15,7 @@ test("Variant #1: break with label — exits outer for loop from inner loop", as
   // i=0: j=0,1,2 → 3 increments
   // i=1: j=0 → 1 increment, then break outer at j=1
   // Total = 4
-  expect(evalCode(code)).toBe(4);
+  expect(await evalCode(code)).toBe(4);
 });
 
 test("Variant #2: continue with label — skips rest of inner loop, continues outer for", async () => {
@@ -31,7 +31,7 @@ test("Variant #2: continue with label — skips rest of inner loop, continues ou
   `);
   // Each outer iteration: j=0 runs (result++), j=1 → continue outer
   // 3 outer iterations × 1 inner increment = 3
-  expect(evalCode(code)).toBe(3);
+  expect(await evalCode(code)).toBe(3);
 });
 
 test("Variant #3: labeled block — break exits the block early", async () => {
@@ -44,7 +44,7 @@ test("Variant #3: labeled block — break exits the block early", async () => {
     }
     window.TEST_OUTPUT = x;
   `);
-  expect(evalCode(code)).toBe(1);
+  expect(await evalCode(code)).toBe(1);
 });
 
 test("Variant #4: labeled while — break exits from doubly-nested while", async () => {
@@ -61,7 +61,7 @@ test("Variant #4: labeled while — break exits from doubly-nested while", async
     window.TEST_OUTPUT = count;
   `);
   // inner goes 0,1 then break outer before count++ ever runs
-  expect(evalCode(code)).toBe(0);
+  expect(await evalCode(code)).toBe(0);
 });
 
 test("Variant #5: continue outer — collects only j=0 of each outer iteration", async () => {
@@ -75,7 +75,7 @@ test("Variant #5: continue outer — collects only j=0 of each outer iteration",
     }
     window.TEST_OUTPUT = log;
   `);
-  expect(evalCode(code)).toEqual([0, 10, 20]);
+  expect(await evalCode(code)).toEqual([0, 10, 20]);
 });
 
 test("Variant #6: labeled do-while — break exits from nested for loop", async () => {
@@ -93,7 +93,7 @@ test("Variant #6: labeled do-while — break exits from nested for loop", async 
     } while (i < 5);
     window.TEST_OUTPUT = found;
   `);
-  expect(evalCode(code)).toBe(12);
+  expect(await evalCode(code)).toBe(12);
 });
 
 test("Variant #8: empty statement — no-op, surrounding code runs normally", async () => {
@@ -104,7 +104,7 @@ test("Variant #8: empty statement — no-op, surrounding code runs normally", as
     ;
     window.TEST_OUTPUT = x;
   `);
-  expect(evalCode(code)).toBe(5);
+  expect(await evalCode(code)).toBe(5);
 });
 
 test("Variant #9: labeled empty statement — compiles and runs without error", async () => {
@@ -113,7 +113,7 @@ test("Variant #9: labeled empty statement — compiles and runs without error", 
     emptyLabel: ;
     window.TEST_OUTPUT = x;
   `);
-  expect(evalCode(code)).toBe(1);
+  expect(await evalCode(code)).toBe(1);
 });
 
 test("Variant #7: labeled block with no early break — code after runs normally", async () => {
@@ -126,5 +126,5 @@ test("Variant #7: labeled block with no early break — code after runs normally
     x = 3;
     window.TEST_OUTPUT = x;
   `);
-  expect(evalCode(code)).toBe(3);
+  expect(await evalCode(code)).toBe(3);
 });

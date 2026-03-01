@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 // ── Basic switch with break ────────────────────────────────────
 
@@ -21,7 +21,7 @@ test("Variant #1: Basic match with break", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("two");
+  expect(await evalCode(code)).toBe("two");
 });
 
 test("Variant #2: Default case when no case matches", async () => {
@@ -42,7 +42,7 @@ test("Variant #2: Default case when no case matches", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("default");
+  expect(await evalCode(code)).toBe("default");
 });
 
 // ── Fall-through ──────────────────────────────────────────────
@@ -65,7 +65,7 @@ test("Variant #3: Fall-through without break", async () => {
   `);
 
   // x === 1: case 1 body executes, falls through to case 2, break
-  expect(evalCode(code)).toBe("ab");
+  expect(await evalCode(code)).toBe("ab");
 });
 
 test("Variant #4: Multiple fall-through cases", async () => {
@@ -86,7 +86,7 @@ test("Variant #4: Multiple fall-through cases", async () => {
   `);
 
   // x === 2: jumps to case 2 (empty body), falls through to case 3 (empty), falls through to case 1 body
-  expect(evalCode(code)).toBe("1-2-3");
+  expect(await evalCode(code)).toBe("1-2-3");
 });
 
 // ── No match / no default ──────────────────────────────────────
@@ -106,7 +106,7 @@ test("Variant #5: No match, no default (nothing executes)", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("unchanged");
+  expect(await evalCode(code)).toBe("unchanged");
 });
 
 // ── Default in the middle (order matters) ──────────────────────
@@ -129,7 +129,7 @@ test("Variant #6: Default in the middle with fall-through", async () => {
   `);
 
   // x === 99 (no match): jumps to default, executes "d", falls through to case 2
-  expect(evalCode(code)).toBe("d2");
+  expect(await evalCode(code)).toBe("d2");
 });
 
 // ── Switch inside loops ────────────────────────────────────────
@@ -154,7 +154,7 @@ test("Variant #7: Switch inside a loop (break exits switch, not loop)", async ()
   `);
 
   // Loop runs 3 times, break exits switch each time, loop continues: 10+20+30=60
-  expect(evalCode(code)).toBe(60);
+  expect(await evalCode(code)).toBe(60);
 });
 
 test("Variant #8: Continue inside switch exits switch and continues loop", async () => {
@@ -173,7 +173,7 @@ test("Variant #8: Continue inside switch exits switch and continues loop", async
   `);
 
   // i=1: default, sum=1; i=2: continue; i=3: default, sum=4; i=4: continue; i=5: default, sum=9
-  expect(evalCode(code)).toBe(9);
+  expect(await evalCode(code)).toBe(9);
 });
 
 // ── Expression in switch discriminant ──────────────────────────
@@ -195,5 +195,5 @@ test("Variant #9: Expression in switch discriminant", async () => {
     window.TEST_OUTPUT = result;
   `);
 
-  expect(evalCode(code)).toBe("ten");
+  expect(await evalCode(code)).toBe("ten");
 });

@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 test("Variant #1: Throw — string literal propagates to host", async () => {
   const { code } = await obfuscate(`
@@ -8,7 +8,7 @@ test("Variant #1: Throw — string literal propagates to host", async () => {
 
   let caught;
   try {
-    evalCode(code);
+    await evalCode(code);
   } catch (e) {
     caught = e;
   }
@@ -22,7 +22,7 @@ test("Variant #2: Throw — numeric value propagates", async () => {
 
   let caught;
   try {
-    evalCode(code);
+    await evalCode(code);
   } catch (e) {
     caught = e;
   }
@@ -36,7 +36,7 @@ test("Variant #3: Throw — Error object propagates", async () => {
 
   let caught;
   try {
-    evalCode(code);
+    await evalCode(code);
   } catch (e) {
     caught = e;
   }
@@ -54,7 +54,7 @@ test("Variant #4: Throw — from inside a function", async () => {
 
   let caught;
   try {
-    evalCode(code);
+    await evalCode(code);
   } catch (e) {
     caught = e;
   }
@@ -72,7 +72,7 @@ test("Variant #5: Throw — conditional throw, executed branch throws", async ()
 
   let caught;
   try {
-    evalCode(code);
+    await evalCode(code);
   } catch (e) {
     caught = e;
   }
@@ -88,7 +88,7 @@ test("Variant #6: Throw — conditional throw, non-executed branch does not thro
     window.TEST_OUTPUT = "ok";
   `);
 
-  expect(evalCode(code)).toBe("ok");
+  expect(await evalCode(code)).toBe("ok");
 });
 
 test("Variant #7: Throw — expression is evaluated before throw", async () => {
@@ -99,7 +99,7 @@ test("Variant #7: Throw — expression is evaluated before throw", async () => {
 
   let caught;
   try {
-    evalCode(code);
+    await evalCode(code);
   } catch (e) {
     caught = e;
   }

@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 // break
 test("Variant #1: break exits a while loop early", async () => {
@@ -12,7 +12,7 @@ test("Variant #1: break exits a while loop early", async () => {
     window.TEST_OUTPUT = i;
   `);
 
-  expect(evalCode(code)).toBe(5);
+  expect(await evalCode(code)).toBe(5);
 });
 
 test("Variant #2: break exits a for loop early", async () => {
@@ -27,7 +27,7 @@ test("Variant #2: break exits a for loop early", async () => {
     window.TEST_OUTPUT = found;
   `);
 
-  expect(evalCode(code)).toBe(7);
+  expect(await evalCode(code)).toBe(7);
 });
 
 test("Variant #3: break exits a do-while loop early", async () => {
@@ -40,7 +40,7 @@ test("Variant #3: break exits a do-while loop early", async () => {
     window.TEST_OUTPUT = i;
   `);
 
-  expect(evalCode(code)).toBe(3);
+  expect(await evalCode(code)).toBe(3);
 });
 
 // continue
@@ -58,7 +58,7 @@ test("Variant #4: continue in while skips rest of body, re-evaluates test", asyn
   `);
 
   // odd numbers 1+3+5+7+9 = 25
-  expect(evalCode(code)).toBe(25);
+  expect(await evalCode(code)).toBe(25);
 });
 
 test("Variant #5: continue in for loop still runs the update expression", async () => {
@@ -72,7 +72,7 @@ test("Variant #5: continue in for loop still runs the update expression", async 
   `);
 
   // i=2 is skipped but i++ still runs → next iteration is i=3, not an infinite loop
-  expect(evalCode(code)).toEqual([0, 1, 3, 4]);
+  expect(await evalCode(code)).toEqual([0, 1, 3, 4]);
 });
 
 test("Variant #6: continue in do-while skips to the test", async () => {
@@ -88,7 +88,7 @@ test("Variant #6: continue in do-while skips to the test", async () => {
   `);
 
   // odd numbers 1+3+5+7+9 = 25
-  expect(evalCode(code)).toBe(25);
+  expect(await evalCode(code)).toBe(25);
 });
 
 // nested loops
@@ -105,7 +105,7 @@ test("Variant #7: break only exits the innermost loop", async () => {
   `);
 
   // Only j=0 runs per outer iteration; outer loop continues normally
-  expect(evalCode(code)).toEqual([0, 10, 20]);
+  expect(await evalCode(code)).toEqual([0, 10, 20]);
 });
 
 test("Variant #8: continue only affects the innermost loop", async () => {
@@ -121,5 +121,5 @@ test("Variant #8: continue only affects the innermost loop", async () => {
   `);
 
   // j=0 and j=2 run per outer iteration: 3 * 2 = 6
-  expect(evalCode(code)).toBe(6);
+  expect(await evalCode(code)).toBe(6);
 });

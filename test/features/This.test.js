@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 // ── Constructor functions ─────────────────────────────────────────
 
@@ -16,7 +16,7 @@ test("Variant #1: Constructor sets properties on `this` via new", async () => {
     window.TEST_OUTPUT = [r.width, r.height, r.area()];
   `);
 
-  expect(evalCode(code)).toEqual([4, 5, 20]);
+  expect(await evalCode(code)).toEqual([4, 5, 20]);
 });
 
 // ── Object literal method this ────────────────────────────────────
@@ -35,7 +35,7 @@ test("Variant #2: Object literal method receives object as `this`", async () => 
     window.TEST_OUTPUT = counter.increment();
   `);
 
-  expect(evalCode(code)).toBe(3);
+  expect(await evalCode(code)).toBe(3);
 });
 
 // ── Prototype methods ─────────────────────────────────────────────
@@ -62,7 +62,7 @@ test("Variant #3: Prototype methods receive instance as `this`", async () => {
     window.TEST_OUTPUT = [s.size(), s.pop(), s.size()];
   `);
 
-  expect(evalCode(code)).toEqual([3, 30, 2]);
+  expect(await evalCode(code)).toEqual([3, 30, 2]);
 });
 
 // ── ES5 class extending ───────────────────────────────────────────
@@ -87,7 +87,7 @@ test("Variant #4: ES5 inheritance via Function.call forwards `this` to parent co
     window.TEST_OUTPUT = [d.name, d.type, d.breed, d.describe()];
   `);
 
-  expect(evalCode(code)).toEqual([
+  expect(await evalCode(code)).toEqual([
     "Rex",
     "dog",
     "Labrador",
@@ -107,7 +107,7 @@ test("Variant #5: Function assigned to window called as method receives window a
     window.TEST_OUTPUT = window.getAppName();
   `);
 
-  expect(evalCode(code)).toBe("MyApp");
+  expect(await evalCode(code)).toBe("MyApp");
 });
 
 // ── call() ────────────────────────────────────────────────────────
@@ -121,7 +121,7 @@ test("Variant #7: call() invokes function with explicit this", async () => {
     window.TEST_OUTPUT = greet.call(obj, "Hello");
   `);
 
-  expect(evalCode(code)).toBe("Hello, Alice");
+  expect(await evalCode(code)).toBe("Hello, Alice");
 });
 
 test("Variant #8: call() with multiple arguments", async () => {
@@ -133,7 +133,7 @@ test("Variant #8: call() with multiple arguments", async () => {
     window.TEST_OUTPUT = add.call(obj, 1, 2, 3);
   `);
 
-  expect(evalCode(code)).toBe(16);
+  expect(await evalCode(code)).toBe(16);
 });
 
 test("Variant #9: call() used for method borrowing", async () => {
@@ -146,7 +146,7 @@ test("Variant #9: call() used for method borrowing", async () => {
     window.TEST_OUTPUT = [speak.call(dog), speak.call(cat)];
   `);
 
-  expect(evalCode(code)).toEqual(["Rex says woof", "Whiskers says meow"]);
+  expect(await evalCode(code)).toEqual(["Rex says woof", "Whiskers says meow"]);
 });
 
 // ── apply() ───────────────────────────────────────────────────────
@@ -160,7 +160,7 @@ test("Variant #10: apply() invokes function with explicit this and args array", 
     window.TEST_OUTPUT = greet.apply(obj, ["Hi", "!"]);
   `);
 
-  expect(evalCode(code)).toBe("Hi, Bob!");
+  expect(await evalCode(code)).toBe("Hi, Bob!");
 });
 
 test("Variant #11: apply() with Math.max to spread an array", async () => {
@@ -169,7 +169,7 @@ test("Variant #11: apply() with Math.max to spread an array", async () => {
     window.TEST_OUTPUT = Math.max.apply(null, nums);
   `);
 
-  expect(evalCode(code)).toBe(9);
+  expect(await evalCode(code)).toBe(9);
 });
 
 test("Variant #12: apply() used for constructor chaining", async () => {
@@ -186,7 +186,7 @@ test("Variant #12: apply() used for constructor chaining", async () => {
     window.TEST_OUTPUT = [p.x, p.y, p.label];
   `);
 
-  expect(evalCode(code)).toEqual([3, 4, "P"]);
+  expect(await evalCode(code)).toEqual([3, 4, "P"]);
 });
 
 // ── bind() ────────────────────────────────────────────────────────
@@ -201,7 +201,7 @@ test("Variant #13: bind() returns a function with fixed this", async () => {
     window.TEST_OUTPUT = boundGet();
   `);
 
-  expect(evalCode(code)).toBe("Carol");
+  expect(await evalCode(code)).toBe("Carol");
 });
 
 test("Variant #14: bind() with pre-filled arguments (partial application)", async () => {
@@ -213,7 +213,7 @@ test("Variant #14: bind() with pre-filled arguments (partial application)", asyn
     window.TEST_OUTPUT = [double(3), double(5), double(10)];
   `);
 
-  expect(evalCode(code)).toEqual([6, 10, 20]);
+  expect(await evalCode(code)).toEqual([6, 10, 20]);
 });
 
 test("Variant #15: bind() preserves this through setTimeout-style callbacks", async () => {
@@ -232,7 +232,7 @@ test("Variant #15: bind() preserves this through setTimeout-style callbacks", as
     window.TEST_OUTPUT = boundTick();
   `);
 
-  expect(evalCode(code)).toBe(3);
+  expect(await evalCode(code)).toBe(3);
 });
 
 // ── null/undefined thisArg → global object (sloppy mode) ─────────
@@ -245,7 +245,7 @@ test("Variant #16: call(null) passes global object as this", async () => {
     }).call(null);
   `);
 
-  expect(evalCode(code)).toBe(42);
+  expect(await evalCode(code)).toBe(42);
 });
 
 test("Variant #17: apply(undefined) passes global object as this", async () => {
@@ -256,7 +256,7 @@ test("Variant #17: apply(undefined) passes global object as this", async () => {
     }).apply(undefined);
   `);
 
-  expect(evalCode(code)).toBe(99);
+  expect(await evalCode(code)).toBe(99);
 });
 
 test("Variant #18: plain function call receives global object as this", async () => {
@@ -267,7 +267,7 @@ test("Variant #18: plain function call receives global object as this", async ()
     })();
   `);
 
-  expect(evalCode(code)).toBe(7);
+  expect(await evalCode(code)).toBe(7);
 });
 
 // ── Method chaining (return this) ────────────────────────────────
@@ -294,5 +294,5 @@ test("Variant #6: Returning `this` from prototype methods enables chaining", asy
   `);
 
   // (0 + 5) * 3 + 2 = 17
-  expect(evalCode(code)).toBe(17);
+  expect(await evalCode(code)).toBe(17);
 });

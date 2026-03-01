@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 test("Variant #1: Basic closure captures a single variable", async () => {
   const { code } = await obfuscate(`
@@ -12,7 +12,7 @@ test("Variant #1: Basic closure captures a single variable", async () => {
     window.TEST_OUTPUT = greet("World");
   `);
 
-  expect(evalCode(code)).toBe("Hello, World!");
+  expect(await evalCode(code)).toBe("Hello, World!");
 });
 
 test("Variant #2: Closure captures multiple variables", async () => {
@@ -26,7 +26,7 @@ test("Variant #2: Closure captures multiple variables", async () => {
     window.TEST_OUTPUT = [inRange(5), inRange(0), inRange(10)];
   `);
 
-  expect(evalCode(code)).toEqual([true, false, true]);
+  expect(await evalCode(code)).toEqual([true, false, true]);
 });
 
 test("Variant #3: Closure captures from outer function (counter)", async () => {
@@ -44,7 +44,7 @@ test("Variant #3: Closure captures from outer function (counter)", async () => {
     window.TEST_OUTPUT = counter();
   `);
 
-  expect(evalCode(code)).toBe(3);
+  expect(await evalCode(code)).toBe(3);
 });
 
 test("Variant #4: Closure modifies a captured variable", async () => {
@@ -62,7 +62,7 @@ test("Variant #4: Closure modifies a captured variable", async () => {
     window.TEST_OUTPUT = acc(2);
   `);
 
-  expect(evalCode(code)).toBe(20);
+  expect(await evalCode(code)).toBe(20);
 });
 
 test("Variant #5: Nested closures (multi-level capture)", async () => {
@@ -77,7 +77,7 @@ test("Variant #5: Nested closures (multi-level capture)", async () => {
     window.TEST_OUTPUT = outer(1)(2)(3);
   `);
 
-  expect(evalCode(code)).toBe(6);
+  expect(await evalCode(code)).toBe(6);
 });
 
 test("Variant #6: Two closures sharing the same mutable cell", async () => {
@@ -95,7 +95,7 @@ test("Variant #6: Two closures sharing the same mutable cell", async () => {
     window.TEST_OUTPUT = get();
   `);
 
-  expect(evalCode(code)).toBe(42);
+  expect(await evalCode(code)).toBe(42);
 });
 
 test("Variant #7: Closure exits VM", async () => {
@@ -110,7 +110,7 @@ test("Variant #7: Closure exits VM", async () => {
     window.TEST_OUTPUT = makeClosure();
     `);
 
-  const closure = evalCode(code);
+  const closure = await evalCode(code);
   expect(typeof closure).toStrictEqual("function");
   expect(closure()).toStrictEqual("I am captured");
 });

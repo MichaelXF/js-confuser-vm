@@ -9,11 +9,10 @@
         "modules": false
       }
     ],
-    [
-      "@babel/preset-typescript"
-    ]
+    ["@babel/preset-typescript"]
   ],
   "plugins": [
+    "./babel-plugin-inline-runtime.cjs",
     [
       "replace-import-extension",
       {

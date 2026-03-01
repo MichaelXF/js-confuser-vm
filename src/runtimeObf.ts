@@ -3,16 +3,21 @@ import { generate } from "@babel/generator";
 import { parse } from "@babel/parser";
 import traverseImport from "@babel/traverse";
 import { ok } from "assert";
-import { choice, shuffle } from "./random.ts";
+import { shuffle } from "./random.ts";
 import type { Options } from "./options.ts";
-import { escapeRegex } from "./utilts.ts";
 import { minify } from "./minify.ts";
-const traverse = traverseImport.default;
+const traverse = (traverseImport.default ||
+  traverseImport) as typeof traverseImport.default;
 
 export async function obfuscateRuntime(runtime: string, options: Options) {
-  const ast = parse(runtime, {
-    sourceType: "unambiguous",
-  });
+  let ast: t.File;
+  try {
+    ast = parse(runtime, {
+      sourceType: "unambiguous",
+    });
+  } catch (error) {
+    throw new Error("VM-Runtime final parsing failed", { cause: error });
+  }
 
   // shuffle order of opcode handlers
 
@@ -38,10 +43,19 @@ export async function obfuscateRuntime(runtime: string, options: Options) {
     switchStatement.cases = shuffle(switchStatement.cases);
   }
 
-  let generated = generate(ast).code;
+  let generated: string;
+  try {
+    generated = generate(ast).code;
+  } catch (error) {
+    throw new Error("VM-Runtime final generation failed", { cause: error });
+  }
 
   if (options.minify) {
-    generated = await minify(generated);
+    try {
+      generated = await minify(generated);
+    } catch (error) {
+      throw new Error("VM-Runtime final minification failed", { cause: error });
+    }
   }
 
   return generated;

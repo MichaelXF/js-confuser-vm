@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 // ── Binary: Arithmetic ────────────────────────────────────────────
 
@@ -8,7 +8,7 @@ test("Variant #1: Arithmetic binary operators (+, -, *, /, %)", async () => {
     window.TEST_OUTPUT = [2 + 3, 10 - 4, 3 * 4, 15 / 3, 10 % 3];
   `);
 
-  expect(evalCode(code)).toEqual([5, 6, 12, 5, 1]);
+  expect(await evalCode(code)).toEqual([5, 6, 12, 5, 1]);
 });
 
 test("Variant #2: Bitwise binary operators (&, |, ^, <<, >>, >>>)", async () => {
@@ -16,7 +16,7 @@ test("Variant #2: Bitwise binary operators (&, |, ^, <<, >>, >>>)", async () => 
     window.TEST_OUTPUT = [5 & 3, 5 | 3, 5 ^ 3, 1 << 3, 16 >> 2, -1 >>> 28];
   `);
 
-  expect(evalCode(code)).toEqual([1, 7, 6, 8, 4, 15]);
+  expect(await evalCode(code)).toEqual([1, 7, 6, 8, 4, 15]);
 });
 
 test("Variant #3: String concatenation with +", async () => {
@@ -26,7 +26,7 @@ test("Variant #3: String concatenation with +", async () => {
     window.TEST_OUTPUT = a + b;
   `);
 
-  expect(evalCode(code)).toBe("hello world");
+  expect(await evalCode(code)).toBe("hello world");
 });
 
 // ── Binary: Comparison ────────────────────────────────────────────
@@ -49,7 +49,7 @@ test("Variant #4: Comparison operators (<, >, <=, >=, ===, !==)", async () => {
     ];
   `);
 
-  expect(evalCode(code)).toEqual([
+  expect(await evalCode(code)).toEqual([
     true,
     true,
     true,
@@ -73,7 +73,7 @@ test("Variant #5: `in` operator", async () => {
     window.TEST_OUTPUT = ["x" in obj, "y" in obj, "z" in obj];
   `);
 
-  expect(evalCode(code)).toEqual([true, true, false]);
+  expect(await evalCode(code)).toEqual([true, true, false]);
 });
 
 test("Variant #6: `instanceof` operator", async () => {
@@ -86,7 +86,7 @@ test("Variant #6: `instanceof` operator", async () => {
     window.TEST_OUTPUT = [a instanceof Animal, plain instanceof Animal];
   `);
 
-  expect(evalCode(code)).toEqual([true, false]);
+  expect(await evalCode(code)).toEqual([true, false]);
 });
 
 // ── Logical ───────────────────────────────────────────────────────
@@ -100,7 +100,7 @@ test("Variant #7: Logical && — short-circuits on falsy LHS", async () => {
   `);
 
   // false && ... keeps false, skips RHS; true && "yes" evaluates to "yes"
-  expect(evalCode(code)).toEqual([false, "yes", 0]);
+  expect(await evalCode(code)).toEqual([false, "yes", 0]);
 });
 
 test("Variant #8: Logical || — short-circuits on truthy LHS", async () => {
@@ -112,7 +112,7 @@ test("Variant #8: Logical || — short-circuits on truthy LHS", async () => {
   `);
 
   // true || ... keeps true, skips RHS; false || "fallback" evaluates to "fallback"
-  expect(evalCode(code)).toEqual([true, "fallback", 0]);
+  expect(await evalCode(code)).toEqual([true, "fallback", 0]);
 });
 
 // ── Unary ─────────────────────────────────────────────────────────
@@ -122,7 +122,7 @@ test("Variant #9: Arithmetic and boolean unary operators (-, +, !, ~)", async ()
     window.TEST_OUTPUT = [-5, +(-3), !true, !false, ~0, ~(-1)];
   `);
 
-  expect(evalCode(code)).toEqual([-5, -3, false, true, -1, 0]);
+  expect(await evalCode(code)).toEqual([-5, -3, false, true, -1, 0]);
 });
 
 test("Variant #10: typeof on primitives and undeclared variable", async () => {
@@ -138,7 +138,7 @@ test("Variant #10: typeof on primitives and undeclared variable", async () => {
     ];
   `);
 
-  expect(evalCode(code)).toEqual([
+  expect(await evalCode(code)).toEqual([
     "number",
     "string",
     "boolean",
@@ -156,7 +156,13 @@ test("Variant #11: void and delete", async () => {
     window.TEST_OUTPUT = [void 0, void "anything", d, "x" in obj, "y" in obj];
   `);
 
-  expect(evalCode(code)).toEqual([undefined, undefined, true, false, true]);
+  expect(await evalCode(code)).toEqual([
+    undefined,
+    undefined,
+    true,
+    false,
+    true,
+  ]);
 });
 
 test("Variant #11b: delete with computed property key", async () => {
@@ -167,7 +173,7 @@ test("Variant #11b: delete with computed property key", async () => {
     window.TEST_OUTPUT = [d, "a" in obj, "b" in obj, "c" in obj];
   `);
 
-  expect(evalCode(code)).toEqual([true, true, false, true]);
+  expect(await evalCode(code)).toEqual([true, true, false, true]);
 });
 
 test("Variant #11c: delete result used inside an expression", async () => {
@@ -181,7 +187,7 @@ test("Variant #11c: delete result used inside an expression", async () => {
     window.TEST_OUTPUT = [msg, still];
   `);
 
-  expect(evalCode(code)).toEqual(["deleted=true", false]);
+  expect(await evalCode(code)).toEqual(["deleted=true", false]);
 });
 
 test("Variant #11d: delete non-existent property returns true", async () => {
@@ -190,7 +196,7 @@ test("Variant #11d: delete non-existent property returns true", async () => {
     window.TEST_OUTPUT = [delete obj.z, delete obj.x, "x" in obj];
   `);
 
-  expect(evalCode(code)).toEqual([true, true, false]);
+  expect(await evalCode(code)).toEqual([true, true, false]);
 });
 
 test("Variant #10b: typeof on local variable and function", async () => {
@@ -211,7 +217,7 @@ test("Variant #10b: typeof on local variable and function", async () => {
     ];
   `);
 
-  expect(evalCode(code)).toEqual([
+  expect(await evalCode(code)).toEqual([
     "number",
     "string",
     "boolean",
@@ -232,7 +238,7 @@ test("Variant #12: Update expressions (++ and --)", async () => {
     window.TEST_OUTPUT = x;
   `);
 
-  expect(evalCode(code)).toBe(6);
+  expect(await evalCode(code)).toBe(6);
 });
 
 // ── Conditional ───────────────────────────────────────────────────
@@ -248,7 +254,7 @@ test("Variant #13: Conditional (ternary) expression", async () => {
     ];
   `);
 
-  expect(evalCode(code)).toEqual(["big", "small", 1, 2]);
+  expect(await evalCode(code)).toEqual(["big", "small", 1, 2]);
 });
 
 // ── Assignment ────────────────────────────────────────────────────
@@ -260,7 +266,7 @@ test("Variant #14: Simple assignment — = is an expression", async () => {
     window.TEST_OUTPUT = [x, result];
   `);
 
-  expect(evalCode(code)).toEqual([42, 42]);
+  expect(await evalCode(code)).toEqual([42, 42]);
 });
 
 test("Variant #15: Arithmetic compound assignments (+=, -=, *=, /=, %=)", async () => {
@@ -275,7 +281,7 @@ test("Variant #15: Arithmetic compound assignments (+=, -=, *=, /=, %=)", async 
   `);
 
   // 10 → 15 → 12 → 24 → 6 → 2
-  expect(evalCode(code)).toBe(2);
+  expect(await evalCode(code)).toBe(2);
 });
 
 test("Variant #16: Bitwise compound assignments (&=, |=, ^=, <<=, >>=)", async () => {
@@ -290,7 +296,7 @@ test("Variant #16: Bitwise compound assignments (&=, |=, ^=, <<=, >>=)", async (
   `);
 
   // 0 → 255 → 15 → 10 → 40 → 20
-  expect(evalCode(code)).toBe(20);
+  expect(await evalCode(code)).toBe(20);
 });
 
 test("Variant #17: Member assignment (dot and bracket notation)", async () => {
@@ -303,7 +309,7 @@ test("Variant #17: Member assignment (dot and bracket notation)", async () => {
     window.TEST_OUTPUT = [obj.x, obj.y, arr[1]];
   `);
 
-  expect(evalCode(code)).toEqual([10, 20, 99]);
+  expect(await evalCode(code)).toEqual([10, 20, 99]);
 });
 
 test("Variant #18: Sequence expression", async () => {
@@ -314,5 +320,5 @@ test("Variant #18: Sequence expression", async () => {
   `);
 
   // x: 0 → 1; result: (1, 2, -2) evaluates to -2
-  expect(evalCode(code)).toEqual([1, -2]);
+  expect(await evalCode(code)).toEqual([1, -2]);
 });

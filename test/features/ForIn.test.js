@@ -1,5 +1,5 @@
-import JsConfuserVM from "../src";
-import { obfuscate, evalCode } from "./test-utils";
+import JsConfuserVM from "../../src";
+import { obfuscate, evalCode } from "../test-utils";
 
 // ── For..In ───────────────────────────────────────────────────────
 
@@ -13,7 +13,7 @@ test("Variant #1: For-in — own enumerable keys of a plain object", async () =>
     window.TEST_OUTPUT = keys.join(",");
   `);
 
-  expect(evalCode(code)).toBe("a,b,c");
+  expect(await evalCode(code)).toBe("a,b,c");
 });
 
 test("Variant #2: For-in — values can be read via the key", async () => {
@@ -26,7 +26,7 @@ test("Variant #2: For-in — values can be read via the key", async () => {
     window.TEST_OUTPUT = sum;
   `);
 
-  expect(evalCode(code)).toBe(60);
+  expect(await evalCode(code)).toBe(60);
 });
 
 test("Variant #3: For-in — null object produces no iterations", async () => {
@@ -38,7 +38,7 @@ test("Variant #3: For-in — null object produces no iterations", async () => {
     window.TEST_OUTPUT = count;
   `);
 
-  expect(evalCode(code)).toBe(0);
+  expect(await evalCode(code)).toBe(0);
 });
 
 test("Variant #4: For-in — undefined object produces no iterations", async () => {
@@ -50,7 +50,7 @@ test("Variant #4: For-in — undefined object produces no iterations", async () 
     window.TEST_OUTPUT = count;
   `);
 
-  expect(evalCode(code)).toBe(0);
+  expect(await evalCode(code)).toBe(0);
 });
 
 test("Variant #5: For-in — empty object produces no iterations", async () => {
@@ -62,7 +62,7 @@ test("Variant #5: For-in — empty object produces no iterations", async () => {
     window.TEST_OUTPUT = count;
   `);
 
-  expect(evalCode(code)).toBe(0);
+  expect(await evalCode(code)).toBe(0);
 });
 
 test("Variant #6: For-in — array yields string indices only (not length)", async () => {
@@ -76,7 +76,7 @@ test("Variant #6: For-in — array yields string indices only (not length)", asy
   `);
 
   // length is non-enumerable; indices are enumerable strings
-  expect(evalCode(code)).toBe("0,1,2");
+  expect(await evalCode(code)).toBe("0,1,2");
 });
 
 test("Variant #7: For-in — inherited enumerable properties are included", async () => {
@@ -92,7 +92,7 @@ test("Variant #7: For-in — inherited enumerable properties are included", asyn
   `);
 
   // own property first, then prototype property
-  expect(evalCode(code)).toBe("name,type");
+  expect(await evalCode(code)).toBe("name,type");
 });
 
 test("Variant #8: For-in — non-enumerable built-in prototype properties are excluded", async () => {
@@ -106,7 +106,7 @@ test("Variant #8: For-in — non-enumerable built-in prototype properties are ex
   `);
 
   // Only own 2 keys — toString, hasOwnProperty etc. must NOT appear
-  expect(evalCode(code)).toBe(2);
+  expect(await evalCode(code)).toBe(2);
 });
 
 test("Variant #9: For-in — shadowed prototype property appears only once", async () => {
@@ -123,7 +123,7 @@ test("Variant #9: For-in — shadowed prototype property appears only once", asy
   `);
 
   // "x" from own shadows prototype "x" — should appear exactly once
-  expect(evalCode(code)).toBe(1);
+  expect(await evalCode(code)).toBe(1);
 });
 
 test("Variant #10: For-in — break exits the loop early", async () => {
@@ -139,7 +139,7 @@ test("Variant #10: For-in — break exits the loop early", async () => {
     window.TEST_OUTPUT = found;
   `);
 
-  expect(evalCode(code)).toBe("b");
+  expect(await evalCode(code)).toBe("b");
 });
 
 test("Variant #11: For-in — continue skips to the next key", async () => {
@@ -153,7 +153,7 @@ test("Variant #11: For-in — continue skips to the next key", async () => {
     window.TEST_OUTPUT = result.join(",");
   `);
 
-  expect(evalCode(code)).toBe("a,c");
+  expect(await evalCode(code)).toBe("a,c");
 });
 
 test("Variant #12: For-in — nested for-in loops", async () => {
@@ -169,7 +169,7 @@ test("Variant #12: For-in — nested for-in loops", async () => {
     window.TEST_OUTPUT = pairs.join(",");
   `);
 
-  expect(evalCode(code)).toBe("xp,xq,yp,yq");
+  expect(await evalCode(code)).toBe("xp,xq,yp,yq");
 });
 
 test("Variant #13: For-in — loop variable without var declaration", async () => {
@@ -183,7 +183,7 @@ test("Variant #13: For-in — loop variable without var declaration", async () =
     window.TEST_OUTPUT = keys.join(",");
   `);
 
-  expect(evalCode(code)).toBe("a,b");
+  expect(await evalCode(code)).toBe("a,b");
 });
 
 test("Variant #14: For-in — works inside a function", async () => {
@@ -198,7 +198,7 @@ test("Variant #14: For-in — works inside a function", async () => {
     window.TEST_OUTPUT = collectKeys({ one: 1, two: 2, three: 3 }).join(",");
   `);
 
-  expect(evalCode(code)).toBe("one,two,three");
+  expect(await evalCode(code)).toBe("one,two,three");
 });
 
 test("Variant #15: For-in — multiple sequential for-in loops work independently", async () => {
@@ -212,7 +212,7 @@ test("Variant #15: For-in — multiple sequential for-in loops work independentl
     window.TEST_OUTPUT = first.join(",") + "|" + second.join(",");
   `);
 
-  expect(evalCode(code)).toBe("x|y");
+  expect(await evalCode(code)).toBe("x|y");
 });
 
 test("Variant #16: For-in bare blockless body", async () => {
@@ -223,5 +223,5 @@ test("Variant #16: For-in bare blockless body", async () => {
     window.TEST_OUTPUT = keys.join(",");  
   `);
 
-  expect(evalCode(code)).toBe("a,b,c");
+  expect(await evalCode(code)).toBe("a,b,c");
 });
