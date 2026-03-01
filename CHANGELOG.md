@@ -1,13 +1,13 @@
 ## `1.0.3` First update
 
-- Created [Website Playground]((https://development--confuser.netlify.app/vm))
+- Created [Website Playground](https://development--confuser.netlify.app/vm)
 
 - Added partial support for `try..catch` - The `finally` operator is not supported yet
 - More ES5 coverage: getter/setters, debugger statement
 - Improved compilation process:
   - Parsing: 
       JS -> AST
-      Done by @babel/parser
+      Done by [@babel/parser](https://www.npmjs.com/package/@babel/parser)
   - Compilation: 
       AST -> IR bytecode. 
       This bytecode contains pseudo instructions and symbolic values for things like jump labels and constants
