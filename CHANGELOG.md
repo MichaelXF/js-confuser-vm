@@ -1,4 +1,4 @@
-## `0.0.4` Generated Opcodes
+## `0.0.5` Generated Opcodes
 
 - Added new option `specializedOpcodes` which creates specialized opcodes for commonly used opcode+operand pairs.
 

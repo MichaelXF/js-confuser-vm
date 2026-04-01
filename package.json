@@ -1,15 +1,14 @@
 {
   "name": "js-confuser-vm",
-  "version": "0.0.4",
+  "version": "0.0.5",
   "main": "dist/index.js",
   "scripts": {
-    "build": "babel src --out-dir dist --extensions '.ts,.js'",
+    "build": "babel src --out-dir dist --extensions \".ts,.js\"",
     "index": "cross-env NODE_OPTIONS=\"--disable-warning=ExperimentalWarning\" node index.ts",
     "test": "cross-env NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html --selectProjects default",
     "test-all": "cross-env NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html",
     "test262": "cross-env NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" node test262-scripts/run-test262.ts",
-    "prepublishOnly": "npm run build && npm run test",
-    "set-env": ""
+    "prepublishOnly": "npm run build && npm run test"
   },
   "type": "module",
   "keywords": [
