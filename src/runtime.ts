@@ -16,13 +16,9 @@ function decodeBytecode(s) {
       : Uint8Array.from(atob(s), function (c) {
           return c.charCodeAt(0);
         });
-  var r = new Int32Array(b.length / 4);
-  for (var i = 0; i < r.length; i++)
-    r[i] =
-      b[i * 4] |
-      (b[i * 4 + 1] << 8) |
-      (b[i * 4 + 2] << 16) |
-      (b[i * 4 + 3] << 24);
+  // Each slot is a u16 stored as 2 little-endian bytes.
+  var r = new Uint16Array(b.length / 2);
+  for (var i = 0; i < r.length; i++) r[i] = b[i * 2] | (b[i * 2 + 1] << 8);
   return r;
 }
 
@@ -97,16 +93,10 @@ VM.prototype.peek = function () {
   return this._stack[this._stack.length - 1];
 };
 
-// Read one instruction word from this.bytecode at `pc`, unwrapping the
-// encoding so callers always get a plain { op, operand } pair regardless
-// of whether ENCODE_BYTECODE is active.
-VM.prototype.readWord = function (pc) {
-  var word = this.bytecode[pc];
-  if (ENCODE_BYTECODE) {
-    return { op: word & 0xff, operand: word >>> 8 };
-  } else {
-    return { op: word[0], operand: word[1] };
-  }
+// Consume the next slot from the flat bytecode stream and advance the PC.
+// Called by opcode handlers to read each of their operands in order.
+VM.prototype._operand = function () {
+  return this.bytecode[this._currentFrame._pc++];
 };
 
 VM.prototype.captureUpvalue = function (frame, slot) {
@@ -138,28 +128,28 @@ VM.prototype.run = function () {
     return performance.now();
   };
 
-  var t = now();
+  var lastTime = now();
 
   while (true) {
     var frame = this._currentFrame;
     var bc = this.bytecode;
     if (frame._pc >= bc.length) break;
 
-    var op, operand;
-    var word = this.readWord(frame._pc++);
+    var op = this.bytecode[frame._pc++];
 
-    op = word.op;
-    operand = word.operand;
+    // console.log(frame._pc - 1, op);
 
-    // console.log(frame._pc - 1, op, operand);
-
-    // Debugging protection
+    // Debugging protection: Detects debugger by checking for >1s pauses which can only happen from debugger; or extremely slow sync tasks
     if (TIMING_CHECKS) {
-      var t2 = now();
-      var isTamper = t2 - t > 1000;
-      t = t2;
+      var currentTime = now();
+      var isTamper = currentTime - lastTime > 1000;
+      lastTime = currentTime;
       if (isTamper) {
+        // Poison the bytecode
+        for (var i = 0; i < this.bytecode.length; i++) this.bytecode[i] = 0;
+        // Break the current state
         op = OP.POP;
+        this._stack = [];
       }
     }
 
@@ -167,27 +157,27 @@ VM.prototype.run = function () {
       /* @SWITCH */
       switch (op) {
         case OP.LOAD_CONST:
-          this._push(this.constants[operand]);
+          this._push(this.constants[this._operand()]);
           break;
 
         case OP.LOAD_INT:
-          this._push(operand);
+          this._push(this._operand());
           break;
 
         case OP.LOAD_LOCAL:
-          this._push(frame.locals[operand]);
+          this._push(frame.locals[this._operand()]);
           break;
 
         case OP.STORE_LOCAL:
-          frame.locals[operand] = this._pop();
+          frame.locals[this._operand()] = this._pop();
           break;
 
         case OP.LOAD_GLOBAL:
-          this._push(this.globals[this.constants[operand]]);
+          this._push(this.globals[this.constants[this._operand()]]);
           break;
 
         case OP.STORE_GLOBAL:
-          this.globals[this.constants[operand]] = this._pop();
+          this.globals[this.constants[this._operand()]] = this._pop();
           break;
 
         case OP.GET_PROP: {
@@ -359,48 +349,51 @@ VM.prototype.run = function () {
         }
 
         case OP.JUMP:
-          frame._pc = operand;
+          frame._pc = this._operand();
           break;
 
-        case OP.JUMP_IF_FALSE:
-          if (!this._pop()) frame._pc = operand;
+        case OP.JUMP_IF_FALSE: {
+          var target = this._operand();
+          if (!this._pop()) frame._pc = target;
           break;
+        }
 
-        case OP.JUMP_IF_TRUE_OR_POP:
+        case OP.JUMP_IF_TRUE_OR_POP: {
           // || semantics: if truthy, we're done - leave value, jump over RHS.
           // If falsy, discard it and fall through to evaluate RHS.
+          var target = this._operand();
           if (this.peek()) {
-            frame._pc = operand;
+            frame._pc = target;
           } else {
             this._pop();
           }
           break;
+        }
 
-        case OP.JUMP_IF_FALSE_OR_POP:
+        case OP.JUMP_IF_FALSE_OR_POP: {
           // && semantics: if falsy, we're done - leave value, jump over RHS.
           // If truthy, discard it and fall through to evaluate RHS.
+          var target = this._operand();
           if (!this.peek()) {
-            frame._pc = operand;
+            frame._pc = target;
           } else {
             this._pop();
           }
           break;
+        }
 
         case OP.MAKE_CLOSURE: {
-          // operand = startPc: absolute index of the function body's first instruction.
-          // Metadata is read from the value stack (pushed by _emitClosureMetadata).
-          // Stack layout when we arrive here (top is rightmost):
-          //   [isLocal_0, idx_0, ..., isLocal_N-1, idx_N-1, uvCount, localCount, paramCount]
-          var startPc = operand;
-          var paramCount = this._pop();
-          var localCount = this._pop();
-          var uvCount = this._pop();
+          // Inline operands: startPc, paramCount, localCount, uvCount,
+          //                  [isLocal_0, idx_0, isLocal_1, idx_1, ...]
+          var startPc = this._operand();
+          var paramCount = this._operand();
+          var localCount = this._operand();
+          var uvCount = this._operand();
 
-          // Upvalues were pushed in order 0..N-1 so we pop them in reverse.
           var uvDescs = new Array(uvCount);
-          for (var i = uvCount - 1; i >= 0; i--) {
-            var uvIndex = this._pop();
-            var isLocalRaw = this._pop();
+          for (var i = 0; i < uvCount; i++) {
+            var isLocalRaw = this._operand();
+            var uvIndex = this._operand();
             uvDescs[i] = { isLocal: isLocalRaw, _index: uvIndex };
           }
 
@@ -449,21 +442,16 @@ VM.prototype.run = function () {
           break;
         }
 
-        case OP.DATA:
-          // Should never appear in compiled output (reserved opcode slot).
-          throw new Error("DATA opcode executed at pc " + (frame._pc - 1));
-
         case OP.LOAD_UPVALUE:
-          this._push(frame.closure.upvalues[operand]._read());
+          this._push(frame.closure.upvalues[this._operand()]._read());
           break;
 
         case OP.STORE_UPVALUE:
-          frame.closure.upvalues[operand]._write(this._pop());
+          frame.closure.upvalues[this._operand()]._write(this._pop());
           break;
 
         case OP.BUILD_ARRAY: {
-          // Pop \`operand\` values off the stack in reverse, assemble array.
-          var elems = this._stack.splice(this._stack.length - operand);
+          var elems = this._stack.splice(this._stack.length - this._operand());
           this._push(elems);
           break;
         }
@@ -471,7 +459,9 @@ VM.prototype.run = function () {
         case OP.BUILD_OBJECT: {
           // Stack has: key0, val0, key1, val1 ... keyN, valN  (pushed left->right)
           // Pop all pairs and build the object.
-          var pairs = this._stack.splice(this._stack.length - operand * 2);
+          var pairs = this._stack.splice(
+            this._stack.length - this._operand() * 2,
+          );
           var o = {};
           for (var i = 0; i < pairs.length; i += 2) {
             o[pairs[i]] = pairs[i + 1]; // key at even index, val at odd
@@ -509,7 +499,7 @@ VM.prototype.run = function () {
         }
 
         case OP.CALL: {
-          var args = this._stack.splice(this._stack.length - operand);
+          var args = this._stack.splice(this._stack.length - this._operand());
           var callee = this._pop();
           if (callee && callee[CLOSURE_SYM]) {
             // VM closure - run directly in this VM, no sub-VM overhead
@@ -528,7 +518,7 @@ VM.prototype.run = function () {
         }
 
         case OP.CALL_METHOD: {
-          var args = this._stack.splice(this._stack.length - operand);
+          var args = this._stack.splice(this._stack.length - this._operand());
           var callee = this._pop();
           var receiver = this._pop(); // left on stack by GET_PROP
           if (callee && callee[CLOSURE_SYM]) {
@@ -551,7 +541,7 @@ VM.prototype.run = function () {
           break;
 
         case OP.NEW: {
-          var args = this._stack.splice(this._stack.length - operand);
+          var args = this._stack.splice(this._stack.length - this._operand());
           var callee = this._pop();
           if (callee && callee[CLOSURE_SYM]) {
             // VM closure constructor - prototype is unified via shell.prototype = closure.prototype
@@ -629,11 +619,12 @@ VM.prototype.run = function () {
         }
 
         case OP.FOR_IN_NEXT: {
-          // operand = jump target for the done case.
-          // Pop the iterator; if exhausted jump to exit, otherwise push next key.
+          // Operand = jump target for the done case. Must be read before the
+          // conditional so the PC stays correctly aligned either way.
+          var target = this._operand();
           var iter = this._pop();
           if (iter.i >= iter._keys.length) {
-            frame._pc = operand;
+            frame._pc = target;
           } else {
             this._push(iter._keys[iter.i++]);
           }
@@ -641,14 +632,15 @@ VM.prototype.run = function () {
         }
 
         case OP.PATCH: {
-          // Writes at operand the bytecode[arg1:arg2]
-          var destPc = operand;
-          var instructions = this.bytecode.slice(this._pop(), this._pop());
+          // Inline operands: destPc, sliceStart, sliceEnd
+          // Copies bytecode[sliceStart..sliceEnd) flat u16 slots to destPc.
+          var destPc = this._operand();
+          var sliceStart = this._operand();
+          var sliceEnd = this._operand();
 
-          for (var i = 0; i < instructions.length; i++) {
-            this.bytecode[destPc + i] = instructions[i];
+          for (var pi = sliceStart; pi < sliceEnd; pi++) {
+            this.bytecode[destPc + (pi - sliceStart)] = this.bytecode[pi];
           }
-
           break;
         }
 
@@ -657,7 +649,7 @@ VM.prototype.run = function () {
           // Saves: catch PC (operand), current stack depth, current frame-stack depth.
           // If an exception is thrown before TRY_END fires, the VM jumps here.
           frame._handlerStack.push({
-            handlerPc: operand,
+            handlerPc: this._operand(),
             stackDepth: this._stack.length,
             frameStackDepth: this._frameStack.length,
           });

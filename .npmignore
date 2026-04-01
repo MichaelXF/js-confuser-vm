@@ -6,6 +6,7 @@ input.js
 output.js
 output.min.js
 output.obf.js
+output.original.js
 .claude
 package-lock.json
 test.js

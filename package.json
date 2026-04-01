@@ -1,14 +1,15 @@
 {
   "name": "js-confuser-vm",
-  "version": "0.0.3",
+  "version": "0.0.4",
   "main": "dist/index.js",
   "scripts": {
     "build": "babel src --out-dir dist --extensions '.ts,.js'",
-    "index": "NODE_OPTIONS=\"--disable-warning=ExperimentalWarning\" node index.ts",
-    "test": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html --selectProjects default",
-    "test-all": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html",
-    "test262": "NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" node test262-scripts/run-test262.ts",
-    "prepublishOnly": "npm run build && npm run test"
+    "index": "cross-env NODE_OPTIONS=\"--disable-warning=ExperimentalWarning\" node index.ts",
+    "test": "cross-env NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html --selectProjects default",
+    "test-all": "cross-env NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" jest --coverage --coverageReporters=html",
+    "test262": "cross-env NODE_OPTIONS=\"--experimental-vm-modules --experimental-strip-types --disable-warning=ExperimentalWarning\" node test262-scripts/run-test262.ts",
+    "prepublishOnly": "npm run build && npm run test",
+    "set-env": ""
   },
   "type": "module",
   "keywords": [
@@ -29,8 +30,7 @@
     "@babel/parser": "^7.29.0",
     "@babel/traverse": "^7.29.0",
     "@babel/types": "^7.29.0",
-    "google-closure-compiler": "^20260216.0.0",
-    "json5": "^2.2.3"
+    "google-closure-compiler": "^20260216.0.0"
   },
   "devDependencies": {
     "@babel/cli": "^7.28.6",
@@ -40,6 +40,8 @@
     "@types/node": "^25.3.0",
     "babel-plugin-module-resolver": "^5.0.2",
     "babel-plugin-replace-import-extension": "^1.1.5",
+    "cross-env": "^10.1.0",
+    "glob": "^13.0.6",
     "jest": "^30.2.0"
   },
   "engines": {

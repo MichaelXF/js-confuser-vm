@@ -7,25 +7,19 @@
 import { Compiler } from "../../src/compiler";
 import { evalCode, obfuscate } from "../test-utils";
 
-const compiler = new Compiler();
-
-test("Variant #1: Self Modifying function", async () => {
+test("Variant #1: Specialized Opcodes", async () => {
   var { code: output } = await obfuscate(
     `
-    function myFunction(){
-      window.TEST_OUTPUT = "Correct Value";
-    }
-
-    myFunction()
+    window.TEST_OUTPUT = "Correct Value";
     `,
     {
-      selfModifying: true,
+      specializedOpcodes: true,
     },
   );
 
+  // Ensure "Correct Value" became "LOAD_GLOBAL_0"
   var bytecodeCommentSection = output.split("var CONSTANTS")[0];
-  expect(bytecodeCommentSection).toContain("PATCH");
-  expect(bytecodeCommentSection).toContain("[" + compiler.OP.PATCH);
+  expect(bytecodeCommentSection).toContain(" LOAD_GLOBAL_0 ");
 
   var result = await evalCode(output);
   expect(result).toEqual("Correct Value");

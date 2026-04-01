@@ -3,7 +3,7 @@ import { evalCode, obfuscate } from "../test-utils";
 
 const compiler = new Compiler();
 
-test("Variant #1: Self Modifying function", async () => {
+test("Variant #1: Encode Bytecode", async () => {
   var { code: output } = await obfuscate(
     `
     function myFunction(){

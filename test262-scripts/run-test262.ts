@@ -3,7 +3,6 @@ import { glob } from "glob";
 import { fileURLToPath } from "url";
 import { Worker } from "worker_threads";
 import * as os from "os";
-import { isReadable } from "stream";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

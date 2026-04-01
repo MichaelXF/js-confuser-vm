@@ -5,6 +5,11 @@ const OPTIONS_MATRIX = [
   { displayName: "encodeBytecode", VM_OPTIONS: { encodeBytecode: true } },
   { displayName: "selfModifying", VM_OPTIONS: { selfModifying: true } },
   { displayName: "timingChecks", VM_OPTIONS: { timingChecks: true } },
+  { displayName: "macroOpcodes", VM_OPTIONS: { macroOpcodes: true } },
+  {
+    displayName: "specializedOpcodes",
+    VM_OPTIONS: { specializedOpcodes: true },
+  },
   {
     displayName: "all",
     VM_OPTIONS: {
@@ -13,6 +18,8 @@ const OPTIONS_MATRIX = [
       encodeBytecode: true,
       selfModifying: true,
       timingChecks: true,
+      macroOpcodes: true,
+      specializedOpcodes: true,
     },
   },
 ];

@@ -5,15 +5,18 @@ import { generate } from "@babel/generator";
 import { readFileSync } from "fs";
 import { join } from "path";
 import { stripTypeScriptTypes } from "module";
-import JSON5 from "json5";
 import * as t from "@babel/types";
 import { ok } from "assert";
-import { obfuscateRuntime } from "./runtimeObf.ts";
+import { obfuscateRuntime } from "./build-runtime.ts";
 import { DEFAULT_OPTIONS, type Options } from "./options.ts";
-import { resolveLabels } from "./transforms/resolveLabels.ts";
-import { resolveConstants } from "./transforms/resolveContants.ts";
-import { selfModifying } from "./transforms/selfModifying.ts";
+import { resolveLabels } from "./transforms/bytecode/resolveLabels.ts";
+import { resolveConstants } from "./transforms/bytecode/resolveContants.ts";
+import { selfModifying } from "./transforms/bytecode/selfModifying.ts";
+import { macroOpcodes } from "./transforms/bytecode/macroOpcodes.ts";
 import * as b from "./types.ts";
+import { specializedOpcodes } from "./transforms/bytecode/specializedOpcodes.ts";
+import { getRandomInt } from "./transforms/utils/random-utils.ts";
+import { U16_MAX } from "./transforms/utils/op-utils.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -29,7 +32,7 @@ const readVMRuntimeFile = () => {
   return stripTypeScriptTypes?.(code) || code;
 };
 
-const VM_RUNTIME = readVMRuntimeFile().split("@START")[1];
+export const VM_RUNTIME = readVMRuntimeFile().split("@START")[1];
 export const SOURCE_NODE_SYM = Symbol("SOURCE_NODE"); // Attach source node location to pseudo bytecode instructions
 
 // Opcodes
@@ -111,16 +114,12 @@ export const OP_ORIGINAL = {
   DEFINE_GETTER: 59, // pop fn, pop key, pop obj -> Object.defineProperty(obj, key, {get: fn})
   DEFINE_SETTER: 60, // pop fn, pop key, pop obj -> Object.defineProperty(obj, key, {set: fn})
 
-  DEBUGGER: 61, // for dev/testing -- emits a "debugger" statement with a comment of the original source location
+  DEBUGGER: 61, // emits a "debugger" statement
 
   // Push the raw integer operand directly onto the stack (no constant pool lookup).
   // Identical pipeline to JUMP ops: {type:"label"} pseudo-operands resolve to a
   // raw PC number that becomes the operand, which is pushed as-is at runtime.
   LOAD_INT: 62,
-
-  // Reserved / unused opcode slot (formerly the inline DATA header word).
-  // Kept to avoid renumbering; should never appear in compiled output.
-  DATA: 63,
 };
 
 // Scope
@@ -212,6 +211,16 @@ export class Compiler {
   serializer: Serializer;
 
   OP: Partial<typeof OP_ORIGINAL>;
+  MACRO_OPS: Record<number, number[]>;
+  SPECIALIZED_OPS: Record<
+    number,
+    {
+      originalOp: number;
+      operand: b.InstrOperand;
+      resolvedOperand?: b.InstrOperand;
+    }
+  >;
+
   OP_NAME: Record<number, string>;
   JUMP_OPS: Set<number>;
 
@@ -237,21 +246,22 @@ export class Compiler {
     this._labelCount = 0; // monotonically increasing counter for unique label names
 
     this.serializer = new Serializer(this);
+    this.MACRO_OPS = {};
+    this.SPECIALIZED_OPS = {};
 
-    this.OP = {};
+    this.OP = { ...OP_ORIGINAL };
+
     // Construct randomized opcode mapping
     if (this.options.randomizeOpcodes) {
       let usedNumbers = new Set<number>();
-      for (const key in OP_ORIGINAL) {
+      for (const key in this.OP) {
         let val;
         do {
-          val = Math.floor(Math.random() * 256);
+          val = getRandomInt(0, U16_MAX);
         } while (usedNumbers.has(val));
         usedNumbers.add(val);
         this.OP[key] = val;
       }
-    } else {
-      this.OP = OP_ORIGINAL;
     }
 
     // Reverse map for comment generation
@@ -414,8 +424,7 @@ export class Compiler {
 
     // Fill the placeholder that was reserved at the top of this function.
     // Metadata (paramCount, localCount, upvalues) is stored on desc and emitted
-    // as LOAD_INT instructions onto the value stack at each MAKE_CLOSURE call
-    // site — the runtime reads them from the stack, not from DATA words.
+    // as inline operands on the MAKE_CLOSURE instruction via _emitMakeClosure.
     desc.name = node.id?.name || "<anonymous>";
     desc.entryLabel = entryLabel;
     desc.bytecode = ctx.bc as b.Bytecode;
@@ -427,21 +436,30 @@ export class Compiler {
     return desc;
   }
 
-  // Emit LOAD_INT instructions that push closure metadata onto the value stack
-  // immediately before a MAKE_CLOSURE instruction.  The runtime pops these
-  // values in MAKE_CLOSURE instead of reading DATA words from bytecode.
+  // Emit a single MAKE_CLOSURE instruction with all closure metadata packed
+  // as inline operands.  The runtime reads them via _operand() — no stack
+  // shuffling needed.
   //
-  // Stack layout when MAKE_CLOSURE executes (top is rightmost):
-  //   [isLocal_0, idx_0, ..., isLocal_N-1, idx_N-1, uvCount, localCount, paramCount]
-  _emitClosureMetadata(desc: any, node: t.Node, bc: b.Bytecode) {
-    // Push each upvalue descriptor in order; runtime pops them in reverse.
+  // Flat operand layout:  startPc, paramCount, localCount, uvCount,
+  //                       [isLocal_0, idx_0, isLocal_1, idx_1, ...]
+  _emitMakeClosure(desc: any, node: t.Node, bc: b.Bytecode) {
+    const uvOperands: (number | b.InstrOperand)[] = [];
     for (const uv of desc.upvalues) {
-      this.emit(bc, [this.OP.LOAD_INT, uv.isLocal ? 1 : 0], node);
-      this.emit(bc, [this.OP.LOAD_INT, uv.index], node);
+      uvOperands.push(uv.isLocal ? 1 : 0);
+      uvOperands.push(uv.index);
     }
-    this.emit(bc, [this.OP.LOAD_INT, desc.upvalues.length], node);
-    this.emit(bc, [this.OP.LOAD_INT, desc.localCount], node);
-    this.emit(bc, [this.OP.LOAD_INT, desc.paramCount], node);
+    this.emit(
+      bc,
+      [
+        this.OP.MAKE_CLOSURE,
+        { type: "label", label: desc.entryLabel },
+        desc.paramCount,
+        desc.localCount,
+        desc.upvalues.length,
+        ...uvOperands,
+      ] as b.Instruction,
+      node,
+    );
   }
 
   // Main (top-level)
@@ -456,12 +474,7 @@ export class Compiler {
         (d) => d._fnIdx === (node as any)._fnIdx,
       );
       const nameRef = b.constantOperand(node.id.name);
-      this._emitClosureMetadata(desc, node, bc);
-      this.emit(
-        bc,
-        [this.OP.MAKE_CLOSURE, { type: "label", label: desc.entryLabel }],
-        node,
-      );
+      this._emitMakeClosure(desc, node, bc);
       this.emit(bc, [this.OP.STORE_GLOBAL, nameRef], node);
     }
 
@@ -485,16 +498,6 @@ export class Compiler {
         this.bytecode.push(instr);
       }
     }
-
-    if (this.bytecode.length > 0xffffff)
-      throw new Error(
-        `Program too large: ${this.bytecode.length} instructions, max 16,777,215`,
-      );
-
-    // if (this.constants.items.length > 0xffffff)
-    //   throw new Error(
-    //     `Constant pool too large: ${this.constants.items.length} entries, max 16,777,215`,
-    //   );
   }
 
   // Statements
@@ -521,12 +524,7 @@ export class Compiler {
         // MAKE_CLOSURE so it's captured as a live closure at runtime.
         // (_compileFunctionDecl pushes/pops _currentCtx internally)
         const desc = this._compileFunctionDecl(node);
-        this._emitClosureMetadata(desc, node, bc);
-        this.emit(
-          bc,
-          [this.OP.MAKE_CLOSURE, { type: "label", label: desc.entryLabel }],
-          node,
-        );
+        this._emitMakeClosure(desc, node, bc);
         if (scope) {
           const slot = scope.define(node.id.name);
           this.emit(bc, [this.OP.STORE_LOCAL, slot], node);
@@ -1662,12 +1660,7 @@ export class Compiler {
         // but leave the resulting closure ON THE STACK -- no store.
         // The surrounding expression (assignment, call arg, return) consumes it.
         const desc = this._compileFunctionDecl(node);
-        this._emitClosureMetadata(desc, node, bc);
-        this.emit(
-          bc,
-          [this.OP.MAKE_CLOSURE, { type: "label", label: desc.entryLabel }],
-          node,
-        );
+        this._emitMakeClosure(desc, node, bc);
         break;
       }
 
@@ -1777,18 +1770,7 @@ export class Compiler {
 
           // Compile the accessor body as an anonymous function descriptor.
           const desc = this._compileFunctionDecl(prop as any);
-          this._emitClosureMetadata(desc, prop as any, bc);
-          this.emit(
-            bc,
-            [
-              this.OP.MAKE_CLOSURE,
-              {
-                type: "label",
-                label: desc.entryLabel,
-              },
-            ],
-            node,
-          );
+          this._emitMakeClosure(desc, prop as any, bc);
 
           this.emit(
             bc,
@@ -1845,17 +1827,28 @@ class Serializer {
     return JSON.stringify(val); // number / string / bool
   }
 
-  // One instruction -> "[op, operand]  // MNEMONIC description"
-  // Expects a fully-resolved instruction: operand is a plain number or undefined.
-  _serializeInstr(instr: b.Instruction, constants: any[]) {
-    const [op, rawOperand] = instr;
+  // One instruction -> "[op, op1, op2, ...]  // MNEMONIC description"
+  // Expects a fully-resolved instruction: all operands are plain numbers.
+  // Returns { text, values } where values is the flat u16 slots for this
+  // instruction (opcode first, then one entry per operand).
+  _serializeInstr(
+    instr: b.Instruction,
+    constants: any[],
+  ): { text: string; values: number[] } {
+    const op = instr[0] as number;
+    const operands = instr.slice(1) as number[];
 
-    ok(
-      rawOperand === undefined || typeof rawOperand === "number",
-      "Unresolved operand: " + JSON.stringify(rawOperand),
-    );
-    const operand = rawOperand as number | undefined;
+    const resolvedOperands = operands
+      .filter((operand) => (operand as any)?.placeholder !== true)
+      .map((o) => (o as any)?.resolvedValue ?? o);
 
+    for (const o of resolvedOperands) {
+      ok(typeof o === "number", "Unresolved operand: " + JSON.stringify(o));
+      ok(o >= 0 && o <= 0xffff, `Operand overflow (max 0xFFFF u16): ${o}`);
+    }
+    ok(op >= 0 && op <= 0xffff, `Opcode overflow (max 0xFFFF u16): ${op}`);
+
+    const operand = resolvedOperands[0]; // first operand for single-operand comment cases
     const name = this.OP_NAME[op] || `OP_${op}`;
     let comment = name;
 
@@ -1868,8 +1861,8 @@ class Serializer {
         (sourceNode.loc.end?.line + ":" + sourceNode.loc.end?.column)
       : "";
 
-    // Annotate operand with its meaning
-    if (operand !== undefined) {
+    // Annotate with human-readable operand meaning
+    if (resolvedOperands.length > 0) {
       switch (op) {
         case this.OP.LOAD_CONST: {
           const val = constants[operand];
@@ -1877,13 +1870,7 @@ class Serializer {
           break;
         }
         case this.OP.MAKE_CLOSURE: {
-          // operand is the absolute PC of the function body's first instruction
-          comment += `  PC ${operand}`;
-          break;
-        }
-        case this.OP.DATA: {
-          // Inline function header word — value is a raw integer
-          comment += `  ${operand}`;
+          comment += `  PC ${operand} (params=${resolvedOperands[1]} locals=${resolvedOperands[2]} upvalues=${resolvedOperands[3]})`;
           break;
         }
         case this.OP.LOAD_LOCAL:
@@ -1902,53 +1889,30 @@ class Serializer {
         case this.OP.CALL_METHOD:
           comment += `  (${operand} args)`;
           break;
-
         case this.OP.BUILD_ARRAY:
           comment += `  (${operand} elements)`;
           break;
         case this.OP.BUILD_OBJECT:
           comment += `  (${operand} pairs)`;
           break;
-
         case this.OP.NEW:
           comment += `  (${operand} args)`;
           break;
-
         default:
-          comment += `  ${operand}`;
+          comment +=
+            resolvedOperands.length === 1
+              ? `  ${operand}`
+              : `  [${resolvedOperands.join(", ")}]`;
       }
     }
 
     comment = comment.padEnd(40) + sourceLocation;
 
-    // Pack a [op, operand?] instruction pair into a single 32-bit word.
-    // Shared between the Serializer and the obfuscation path in _compileMain.
-
-    const instrText = operand !== undefined ? `[${op}, ${operand}]` : `[${op}]`;
+    const values = [op, ...resolvedOperands];
+    const instrText = `[${values.join(", ")}]`;
     const text = `${(instrText + ",").padEnd(12)} ${comment}`;
 
-    if (!this.options.encodeBytecode) {
-      return {
-        text: text,
-        value: operand !== undefined ? [op, operand] : [op],
-      };
-    }
-
-    function packInstr(instr) {
-      const [op, operand] = instr;
-      if (operand !== undefined && !Number.isInteger(operand))
-        throw new Error(`Non-integer operand: ${operand}`);
-      if (operand !== undefined && operand < 0)
-        throw new Error(`Negative operand: ${operand}`);
-      if (operand !== undefined && operand > 0xffffff)
-        throw new Error(`Operand overflow (max 0xFFFFFF): ${operand}`);
-      return operand !== undefined ? (operand << 8) | op : op;
-    }
-
-    return {
-      text: text,
-      value: packInstr(instr),
-    };
+    return { text, values };
   }
 
   // Serialize the CONSTANTS array
@@ -1963,27 +1927,37 @@ class Serializer {
 
   // Filter out any remaining null-opcode pseudo-instructions.
   // (defineLabel pseudo-ops are already stripped by resolveLabels.)
-  _serializeBytecode(bytecode: b.Bytecode): { bytecode: b.Bytecode } {
+  _serializeBytecode(
+    bytecode: b.Bytecode,
+    compiler: Compiler,
+  ): { bytecode: b.Bytecode } {
+    const serialized = [];
+    for (const instr of bytecode) {
+      if (instr[0] === null) continue;
+
+      const specializedOpInfo = compiler.SPECIALIZED_OPS[instr[0]];
+      if (specializedOpInfo) {
+        const resolvedValue = (instr[1] as any)?.resolvedValue ?? instr[1];
+        const originalName = compiler.OP_NAME[specializedOpInfo.originalOp];
+
+        compiler.OP_NAME[instr[0]] = `${originalName}_${resolvedValue}`;
+        specializedOpInfo.resolvedOperand = instr[1];
+      }
+
+      serialized.push(instr);
+    }
+
     return {
-      bytecode: bytecode.filter((instr) => instr[0] !== null),
+      bytecode: serialized,
     };
   }
 
-  __serializeBytecode(bytecode: b.Bytecode, constants: any[]) {
-    let words = [];
-
-    // BYTECODE
-    for (const instr of bytecode) {
-      words.push(this._serializeInstr(instr, constants).value);
-    }
-
-    // Convert packed words -> raw 4-byte little-endian binary -> base64
-    const buf = new Uint8Array(words.length * 4);
-    words.forEach((w, i) => {
-      buf[i * 4] = w & 0xff;
-      buf[i * 4 + 1] = (w >>> 8) & 0xff;
-      buf[i * 4 + 2] = (w >>> 16) & 0xff;
-      buf[i * 4 + 3] = (w >>> 24) & 0xff;
+  _encodeBytecode(flat: number[]) {
+    // Encode as little-endian Uint16Array -> base64.
+    const buf = new Uint8Array(flat.length * 2);
+    flat.forEach((w, i) => {
+      buf[i * 2] = w & 0xff;
+      buf[i * 2 + 1] = (w >>> 8) & 0xff;
     });
     return Buffer.from(buf).toString("base64");
   }
@@ -1995,7 +1969,7 @@ class Serializer {
     var textForm = [];
     var initBody = [];
 
-    var bytecodeResult = this._serializeBytecode(bytecode);
+    var bytecodeResult = this._serializeBytecode(bytecode, compiler);
 
     for (const instr of bytecodeResult.bytecode) {
       const serialized = this._serializeInstr(instr, constants);
@@ -2004,14 +1978,19 @@ class Serializer {
 
     initBody.push(textForm.map((line) => `// ${line}`).join("\n"));
 
+    const flat = bytecodeResult.bytecode.flatMap((instr) => {
+      let filtered = instr.filter((x) => (x as any)?.placeholder !== true);
+      let resolved = filtered.map((x) => (x as any)?.resolvedValue ?? x);
+
+      return resolved as number[];
+    });
+
     if (this.options.encodeBytecode) {
-      sections.push(
-        `var BYTECODE = "${this.__serializeBytecode(bytecodeResult.bytecode, constants)}";`,
-      );
+      sections.push(`var BYTECODE = "${this._encodeBytecode(flat)}";`);
     } else {
-      sections.push(
-        `var BYTECODE = [${bytecodeResult.bytecode.map((v) => "[" + v[0] + ", " + v[1] + "]").join(",")}]`,
-      );
+      // Flatten each [op, ...operands] instruction into individual u16 slots.
+
+      sections.push(`var BYTECODE = [${flat.join(",")}]`);
     }
 
     // MAIN_START_PC
@@ -2019,7 +1998,12 @@ class Serializer {
     sections.push(`var ENCODE_BYTECODE = ${!!this.options.encodeBytecode};`);
     sections.push(`var TIMING_CHECKS = ${!!this.options.timingChecks};`);
     // Opcodes
-    sections.push(`var OP = ${JSON5.stringify(this.OP)};`);
+    const object = t.objectExpression(
+      Object.entries(this.OP).map(([name, value]) =>
+        t.objectProperty(t.identifier(name), t.numericLiteral(value)),
+      ),
+    );
+    sections.push(`var OP = ${generate(object).code};`);
 
     // Constants must be defined before the bytecode
     initBody.push(this._serializeConstants(constants));
@@ -2041,7 +2025,22 @@ export async function compileAndSerialize(
   let bytecode = compiler.compile(sourceCode);
 
   // User transform passes (operate on unresolved IR with label/constant refs)
-  const passes = [...(options.selfModifying ? [selfModifying] : [])];
+  // macroOpcodes must run after selfModifying (so PATCH-stub bodies are in place)
+  const passes = [];
+
+  // Due to current implementation, specialized must run BEFORE macroOpcodes
+  if (options.specializedOpcodes) {
+    passes.push(specializedOpcodes);
+  }
+
+  if (options.macroOpcodes) {
+    passes.push(macroOpcodes);
+  }
+
+  if (options.selfModifying) {
+    passes.push(selfModifying);
+  }
+
   for (const pass of passes) {
     const passResult = pass(bytecode, compiler);
     bytecode = passResult.bytecode;
@@ -2049,8 +2048,7 @@ export async function compileAndSerialize(
 
   // Assembler phases: resolve IR operands to plain integers before printing
   const { bytecode: labelResolved } = resolveLabels(bytecode, compiler);
-  const { bytecode: finalBytecode, constants } =
-    resolveConstants(labelResolved);
+  let { bytecode: finalBytecode, constants } = resolveConstants(labelResolved);
 
   const output = compiler.serializer.serialize(
     finalBytecode,
@@ -2058,7 +2056,12 @@ export async function compileAndSerialize(
     compiler,
   );
 
-  const finalOutput = await obfuscateRuntime(output, options);
+  const finalOutput = await obfuscateRuntime(
+    output,
+    finalBytecode,
+    options,
+    compiler,
+  );
 
   return {
     code: finalOutput,
