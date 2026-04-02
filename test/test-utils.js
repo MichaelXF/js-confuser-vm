@@ -1,5 +1,11 @@
 import JsConfuserVM from "../src";
 
+/**
+ *
+ * @param {string} source
+ * @param {Parameters<import('../src/index.ts')["default"]["obfuscate"]>[1]} overrideOptions
+ * @returns
+ */
 export async function obfuscate(source, overrideOptions) {
   const options = overrideOptions ?? global.VM_OPTIONS ?? {};
   return JsConfuserVM.obfuscate(source, options);
