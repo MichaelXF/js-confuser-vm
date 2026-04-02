@@ -1,3 +1,58 @@
+## `0.0.6` Register based
+
+- Switched from stack-based to register-based VM.
+
+- `Specialized Opcodes` now applies to any fixed-size instruction, instead of just singular operands.
+- - Specialized Opcodes never applies to N-sized instructions, such as `MAKE_CLOSURE`, `BUILD_ARRAY`, `CALL`, etc.
+
+- `Macro Opcodes` can now include jumping/terminating opcodes if it's the last instruction in the sequence.
+
+- Added new option `aliasedOpcodes` which creates duplicate opcodes, including variants with shuffled operand order.
+
+```js
+// Input Code
+console.log("Hello, world!");
+
+// Before
+// [2, 1, 0],           LOAD_GLOBAL  reg[1] = console                     1:0-1:7
+// [0, 2, 1],           LOAD_CONST  reg[2] = "log"                        1:0-1:28
+// [8, 3, 1, 2],        GET_PROP  [3, 1, 2]                               1:0-1:28
+// [0, 4, 2],           LOAD_CONST  reg[4] = "Hello, world!"              1:12-1:27
+// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)1:0-1:28
+// [0, 1, 3],           LOAD_CONST  reg[1] = undefined                    
+// [45, 1],             RETURN  reg[1]                                
+
+// What the opcode "LOAD_GLOBAL" looks like:
+case OP.LOAD_GLOBAL:
+    var dst = this._operand();
+    frame.regs[dst] = this.globals[this.constants[this._operand()]];
+    break;
+
+// After
+// [52040, 0, 1],       ALIAS_LOAD_GLOBAL_1_0  [0, 1]                     1:0-1:7
+// [24862, 1, 2],       ALIAS_LOAD_CONST_1_0  [1, 2]                      1:0-1:28
+// [25202, 1, 2, 3],    ALIAS_GET_PROP_1_2_0  [1, 2, 3]                   1:0-1:28
+// [24862, 2, 4],       ALIAS_LOAD_CONST_1_0  [2, 4]                      1:12-1:27
+// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)1:0-1:28
+// [24862, 3, 1],       ALIAS_LOAD_CONST_1_0  [3, 1]                      
+// [51807, 1],          ALIAS_RETURN_0  1                                 
+
+// What the opcode "ALIAS_LOAD_GLOBAL_1_0" (52040) looks like:
+ case 52040:
+    // ALIAS_LOAD_GLOBAL_1_0 (order: [1,0])
+    let _unsortedOperands = [this._operand(), this._operand()];
+    let _operands = [_unsortedOperands[1], _unsortedOperands[0]];
+    var dst = _operands[0];
+    frame.regs[dst] = this.globals[this.constants[_operands[1]]];
+    break;
+```
+
+- Added new option `concealConstants` which XOR decrypts numbers and strings at runtime.
+
+- Top level variables are now renamed and not exposed globally. To export a global function, you can use `window.MyGlobalFunction = function(){...}`
+
+- Accessing an undeclared global variable will throw a ReferenceError
+
 ## `0.0.5` Generated Opcodes
 
 - Added new option `specializedOpcodes` which creates specialized opcodes for commonly used opcode+operand pairs.
@@ -15,8 +70,8 @@ console.log("Hello world!");
 // [14],        POP                                     1:0-1:28
 
 // What the opcode "LOAD_GLOBAL" looks like:
-case OP.LOAD_CONST:
-    this._push(this.constants[this._operand()]);
+case OP.LOAD_GLOBAL:
+    this._push(this.globals[this.constants[this._operand()]]);
     break;
 
 // After

@@ -11,6 +11,14 @@ const OPTIONS_MATRIX = [
     VM_OPTIONS: { specializedOpcodes: true },
   },
   {
+    displayName: "aliasedOpcodes",
+    VM_OPTIONS: { aliasedOpcodes: true },
+  },
+  {
+    displayName: "concealConstants",
+    VM_OPTIONS: { concealConstants: true },
+  },
+  {
     displayName: "all",
     VM_OPTIONS: {
       randomizeOpcodes: true,
@@ -20,6 +28,8 @@ const OPTIONS_MATRIX = [
       timingChecks: true,
       macroOpcodes: true,
       specializedOpcodes: true,
+      aliasedOpcodes: true,
+      concealConstants: true,
     },
   },
 ];

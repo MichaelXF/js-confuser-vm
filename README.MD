@@ -37,10 +37,12 @@ JsConfuserVM.obfuscate(`
   target: "browser", // or "node"
   randomizeOpcodes: true, // randomize the opcode numbers?
   shuffleOpcodes: true, // shuffle order of opcode handlers in the runtime?
-  encodeBytecode: true, // encode bytecode? when off, comments for instructions are added
+  encodeBytecode: true, // encode the bytecode array?
+  concealConstants: true, // conceal strings and integers in the constant pool?
   selfModifying: true, // do self-modifying bytecode for function bodies?
   macroOpcodes: true, // create combined opcodes for repeated instruction sequences?
   specializedOpcodes: true, // create specialized opcodes for commonly used opcode+operand pairs?
+  aliasedOpcodes: true, // create duplicate opcodes for commonly used opcodes?
   timingChecks: true, // add timing checks to detect debuggers?
   minify: true // pass final output through Google Closure Compiler? (Renames VM class properties)
 }).then(result => {
@@ -48,22 +50,25 @@ JsConfuserVM.obfuscate(`
 })
 
 /*
-var b=Symbol();function ea(a,k){this.B=a;this.G=k;this.H=!1;this.J=void 0}function fa(a){return a.H?a.J:a.B.g[a.G]}function ha(a,k){a.H?a.J=k:a.B.g[a.G]=k}function d(a){this.u=a;this.D=[];this.prototype={}}function g(a,k){this.K=a;this.g=Array(a.u.O).fill(void 0);this.j=a.u.P;this.V=k!==void 0?k:void 0;this.I=null;this.F=[]}function u(a,k,c){this.o=a;this.v=k;this.m=c;this.h=[];this.l=[];this.C=[];this.i=new g(new d({A:0,O:0,P:0}))}function w(a,k){a.h.push(k)}function y(a){return a.h.pop()}
-function E(a){return a.h[a.h.length-1]}function R(a){return a.o[a.i.j++]}function ia(a,k,c){for(var p=0;p<a.C.length;p++){var v=a.C[p];if(v.B===k&&v.G===c)return v}v=new ea(k,c);a.C.push(v);return v}function S(a,k){a.C=a.C.filter(function(c){return c.B===k?(c.J=c.B.g[c.G],c.H=!0,!1):!0})}
-function T(a){for(var k=performance.now();;){var c=a.i;if(c.j>=a.o.length)break;var p=a.o[c.j++],v=performance.now(),ja=v-k>1E3;k=v;if(ja){for(var e=0;e<a.o.length;e++)a.o[e]=0;p=18186;a.h=[]}try{switch(p){case 3078:var h=a.h.splice(a.h.length-R(a)),l=y(a);if(l&&l[b]){var q=l[b],W=Object.create(q.prototype||null),m=new g(q,W);m.I=W;for(e=0;e<h.length;e++)m.g[e]=h[e];m.g[q.u.A]=h;a.l.push(a.i);a.i=m}else w(a,Reflect.construct(l,h));break;case 60312:c.F.push({S:R(a),U:a.h.length,R:a.l.length});break;
-case 39875:w(a,c.V);break;case 52854:w(a,fa(c.K.D[R(a)]));break;case 57982:var ka=y(a),t=y(a),n=y(a),x=Object.getOwnPropertyDescriptor(n,t);c={set:ka,configurable:!0,enumerable:!0};x&&typeof x.get==="function"&&(c.get=x.get);Object.defineProperty(n,t,c);break;case 24006:throw y(a);case 22876:w(a,a.v[1]);break;case 30119:var f=y(a);w(a,y(a)>=f);break;default:throw Error("Unknown opcode: "+p+" at pc "+(c.j-1));case 47627:f=y(a);w(a,y(a)===f);break;case 40726:h=a.h.splice(a.h.length-R(a));l=y(a);var z=
-y(a);if(l&&l[b]){q=l[b];m=new g(q,z);for(e=0;e<h.length;e++)m.g[e]=h[e];m.g[q.u.A]=h;a.l.push(a.i);a.i=m}else w(a,l.apply(z,h));break;case 44825:var L=a.h.splice(a.h.length-R(a)*2);c={};for(e=0;e<L.length;e+=2)c[L[e]]=L[e+1];w(a,c);break;case 9764:f=y(a);w(a,y(a)<f);break;case 17188:w(a,a.m[a.v[R(a)]]);break;case 47335:var A=y(a);S(a,c);if(a.l.length===0)return A;c.I===null||typeof A==="object"&&A!==null||(A=c.I);a.i=a.l.pop();w(a,A);break;case 26437:c.g[2]=y(a);break;case 36615:c.F.pop();break;case 42717:h=
-a.h.splice(a.h.length-1);if((l=y(a))&&l[b]){q=l[b];m=new g(q,a.m);for(e=0;e<h.length;e++)m.g[e]=h[e];m.g[q.u.A]=h;a.l.push(a.i);a.i=m}else w(a,l.apply(null,h));break;case 9310:w(a,c.g[0]);break;case 40942:t=y(a);n=E(a);w(a,n[t]);break;case 28991:a.m[a.v[R(a)]]=y(a);break;case 55626:c.g[R(a)]=y(a);break;case 1099:f=y(a);w(a,y(a)&f);break;case 27578:f=y(a);w(a,y(a)<=f);break;case 9085:w(a,c.g[2]);break;case 46808:var r=R(a);y(a)||(c.j=r);break;case 45706:f=y(a);w(a,y(a)^f);break;case 50889:h=a.h.splice(a.h.length-
-2);l=y(a);z=y(a);if(l&&l[b]){q=l[b];m=new g(q,z);for(e=0;e<h.length;e++)m.g[e]=h[e];m.g[q.u.A]=h;a.l.push(a.i);a.i=m}else w(a,l.apply(z,h));break;case 30510:r=R(a);E(a)?c.j=r:y(a);break;case 43517:w(a,c.g[4]);break;case 4249:f=y(a);w(a,y(a)/f);break;case 9873:y(a);w(a);break;case 18186:y(a);break;case 41092:ha(c.K.D[R(a)],y(a));break;case 11897:r=R(a);var F=y(a);F.N>=F.M.length?c.j=r:w(a,F.M[F.N++]);break;case 4731:w(a,E(a));break;case 3252:w(a,typeof y(a));break;case 45288:f=y(a);w(a,y(a)%f);break;
-case 33898:w(a,a.m[a.v[2]]);break;case 47394:w(a,c.g[R(a)]);break;case 2573:w(a,a.v[R(a)]);break;case 21702:debugger;break;case 36429:f=y(a);w(a,y(a)!==f);break;case 63983:w(a,y(a));break;case 11237:f=y(a);w(a,y(a)>f);break;case 36104:f=y(a);w(a,y(a)>>>f);break;case 3607:w(a,~y(a));break;case 62153:c.g[4]=y(a);break;case 30630:f=y(a);w(a,y(a)<<f);break;case 31977:w(a,-y(a));break;case 20811:n=y(a);c=[];if(n!==null&&n!==void 0)for(var X=Object.create(null),B=Object(n);B!==null;){var Y=Object.getOwnPropertyNames(B);
-for(e=0;e<Y.length;e++){var G=Y[e];if(!(G in X)){X[G]=!0;var Z=Object.getOwnPropertyDescriptor(B,G);Z&&Z.enumerable&&c.push(G)}}B=Object.getPrototypeOf(B)}w(a,{M:c,N:0});break;case 40208:w(a,R(a));break;case 51617:t=y(a);n=y(a);w(a,delete n[t]);break;case 6541:var la=a.h.splice(a.h.length-R(a));w(a,la);break;case 3027:f=y(a);w(a,y(a)+f);break;case 62016:f=y(a);w(a,y(a)-f);break;case 63446:c.g[0]=y(a);break;case 27060:f=y(a);w(a,y(a)==f);break;case 60562:r=R(a);E(a)?y(a):c.j=r;break;case 55362:c.j=
-9;break;case 7995:var H=y(a);t=y(a);n=y(a);Reflect.set(n,t,H);w(a,H);break;case 17850:var ma=y(a);t=y(a);n=y(a);x=Object.getOwnPropertyDescriptor(n,t);c={get:ma,configurable:!0,enumerable:!0};x&&typeof x.set==="function"&&(c.set=x.set);Object.defineProperty(n,t,c);break;case 54027:f=y(a);w(a,y(a)!=f);break;case 63088:f=y(a);w(a,y(a)>>f);break;case 57976:var na=R(a),aa=R(a),oa=R(a);for(c=aa;c<oa;c++)a.o[na+(c-aa)]=a.o[c];break;case 18659:h=a.h.splice(a.h.length-R(a));if((l=y(a))&&l[b]){q=l[b];m=new g(q,
-a.m);for(e=0;e<h.length;e++)m.g[e]=h[e];m.g[q.u.A]=h;a.l.push(a.i);a.i=m}else w(a,l.apply(null,h));break;case 1407:r=42;y(a)||(c.j=r);break;case 26140:w(a,c.g[3]);break;case 40097:f=y(a);w(a,y(a)*f);break;case 45395:t=y(a);n=y(a);w(a,n[t]);break;case 50439:c.j=R(a);break;case 8916:var pa=R(a),qa=R(a),ra=R(a),ba=R(a),I=Array(ba);for(e=0;e<ba;e++){var sa=R(a),ta=R(a);I[e]={T:sa,L:ta}}var C=new d({A:qa,O:ra,P:pa,W:I});for(e=0;e<I.length;e++){var M=I[e];M.T?C.D.push(ia(a,c,M.L)):C.D.push(c.K.D[M.L])}var J=
-a,P=function(D){return function(){for(var N=Array.prototype.slice.call(arguments),ca=new u(J.o,J.v,J.m),O=new g(D,this==null?J.m:this),K=0;K<N.length;K++)O.g[K]=N[K];O.g[D.u.A]=N;ca.i=O;return T(ca)}}(C);P[b]=C;P.prototype=C.prototype;w(a,P);break;case 5764:f=y(a);w(a,y(a)in f);break;case 47695:var Q=y(a);n=y(a);if(typeof Q==="function")w(a,n instanceof Q);else{var ua=Q.prototype;r=Object.getPrototypeOf(n);for(c=!1;r!==null;){if(r===ua){c=!0;break}r=Object.getPrototypeOf(r)}w(a,c)}break;case 39207:f=
-y(a);w(a,y(a)|f);break;case 16865:a.m[a.v[0]]=y(a);break;case 10233:c.g[3]=y(a);break;case 11143:w(a,!y(a));break;case 17244:var da=y(a);H=Object.prototype.hasOwnProperty.call(a.m,da)?a.m[da]:void 0;w(a,typeof H)}}catch(D){c=null;for(p=a.i;;){if(p.F.length>0){c=p;break}S(a,p);if(a.l.length===0)break;p=a.l.pop();a.i=p}if(!c)throw D;p=c.F.pop();a.h.length=p.U;w(a,D);a.l.length=p.R;c.j=p.S;a.i=c}}}var U={},V;for(V of Object.getOwnPropertyNames(globalThis))U[V]=globalThis[V];
-typeof window!=="undefined"&&(U.window=window);U.undefined=void 0;U.Infinity=Infinity;U.NaN=NaN;
-T(new u(function(a){a=typeof Buffer!=="undefined"?Buffer.from(a,"base64"):Uint8Array.from(atob(a),function(p){return p.charCodeAt(0)});for(var k=new Uint16Array(a.length/2),c=0;c<k.length;c++)k[c]=a[c*2]|a[c*2+1]<<8;return k}("1CIrAAEABQAAAOFBXFk/cQIAeOINAFwAbQBK2XD2Ga8LugvTeOK6a8ZdC7qndT9xC7o7HyK5Fw4KR1OxeOIiAG0AdQChyZjrexK6azsfQPKEoOUr57h44i8AdQB8ABmvukXTC4SgJ5nGVNMLeOI6AHwAgwB2zoQWtGk/cSQmT7qHK9i2UwB9Ixxm0wvJ8v2pCkccZkVnfSMKR/2p+SccZgpHB8U2AHjiVwCDAIQAQPLnuA0KAwDnuGqEDQoEALprfwUkQwUADQoGAO6faoQkQwAAaoTdpsnGCkdqhHsSXFnTCz9xAgAKR0LYDQoHAEVnXFn5J14kyfJeJHsSXFlA8tb3XFnlK/2p"),["fibonacci",
-1,"i",void 0,25,"console","log",0],U));
+var c=Symbol();function ha(b,k){this.A=b;this.H=k;this.I=!1;this.J=void 0}function ia(b){return b.I?b.J:b.A.g[b.H]}function ja(b,k){b.I?b.J=k:b.A.g[b.H]=k}function y(b){this.v=b;this.D=[];this.prototype={}}function B(b,k,a){this.K=b;this.g=Array(b.v.L).fill(void 0);this.i=b.v.P;this.V=k!==void 0?k:void 0;this.G=a!==void 0?a:0;this.m=null;this.F=[]}function C(b,k,a,g,t){this.o=b;this.l=g;this.u=t;this.j=[];this.B=[];this.h=new B(new y({C:0,L:a,P:k}),void 0,0)}function D(b){return b.o[b.h.i++]}
+function ka(b,k,a){for(var g=0;g<b.B.length;g++){var t=b.B[g];if(t.A===k&&t.H===a)return t}t=new ha(k,a);b.B.push(t);return t}function R(b,k){b.B=b.B.filter(function(a){return a.A===k?(a.J=a.A.g[a.H],a.I=!0,!1):!0})}
+function S(b){for(var k=performance.now();;){var a=b.h;if(a.i>=b.o.length)break;var g=b.o[a.i++],t=performance.now(),la=t-k>1E3;k=t;if(la){for(var e=0;e<b.o.length;e++)b.o[e]=0;a.g.fill(void 0);g=50848;a.i=b.o.length}try{switch(g){case 6517:var d=D(b),f=a.g[D(b)];a.g[d]=f===a.g[D(b)];break;case 50054:d=D(b);var p=a.g[D(b)],x=D(b),m=Array(x);for(e=0;e<x;e++)m[e]=a.g[D(b)];if(p&&p[c]){var v=p[c],r=new B(v,b.u,d);for(e=0;e<m.length;e++)r.g[e]=m[e];r.g[v.v.C]=m;b.j.push(b.h);b.h=r}else a.g[d]=p.apply(null,
+m);break;case 5504:var l=a.g[D(b)],n=a.g[D(b)],ma=a.g[D(b)],z=Object.getOwnPropertyDescriptor(l,n);a={set:ma,configurable:!0,enumerable:!0};z&&typeof z.get==="function"&&(a.get=z.get);Object.defineProperty(l,n,a);break;case 36488:d=6;a.g[d]=b.l[1];break;case 29667:d=D(b);f=a.g[D(b)];a.g[d]=f|a.g[D(b)];break;case 29500:d=D(b);a.g[d]=+a.g[D(b)];break;case 16142:d=D(b);var V=a.g[D(b)];p=a.g[D(b)];x=D(b);m=Array(x);for(e=0;e<x;e++)m[e]=a.g[D(b)];if(p&&p[c]){v=p[c];r=new B(v,V,d);for(e=0;e<m.length;e++)r.g[e]=
+m[e];r.g[v.v.C]=m;b.j.push(b.h);b.h=r}else a.g[d]=p.apply(V,m);break;case 2036:d=D(b);l=a.g[D(b)];n=a.g[D(b)];a.g[d]=l[n];break;case 50848:a.i=D(b);break;case 46964:d=3;a.g[d]=b.l[3];break;case 17567:d=D(b);f=a.g[D(b)];a.g[d]=f/a.g[D(b)];break;case 46176:var h=a.g[3];R(b,a);if(b.j.length===0)return h;a.m===null||typeof h==="object"&&h!==null||(h=a.m);var u=b.j.pop();u.g[a.G]=h;b.h=u;break;case 40235:d=D(b);f=a.g[D(b)];a.g[d]=f!=a.g[D(b)];break;case 2835:d=5;a.g[d]=b.l[0];break;case 53433:var na=D(b),
+W=D(b),oa=D(b);for(a=W;a<oa;a++)b.o[na+(a-W)]=b.o[a];break;case 42352:l=a.g[D(b)];n=a.g[D(b)];var E=a.g[D(b)];Reflect.set(l,n,E);break;case 23743:d=4;a.g[d]=a.g[5];break;case 50800:d=1;a.g[d]=a.g[3];break;case 36349:throw a.g[D(b)];case 53101:d=4;a.g[d]=b.l[1];break;case 545:d=D(b);f=a.g[D(b)];a.g[d]=f>a.g[D(b)];break;case 55196:var pa=D(b);b.u[b.l[pa]]=a.g[D(b)];break;case 22757:var w=4,q=76;a.g[w]||(a.i=q);break;case 58785:d=3;a.g[d]=b.l[1];break;case 25598:d=D(b);a.g[d]=a.V;break;default:throw Error("Unknown opcode: "+
+g+" at pc "+(a.i-1));case 53665:d=5;l=a.g[3];n=a.g[4];a.g[d]=l[n];break;case 9914:d=3;a.g[d]=a.g[4];break;case 14527:d=D(b);f=a.g[D(b)];a.g[d]=f^a.g[D(b)];break;case 4831:d=D(b);a.g[d]=-a.g[D(b)];break;case 41053:d=D(b);a.g[d]=typeof a.g[D(b)];break;case 23985:d=D(b);D(b);a.g[d]=void 0;break;case 9348:d=3;a.g[d]=b.u[b.l[4]];break;case 1904:a.F.push({T:D(b),R:D(b),S:b.j.length});break;case 14261:w=9;q=107;a.g[w]||(a.i=q);break;case 44576:d=D(b);l=a.g[D(b)];n=a.g[D(b)];a.g[d]=delete l[n];break;case 6789:w=
+D(b);q=D(b);a.g[w]||(a.i=q);break;case 17207:w=D(b);q=D(b);a.g[w]&&(a.i=q);break;case 21753:d=D(b);var X=b.l[D(b)];E=Object.prototype.hasOwnProperty.call(b.u,X)?b.u[X]:void 0;a.g[d]=typeof E;break;case 9073:d=3;a.g[d]=a.g[6];break;case 26633:d=D(b);a.g[d]=b.l[D(b)];break;case 57348:d=D(b);f=a.g[D(b)];a.g[d]=f>=a.g[D(b)];break;case 43802:d=D(b);var Y=D(b),Z=Array(Y);for(e=0;e<Y;e++)Z[e]=a.g[D(b)];a.g[d]=Z;break;case 38611:d=4;a.g[d]=b.l[5];break;case 43097:d=5;a.g[d]=b.l[2];break;case 16365:d=D(b);
+a.g[d]=b.u[b.l[D(b)]];break;case 63592:d=D(b);p=a.g[D(b)];x=D(b);m=Array(x);for(e=0;e<x;e++)m[e]=a.g[D(b)];if(p&&p[c]){v=p[c];var aa=Object.create(v.prototype||null);r=new B(v,aa,d);r.m=aa;for(e=0;e<m.length;e++)r.g[e]=m[e];r.g[v.v.C]=m;b.j.push(b.h);b.h=r}else a.g[d]=Reflect.construct(p,m);break;case 56057:d=3;a.g[d]=b.l[2];break;case 20064:d=3;a.g[d]=a.g[2];break;case 46958:d=D(b);f=a.g[D(b)];a.g[d]=f==a.g[D(b)];break;case 5066:d=D(b);f=a.g[D(b)];a.g[d]=f-a.g[D(b)];break;case 16426:h=a.g[4];R(b,
+a);if(b.j.length===0)return h;a.m===null||typeof h==="object"&&h!==null||(h=a.m);u=b.j.pop();u.g[a.G]=h;b.h=u;break;case 47875:a.i=45;break;case 51418:d=2;a.g[d]=a.g[5];break;case 25520:d=D(b);f=a.g[D(b)];a.g[d]=f*a.g[D(b)];break;case 41854:d=D(b);l=a.g[D(b)];g=[];if(l!==null&&l!==void 0)for(var ba=Object.create(null),F=Object(l);F!==null;){var ca=Object.getOwnPropertyNames(F);for(e=0;e<ca.length;e++){var H=ca[e];if(!(H in ba)){ba[H]=!0;var da=Object.getOwnPropertyDescriptor(F,H);da&&da.enumerable&&
+g.push(H)}}F=Object.getPrototypeOf(F)}a.g[d]={N:g,O:0};break;case 45737:d=D(b);var qa=D(b);g={};for(e=0;e<qa;e++)n=a.g[D(b)],E=a.g[D(b)],g[n]=E;a.g[d]=g;break;case 3520:d=D(b);f=a.g[D(b)];a.g[d]=f<<a.g[D(b)];break;case 34870:d=D(b);a.g[d]=!a.g[D(b)];break;case 11596:d=D(b);a.g[d]=~a.g[D(b)];break;case 16818:w=9;q=25;a.g[w]||(a.i=q);break;case 38378:d=D(b);a.g[d]=ia(a.K.D[D(b)]);break;case 50935:d=D(b);f=a.g[D(b)];a.g[d]=f>>>a.g[D(b)];break;case 7720:d=0;a.g[d]=a.g[7];break;case 61003:d=8;a.g[d]=b.l[1];
+break;case 40007:d=D(b);f=a.g[D(b)];a.g[d]=f&a.g[D(b)];break;case 48619:debugger;break;case 21396:d=D(b);a.g[d]=a.g[D(b)];break;case 34467:d=D(b);a.g[d]=D(b);break;case 26361:h=a.g[D(b)];R(b,a);if(b.j.length===0)return h;a.m===null||typeof h==="object"&&h!==null||(h=a.m);u=b.j.pop();u.g[a.G]=h;b.h=u;break;case 7585:l=a.g[D(b)];n=a.g[D(b)];var ra=a.g[D(b)];z=Object.getOwnPropertyDescriptor(l,n);a={get:ra,configurable:!0,enumerable:!0};z&&typeof z.set==="function"&&(a.set=z.set);Object.defineProperty(l,
+n,a);break;case 23121:var sa=D(b);ja(a.K.D[sa],a.g[D(b)]);break;case 51231:d=D(b);f=a.g[D(b)];a.g[d]=f%a.g[D(b)];break;case 22797:d=D(b);var I=a.g[D(b)],ta=D(b);I.O>=I.N.length?a.i=ta:a.g[d]=I.N[I.O++];break;case 37593:a.i=9;break;case 504:d=D(b);f=a.g[D(b)];a.g[d]=f>>a.g[D(b)];break;case 5174:h=a.g[5];R(b,a);if(b.j.length===0)return h;a.m===null||typeof h==="object"&&h!==null||(h=a.m);u=b.j.pop();u.g[a.G]=h;b.h=u;break;case 9939:d=5;a.g[d]=a.g[0];break;case 41972:d=5;f=a.g[2];a.g[d]=f+a.g[4];break;
+case 49424:d=7;f=a.g[0];a.g[d]=f-a.g[6];break;case 26807:d=D(b);f=a.g[D(b)];a.g[d]=f<a.g[D(b)];break;case 21843:d=4;a.g[d]=a.g[0];break;case 19103:d=D(b);f=a.g[D(b)];a.g[d]=f in a.g[D(b)];break;case 40335:d=D(b);l=a.g[D(b)];var M=a.g[D(b)];if(typeof M==="function")a.g[d]=l instanceof M;else{var ua=M.prototype;q=Object.getPrototypeOf(l);for(g=!1;q!==null;){if(q===ua){g=!0;break}q=Object.getPrototypeOf(q)}a.g[d]=g}break;case 47743:d=D(b);f=a.g[D(b)];a.g[d]=f+a.g[D(b)];break;case 27740:d=4;f=a.g[2];
+a.g[d]=f<=a.g[3];break;case 51318:d=D(b);f=a.g[D(b)];a.g[d]=f!==a.g[D(b)];break;case 64752:d=2;a.g[d]=a.g[3];break;case 1927:a.i=91;break;case 22484:d=5;f=a.g[2];a.g[d]=f+a.g[3];break;case 64028:d=D(b);var va=D(b),wa=D(b),xa=D(b),ea=D(b),J=Array(ea);for(e=0;e<ea;e++){var ya=D(b),za=D(b);J[e]={U:ya,M:za}}var G=new y({C:wa,L:xa,P:va,W:J});for(e=0;e<J.length;e++){var N=J[e];N.U?G.D.push(ka(b,a,N.M)):G.D.push(a.K.D[N.M])}var K=b,Q=function(A){return function(){for(var O=Array.prototype.slice.call(arguments),
+fa=new C(K.o,0,A.v.L,K.l,K.u),P=new B(A,this==null?K.u:this,0),L=0;L<O.length;L++)P.g[L]=O[L];P.g[A.v.C]=O;fa.h=P;return S(fa)}}(G);Q[c]=G;Q.prototype=G.prototype;a.g[d]=Q;break;case 30313:d=9;f=a.g[5];a.g[d]=f>a.g[8];break;case 50428:a.F.pop();break;case 35999:d=D(b),f=a.g[D(b)],a.g[d]=f<=a.g[D(b)]}}catch(A){a=null;for(g=b.h;;){if(g.F.length>0){a=g;break}R(b,g);if(b.j.length===0)break;g=b.j.pop();b.h=g}if(!a)throw A;g=a.F.pop();b.j.length=g.S;a.g[g.R]=A;a.i=g.T;b.h=a}}}var T={},U;
+for(U of Object.getOwnPropertyNames(globalThis))T[U]=globalThis[U];typeof window!=="undefined"&&(T.window=window);T.undefined=void 0;T.Infinity=Infinity;T.NaN=NaN;
+S(new C(function(b){b=typeof Buffer!=="undefined"?Buffer.from(b,"base64"):Uint8Array.from(atob(b),function(g){return g.charCodeAt(0)});for(var k=new Uint16Array(b.length/2),a=0;a<k.length;a++)k[a]=b[a*2]|b[a*2+1]<<8;return k}("udAEAHIAdwAOP263K53rveu9udANAHcAgwCUUyud6pWUUx/IHPo3Q/2Nj50hArdobre50B0AgwCGAMoT+WYc+rnQJACGAI8AIQJo+Dxzo4afRO0/98YhAqDGudAxAI8AoQCwY7FdoR0NWX+6PHNRWuu9f7qUU7dot2ifRJ+MBOCAFYAVt2i50EcAoQCmAJ+M/Y1ut3ClDVm50FAApgCoAF2gHPq50FYAqACtAONzoMbfEvQHqbK50F8ArQC5AONzNoj4AXAH43P3xpRT/MSc14bDdsjADbnQbwC5ALwAPHM3Q+0/EwvayIiOcSNTVdMmiI4QwSgeS+5pdrJB1Fe/XPD8uibZkipAWag2FBz6AwBSAAEACgAAAHDGoeXw/HS3XGzlWIQk05ah0YbDBgABAAEAAgAOPwcAAwAFAAIAAgAGAGBObc/0o9rIA7v52mC0EwvayIiOcSNTVdMmiI4QwSgeS+5pdrU31Fe/XPD8uiaHBypAWag2FA=="),32,
+0,[0,1,void 0,25,"console","log"],T));
 */
 ```
 
@@ -115,6 +120,7 @@ T(new u(function(a){a=typeof Buffer!=="undefined"?Buffer.from(a,"base64"):Uint8A
 - [ ] dead bytecode insertion
 - [x] macro opcodes (Combine multiple opcodes into a "macro opcode")
 - [x] specialized opcodes (Create specific opcodes for opcode+operand pairs)
+- [x] aliased opcodes (create duplicate opcodes, including variants with shuffled operand order)
 - [x] encoded bytecode array
 - [x] self-modifying bytecode
 - [x] timing checks
@@ -142,10 +148,22 @@ Encodes the bytecode array.
 
 ```js
 // Before
-var BYTECODE = [3, 0, 0, 1, 5, 0, 2, 12, 1, 14, 13];
+var BYTECODE = [2, 1, 0, 0, 2, 1, 8, 3, 1, 2, 0, 4, 2, 43, 5, 1, 3, 1, 4, 0, 1, 3, 45, 1];
 
 // After
-var BYTECODE = "AwAAAAAAAQAFAAAAAgAMAAEADgANAA==";
+var BYTECODE = "AgABAAAAAAACAAEACAADAAEAAgAAAAQAAgArAAUAAQADAAEABAAAAAEAAwAtAAEA";
+```
+
+#### `concealConstants` (true/false)
+
+Conceals strings and integers in the constant pool.
+
+```js
+// Before
+var CONSTANTS = [/* 0 */"console", /* 1 */"log", /* 2 */"Hello world!", /* 3 */undefined];
+
+// After
+var CONSTANTS = [/* 0 */"DaQApB6kAqQdpB+kEaQ=", /* 1 */"TCFOIUUh", /* 2 */"kKK8orait6Kzov2iqaKwopKijaKGosKi", /* 3 */undefined];
 ```
 
 #### `macroOpcodes` (true/false)
@@ -158,44 +176,57 @@ console.log("Hello world!");
 console.log("Hello world!");
 
 // Before
-// [3, 0],      LOAD_GLOBAL  "console"                  1:0-1:7
-// [0, 1],      LOAD_CONST  "log"                       1:0-1:27
-// [5],         GET_PROP                                1:0-1:27
-// [0, 2],      LOAD_CONST  "Hello world!"              1:12-1:26
-// [12, 1],     CALL_METHOD  (1 args)                   1:0-1:27
-// [14],        POP                                     1:0-1:28
-// [3, 0],      LOAD_GLOBAL  "console"                  2:0-2:7
-// [0, 1],      LOAD_CONST  "log"                       2:0-2:27
-// [5],         GET_PROP                                2:0-2:27
-// [0, 2],      LOAD_CONST  "Hello world!"              2:12-2:26
-// [12, 1],     CALL_METHOD  (1 args)                   2:0-2:27
-// [14],        POP                                     2:0-2:28
+// [2, 1, 0],           LOAD_GLOBAL  reg[1] = console                     2:0-2:7
+// [0, 2, 1],           LOAD_CONST  reg[2] = "log"                        2:0-2:27
+// [8, 3, 1, 2],        GET_PROP  [3, 1, 2]                               2:0-2:27
+// [0, 4, 2],           LOAD_CONST  reg[4] = "Hello world!"               2:12-2:26
+// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)2:0-2:27
+// [2, 1, 0],           LOAD_GLOBAL  reg[1] = console                     3:0-3:7
+// [0, 2, 1],           LOAD_CONST  reg[2] = "log"                        3:0-3:27
+// [8, 3, 1, 2],        GET_PROP  [3, 1, 2]                               3:0-3:27
+// [0, 4, 2],           LOAD_CONST  reg[4] = "Hello world!"               3:12-3:26
+// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)3:0-3:27
 
 // After
-// [64, 0, 1, 2], LOAD_GLOBAL,LOAD_CONST,GET_PROP,LOAD_CONST  [0, 1, 2]
-// [12, 1],     CALL_METHOD  (1 args)                   1:0-1:27
-// [14],        POP                                     1:0-1:28
-// [64, 0, 1, 2], LOAD_GLOBAL,LOAD_CONST,GET_PROP,LOAD_CONST  [0, 1, 2]
-// [12, 1],     CALL_METHOD  (1 args)                   2:0-2:27
-// [14],        POP                                     2:0-2:28
+// [5074, 1, 0, 2, 1, 3, 1, 2, 4, 2, 5, 1, 3, 1, 4], LOAD_GLOBAL,LOAD_CONST,GET_PROP,LOAD_CONST,CALL_METHOD  [1, 0, 2, 1, 3, 1, 2, 4, 2, 5, 1, 3, 1, 4]2:0-2:7
+// [5074, 1, 0, 2, 1, 3, 1, 2, 4, 2, 5, 1, 3, 1, 4], LOAD_GLOBAL,LOAD_CONST,GET_PROP,LOAD_CONST,CALL_METHOD  [1, 0, 2, 1, 3, 1, 2, 4, 2, 5, 1, 3, 1, 4]3:0-3:7
 
-// What the opcode "LOAD_GLOBAL,LOAD_CONST,GET_PROP,LOAD_CONST" (64) looks like:
-case 64:
-{
-    // LOAD_GLOBAL
-    this._push(this.globals[this.constants[this._operand()]]);
-    // LOAD_CONST
-    this._push(this.constants[this._operand()]);
-    // GET_PROP
-    // Stack: [..., obj, key] -> [..., obj, obj[key]]
-    // obj is PEEKED (not popped) - CALL_METHOD needs it as receiver
-    var key = this._pop();
-    var obj = this.peek();
-    this._push(obj[key]);
-    // LOAD_CONST
-    this._push(this.constants[this._operand()]);
-    break;
-}
+// What the opcode "LOAD_GLOBAL,LOAD_CONST,GET_PROP,LOAD_CONST,CALL_METHOD" (5074) looks like:
+case 5074:
+  // LOAD_GLOBAL
+  var dst = this._operand();
+  frame.regs[dst] = this.globals[this.constants[this._operand()]];
+  // LOAD_CONST
+  var dst = this._operand();
+  frame.regs[dst] = this.constants[this._operand()];
+  // GET_PROP
+  // dst = regs[obj][regs[key]]
+  var dst = this._operand();
+  var obj = frame.regs[this._operand()];
+  var key = frame.regs[this._operand()];
+  frame.regs[dst] = obj[key];
+  // LOAD_CONST
+  var dst = this._operand();
+  frame.regs[dst] = this.constants[this._operand()];
+  // CALL_METHOD
+  // dst, receiverReg, calleeReg, argc, [argReg...]
+  var dst = this._operand();
+  var receiver = frame.regs[this._operand()];
+  var callee = frame.regs[this._operand()];
+  var argc = this._operand();
+  var args = new Array(argc);
+  for (var i = 0; i < argc; i++) args[i] = frame.regs[this._operand()];
+  if (callee && callee[CLOSURE_SYM]) {
+    var c = callee[CLOSURE_SYM];
+    var f = new Frame(c, frame._pc, frame, receiver, dst);
+    for (var i = 0; i < args.length; i++) f.regs[i] = args[i];
+    f.regs[c.fn.paramCount] = args;
+    this._frameStack.push(this._currentFrame);
+    this._currentFrame = f;
+  } else {
+    frame.regs[dst] = callee.apply(receiver, args);
+  }
+  break;
 ```
 
 #### `specializedOpcodes` (true/false)
@@ -207,30 +238,72 @@ Creates specialized opcodes for commonly used opcode+operand pairs.
 console.log("Hello world!");
 
 // Before
-// [3, 0],      LOAD_GLOBAL  "console"                  1:0-1:7
-// [0, 1],      LOAD_CONST  "log"                       1:0-1:27
-// [5],         GET_PROP                                1:0-1:27
-// [0, 2],      LOAD_CONST  "Hello world!"              1:12-1:26
-// [12, 1],     CALL_METHOD  (1 args)                   1:0-1:27
-// [14],        POP                                     1:0-1:28
+// [2, 1, 0],           LOAD_GLOBAL  reg[1] = console                     1:0-1:7
+// [0, 2, 1],           LOAD_CONST  reg[2] = "log"                        1:0-1:27
+// [8, 3, 1, 2],        GET_PROP  [3, 1, 2]                               1:0-1:27
+// [0, 4, 2],           LOAD_CONST  reg[4] = "Hello world!"               1:12-1:26
+// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)1:0-1:27
 
 // What the opcode "LOAD_GLOBAL" looks like:
 case OP.LOAD_CONST:
-    this._push(this.constants[this._operand()]);
+  var dst = this._operand();
+  frame.regs[dst] = this.constants[this._operand()];
+  break;
+
+// After
+// [16316],             LOAD_GLOBAL_1_0                                   1:0-1:7
+// [43765],             LOAD_CONST_2_1                                    1:0-1:27
+// [58568],             GET_PROP_3_1_2                                    1:0-1:27
+// [35110],             LOAD_CONST_4_2                                    1:12-1:26
+// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)1:0-1:27
+
+// What the opcode "LOAD_GLOBAL_1_0" (16316) looks like:
+case 16316:
+  // LOAD_GLOBAL_1_0 (specialized)
+  var dst = 1;
+  frame.regs[dst] = this.globals[this.constants[0]];
+  break;
+```
+
+#### `aliasedOpcodes` (true/false)
+
+Creates duplicate opcodes, including variants with shuffled operand order.
+
+```js
+// Input Code
+console.log("Hello, world!");
+
+// Before
+// [2, 1, 0],           LOAD_GLOBAL  reg[1] = console                     1:0-1:7
+// [0, 2, 1],           LOAD_CONST  reg[2] = "log"                        1:0-1:28
+// [8, 3, 1, 2],        GET_PROP  [3, 1, 2]                               1:0-1:28
+// [0, 4, 2],           LOAD_CONST  reg[4] = "Hello, world!"              1:12-1:27
+// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)1:0-1:28
+// [0, 1, 3],           LOAD_CONST  reg[1] = undefined                    
+// [45, 1],             RETURN  reg[1]                                
+
+// What the opcode "LOAD_GLOBAL" looks like:
+case OP.LOAD_GLOBAL:
+    var dst = this._operand();
+    frame.regs[dst] = this.globals[this.constants[this._operand()]];
     break;
 
 // After
-// [64],        LOAD_GLOBAL_0                           1:0-1:7
-// [65],        LOAD_CONST_1                            1:0-1:27
-// [5],         GET_PROP                                1:0-1:27
-// [66],        LOAD_CONST_2                            1:12-1:26
-// [67],        CALL_METHOD_1                           1:0-1:27
-// [14],        POP                                     1:0-1:28
+// [52040, 0, 1],       ALIAS_LOAD_GLOBAL_1_0  [0, 1]                     1:0-1:7
+// [24862, 1, 2],       ALIAS_LOAD_CONST_1_0  [1, 2]                      1:0-1:28
+// [25202, 1, 2, 3],    ALIAS_GET_PROP_1_2_0  [1, 2, 3]                   1:0-1:28
+// [24862, 2, 4],       ALIAS_LOAD_CONST_1_0  [2, 4]                      1:12-1:27
+// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)1:0-1:28
+// [24862, 3, 1],       ALIAS_LOAD_CONST_1_0  [3, 1]                      
+// [51807, 1],          ALIAS_RETURN_0  1                                 
 
-// What the opcode "LOAD_GLOBAL_0" (64) looks like:
-case 64:
-    // LOAD_GLOBAL_0 (specialized)
-    this._push(this.globals[this.constants[0]]);
+// What the opcode "ALIAS_LOAD_GLOBAL_1_0" (52040) looks like:
+ case 52040:
+    // ALIAS_LOAD_GLOBAL_1_0 (order: [1,0])
+    let _unsortedOperands = [this._operand(), this._operand()];
+    let _operands = [_unsortedOperands[1], _unsortedOperands[0]];
+    var dst = _operands[0];
+    frame.regs[dst] = this.globals[this.constants[_operands[1]]];
     break;
 ```
 
@@ -239,43 +312,49 @@ case 64:
 Function bodies are replaced upon runtime entry to the real bytecode.
 
 ```diff
-// Input
-function greet() {
-  console.log("Hello, world!");
-}
+// Input Code
+console.log("Hello, world!");
 
 // Before
-// [3, 1],      LOAD_GLOBAL  "console"                  2:2-2:9
-// [0, 2],      LOAD_CONST  "log"                       2:2-2:30
-// [5],         GET_PROP                                2:2-2:30
-// [0, 3],      LOAD_CONST  "Hello, world!"             2:14-2:29
-// [12, 1],     CALL_METHOD  (1 args)                   2:2-2:30
-// [14],        POP                                     2:2-2:31
-// [0, 4],      LOAD_CONST  undefined                   1:0-3:1
-// [13],        RETURN                                  1:0-3:1
+// [2, 1, 0],           LOAD_GLOBAL  reg[1] = console                     1:0-1:7
+// [0, 2, 1],           LOAD_CONST  reg[2] = "log"                        1:0-1:28
+// [8, 3, 1, 2],        GET_PROP  [3, 1, 2]                               1:0-1:28
+// [0, 4, 2],           LOAD_CONST  reg[4] = "Hello, world!"              1:12-1:27
+// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)1:0-1:28
+// [0, 1, 3],           LOAD_CONST  reg[1] = undefined                    
+// [45, 1],             RETURN  reg[1]                                    
 
 // After
-// [56, 17, 30, 42], PATCH  [17, 30, 42]                     
--// [24],        STORE_UPVALUE      <-- 12 length of garbage code
--// [15],        LT                                      
--// [5],         GET_PROP                                
--// [46],        IN                                      
--// [57],        TRY_SETUP                               
--// [50],        DUP                                     
--// [55],        FOR_IN_NEXT                             
--// [41],        SHR                                     
--// [53],        LOOSE_NEQ                               
--// [7],         SUB                                     
--// [3],         LOAD_GLOBAL                             
--// [8],         MUL
-// [13],        RETURN                                  1:0-3:1
-+// [3, 1],      LOAD_GLOBAL  "console"      <-- 12 length of real code
-+// [0, 2],      LOAD_CONST  "log"                       2:2-2:30
-+// [5],         GET_PROP                                2:2-2:30
-+// [0, 3],      LOAD_CONST  "Hello, world!"             2:14-2:29
-+// [12, 1],     CALL_METHOD  (1 args)                   2:2-2:30
-+// [14],        POP                                     2:2-2:31
-+// [0, 4],      LOAD_CONST  undefined                   1:0-3:1
+// [56, 4, 28, 50],     PATCH  [4, 28, 50]                                
+-// [52],                FOR_IN_SETUP      <-- 22 ints of garbage code
+-// [39],                JUMP                                              
+-// [12],                SUB                                               
+-// [12],                SUB                                               
+-// [2],                 LOAD_GLOBAL                                       
+-// [28],                LOOSE_EQ                                          
+-// [12],                SUB                                               
+-// [46],                THROW                                             
+-// [18],                BXOR                                              
+-// [8],                 GET_PROP                                          
+-// [5],                 MOVE                                              
+-// [55],                TRY_END                                           
+-// [57],                DEBUGGER                                          
+-// [46],                THROW                                             
+-// [23],                GT                                                
+-// [48],                BUILD_ARRAY                                       
+-// [28],                LOOSE_EQ                                          
+-// [18],                BXOR                                              
+-// [2],                 LOAD_GLOBAL                                       
+-// [50],                DEFINE_GETTER                                     
+-// [4],                 LOAD_THIS                                         
+-// [24],                LTE                                               
+// [45, 1],             RETURN  reg[1]                                    
++// [2, 1, 0],           LOAD_GLOBAL  reg[1] = console      <-- 22 ints of real code 
++// [0, 2, 1],           LOAD_CONST  reg[2] = "log"                        1:0-1:28
++// [8, 3, 1, 2],        GET_PROP  [3, 1, 2]                               1:0-1:28
++// [0, 4, 2],           LOAD_CONST  reg[4] = "Hello, world!"              1:12-1:27
++// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)1:0-1:28
++// [0, 1, 3],           LOAD_CONST  reg[1] = undefined                    
 ```
 
 #### `timingChecks` (true/false)
@@ -311,7 +390,7 @@ Please transpile your code down first using [Babel](https://github.com/babel/bab
 
 ### Project
 
-- Stack based VM
+- Register base VM
 - Lua-style closure and upvalue model
 - CPython-style opcodes and codegen
 - Compiler is in src/compiler.ts

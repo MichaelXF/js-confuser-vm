@@ -3,7 +3,7 @@ dist
 coverage
 
 input.js
-./index.ts
+/index.ts
 output.js
 output.min.js
 output.obf.js
