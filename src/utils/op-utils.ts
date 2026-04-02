@@ -1,4 +1,5 @@
 import { getRandomInt } from "./random-utils.ts";
+import * as b from "../types.ts";
 
 export const U16_MAX = 0xffff; // bytecode operands are u16
 
@@ -23,4 +24,10 @@ export function nextFreeSlot(usedOpcodes: Set<number>): number {
     }
   }
   return -1;
+}
+
+export function getInstructionSize(instr: b.Instruction): number {
+  const size = instr.filter((op) => (op as any)?.placeholder !== true).length;
+
+  return size;
 }
