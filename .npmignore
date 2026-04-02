@@ -14,3 +14,5 @@ test.js
 test
 test262
 test262-scripts
+
+.npmrc

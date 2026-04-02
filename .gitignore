@@ -11,3 +11,5 @@ output.original.js
 .claude
 package-lock.json
 test.js
+
+.npmrc

@@ -1,6 +1,6 @@
 {
   "name": "js-confuser-vm",
-  "version": "0.0.7",
+  "version": "0.0.8",
   "main": "dist/index.js",
   "scripts": {
     "build": "babel src --out-dir dist --extensions \".ts,.js\"",
@@ -23,7 +23,7 @@
   ],
   "author": "MichaelXF",
   "license": "MIT",
-  "description": "",
+  "description": "Experimental JS VM Obfuscator",
   "dependencies": {
     "@babel/generator": "^7.29.1",
     "@babel/parser": "^7.29.0",
