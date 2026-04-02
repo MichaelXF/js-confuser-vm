@@ -23,7 +23,7 @@ test("Variant #1: Macro Opcodes", async () => {
   );
 
   var bytecodeCommentSection = output.split("var CONSTANTS")[0];
-  expect(bytecodeCommentSection).toContain(" POP,LOAD_GLOBAL ");
+  expect(bytecodeCommentSection).toContain(" LOAD_GLOBAL,CALL ");
 
   var result = await evalCode(output);
   expect(result).toEqual(3);

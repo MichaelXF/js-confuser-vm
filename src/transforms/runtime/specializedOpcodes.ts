@@ -26,26 +26,45 @@ function extractCaseBody(switchCase: t.SwitchCase): t.Statement[] {
 // Because specialized opcodes are only created for instructions that have
 // *exactly one* numeric operand, every `_operand()` call inside the original
 // handler is replaced by the constant value that was baked into the opcode.
-function inlineFixedOperand(
+function inlineFixedOperands(
   bodyStmts: t.Statement[],
-  resolvedValue: number,
+  resolvedValues: number[],
 ): void {
   // Wrap the statements in a temporary BlockStatement so traverse has a root.
   // The replacement mutates the original statement objects in place.
+  var replaced = 0;
+
   traverse(t.blockStatement(bodyStmts), {
     noScope: true,
     CallExpression(path) {
       const callee = path.node.callee;
-      if (
-        t.isMemberExpression(callee) &&
-        t.isThisExpression(callee.object) &&
-        t.isIdentifier(callee.property, { name: "_operand" }) &&
-        path.node.arguments.length === 0
-      ) {
-        path.replaceWith(t.numericLiteral(resolvedValue));
+
+      const isMethodCall = (methodName) => {
+        return (
+          t.isMemberExpression(callee) &&
+          t.isThisExpression(callee.object) &&
+          t.isIdentifier(callee.property, { name: methodName }) &&
+          path.node.arguments.length === 0
+        );
+      };
+
+      if (isMethodCall("_operand")) {
+        path.replaceWith(t.numericLiteral(resolvedValues[replaced++]));
+      }
+
+      if (isMethodCall("_constant")) {
+        path.node.arguments = [
+          t.numericLiteral(resolvedValues[replaced++]),
+          t.numericLiteral(resolvedValues[replaced++]),
+        ];
       }
     },
   });
+
+  ok(
+    replaced === resolvedValues.length,
+    `Expected to replace ${resolvedValues.length} operands, but replaced ${replaced}`,
+  );
 }
 
 // Append a generated switch case for every entry in compiler.SPECIALIZED_OPS.
@@ -91,10 +110,7 @@ export function applySpecializedOpcodes(
 
   for (const [specialOpStr, info] of Object.entries(compiler.SPECIALIZED_OPS)) {
     const specialOpCode = Number(specialOpStr);
-    const { originalOp, operand } = info as {
-      originalOp: number;
-      operand: number;
-    };
+    const { originalOp, operands } = info;
 
     const newName = compiler.OP_NAME[specialOpCode];
     const originalName = compiler.OP_NAME[originalOp];
@@ -108,21 +124,20 @@ export function applySpecializedOpcodes(
       (s) => t.cloneNode(s, true) as t.Statement,
     );
 
-    const placedOperand = info.resolvedOperand || { resolvedValue: 1337 };
+    const placedOperands = info.resolvedOperands;
+    ok(placedOperands, `Could not find operand for original opcode ${newName}`);
+
+    const resolvedValues = placedOperands.map((placedOperand) => {
+      return (placedOperand as any)?.resolvedValue ?? placedOperand;
+    });
+
     ok(
-      placedOperand !== undefined,
-      `Could not find operand for original opcode ${newName}`,
+      !resolvedValues.find((v) => typeof v !== "number"),
+      "Expected a numeric operand value",
     );
 
-    const resolvedValue =
-      (placedOperand as any)?.resolvedValue ?? placedOperand;
-    if (typeof resolvedValue !== "number") {
-      console.error(resolvedValue);
-    }
-    ok(typeof resolvedValue === "number", "Expected a numeric operand value");
-
     // Replace this._operand() with the baked-in constant
-    inlineFixedOperand(bodyStmts, resolvedValue);
+    inlineFixedOperands(bodyStmts, resolvedValues);
 
     // Add a leading comment so the generated source stays readable
     if (bodyStmts.length > 0) {

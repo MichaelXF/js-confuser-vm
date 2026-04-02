@@ -1,15 +1,17 @@
 import type { Bytecode, Instruction } from "../../types.ts";
 import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
-import { nextFreeSlot, U16_MAX } from "../utils/op-utils.ts";
+import { nextFreeSlot, U16_MAX } from "../../utils/op-utils.ts";
 
-// Opcodes that must not appear inside a macro window.
+// Opcodes that must not appear in a non-terminal position inside a macro window.
 // Jump ops: modifying frame._pc mid-execution causes the macro handler to
 //   run subsequent sub-bodies even after the jump already fired.
 // Frame-changing ops (CALL, CALL_METHOD, NEW, RETURN, THROW): push/pop call
 //   frames mid-macro, leaving the `frame` variable stale for later sub-bodies.
+// When one of these is the LAST instruction in the macro sequence there are no
+//   following sub-bodies, so editing _pc or the call frame is safe.
 // Variable-operand ops (MAKE_CLOSURE): the number of _operand() calls depends
 //   on uvCount at runtime, so a static handler cannot be generated.
-// Infrastructure ops (DATA, PATCH, TRY_SETUP, TRY_END, DEBUGGER):
+// Infrastructure ops (PATCH, TRY_SETUP, TRY_END, DEBUGGER):
 //   either illegal here or nonsensical to fold.
 
 // Scan bytecode for repeating instruction sequences and fold them into
@@ -36,23 +38,35 @@ export function macroOpcodes(
     originalOpToName.set(opVal, name);
   }
 
-  function isEligible(op: number | null, compiler: Compiler): boolean {
+  function isEligible(
+    op: number | null,
+    compiler: Compiler,
+    isLast: boolean = false,
+  ): boolean {
     if (op === null) return false;
     const { OP, JUMP_OPS } = compiler;
-    if (JUMP_OPS.has(op)) return false;
-    const excluded = new Set<number | undefined>([
-      OP.RETURN,
+    // Infrastructure and variable-length ops are never eligible.
+    const alwaysExcluded = new Set([
       OP.PATCH,
       OP.TRY_SETUP,
       OP.TRY_END,
       OP.DEBUGGER,
-      OP.CALL,
-      OP.CALL_METHOD,
-      OP.NEW,
-      OP.THROW,
       OP.MAKE_CLOSURE, // variable-length operands — cannot generate a static handler
     ]);
-    return !excluded.has(op) && originalOpToName.has(op); // Only original Ops are eligible (specialized disallowed)
+    if (alwaysExcluded.has(op)) return false;
+    // Jump and frame-changing ops are only eligible as the terminal instruction.
+    if (!isLast) {
+      if (JUMP_OPS.has(op)) return false;
+      const nonTerminalExcluded = new Set([
+        OP.RETURN,
+        OP.CALL,
+        OP.CALL_METHOD,
+        OP.NEW,
+        OP.THROW,
+      ]);
+      if (nonTerminalExcluded.has(op)) return false;
+    }
+    return originalOpToName.has(op); // Only original Ops are eligible (specialized disallowed)
   }
 
   // Collect every opcode value already in use so we can find free slots.
@@ -72,13 +86,15 @@ export function macroOpcodes(
       let valid = true;
       for (let j = 0; j < len; j++) {
         const op = bc[i + j][0];
-        if (!isEligible(op, compiler)) {
+        const isLast = j === len - 1;
+        if (!isEligible(op, compiler, isLast)) {
           valid = false;
           break;
         }
         ops.push(op as number);
       }
-      // If position (i+j) is ineligible, longer windows from i are also invalid.
+      // If position (i+j) is ineligible even as a terminal, longer windows from
+      // i are also invalid (it would be non-terminal there too).
       if (!valid) break;
 
       const key = ops.join(",");
@@ -135,7 +151,8 @@ export function macroOpcodes(
       for (let j = 0; j < len; j++) {
         const instr = bc[i + j];
         const op = instr[0];
-        if (!isEligible(op, compiler)) {
+        const isLast = j === len - 1;
+        if (!isEligible(op, compiler, isLast)) {
           valid = false;
           break;
         }

@@ -1,6 +1,7 @@
 import type { Bytecode, Instruction } from "../../types.ts";
 import { Compiler } from "../../compiler.ts";
-import { choice } from "../utils/random-utils.ts";
+import { choice } from "../../utils/random-utils.ts";
+import { getInstructionSize } from "../../utils/op-utils.ts";
 
 export function selfModifying(
   bc: Bytecode,
@@ -80,8 +81,7 @@ export function selfModifying(
 
       // Flat size of the body (each instruction occupies instr.length slots).
       const bodyFlatSize = body.reduce(
-        (acc, instr) =>
-          acc + instr.filter((x) => (x as any)?.placeholder !== true).length,
+        (acc, instr) => acc + getInstructionSize(instr),
         0,
       );
 

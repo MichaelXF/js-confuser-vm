@@ -7,6 +7,7 @@ import { applyShuffleOpcodes } from "./transforms/runtime/shuffleOpcodes.ts";
 import { applyMinify } from "./transforms/runtime/minify.ts";
 import { Compiler } from "./compiler.ts";
 import { applySpecializedOpcodes } from "./transforms/runtime/specializedOpcodes.ts";
+import { applyAliasedOpcodes } from "./transforms/runtime/aliasedOpcodes.ts";
 import type * as b from "./types.ts";
 
 export async function obfuscateRuntime(
@@ -22,7 +23,7 @@ export async function obfuscateRuntime(
     throw new Error("VM-Runtime final parsing failed", { cause: error });
   }
 
-  // Macro opcode cases must be applied BEFORE shuffleOpcodes
+  // Specialized opcode cases must be applied BEFORE shuffleOpcodes
   if (options.specializedOpcodes) {
     applySpecializedOpcodes(ast, bytecode, compiler);
   }
@@ -30,6 +31,11 @@ export async function obfuscateRuntime(
   // Macro opcode cases must be applied BEFORE shuffleOpcodes
   if (options.macroOpcodes && Object.keys(compiler.MACRO_OPS).length > 0) {
     applyMacroOpcodes(ast, compiler);
+  }
+
+  // Aliased opcode cases must be applied BEFORE shuffleOpcodes
+  if (options.aliasedOpcodes) {
+    applyAliasedOpcodes(ast, compiler);
   }
 
   // Shuffle opcode handle order

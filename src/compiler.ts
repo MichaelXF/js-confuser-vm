@@ -15,8 +15,10 @@ import { selfModifying } from "./transforms/bytecode/selfModifying.ts";
 import { macroOpcodes } from "./transforms/bytecode/macroOpcodes.ts";
 import * as b from "./types.ts";
 import { specializedOpcodes } from "./transforms/bytecode/specializedOpcodes.ts";
-import { getRandomInt } from "./transforms/utils/random-utils.ts";
-import { U16_MAX } from "./transforms/utils/op-utils.ts";
+import { aliasedOpcodes } from "./transforms/bytecode/aliasedOpcodes.ts";
+import { getRandomInt } from "./utils/random-utils.ts";
+import { U16_MAX } from "./utils/op-utils.ts";
+import { concealConstants } from "./transforms/bytecode/concealConstants.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -33,98 +35,115 @@ const readVMRuntimeFile = () => {
 };
 
 export const VM_RUNTIME = readVMRuntimeFile().split("@START")[1];
-export const SOURCE_NODE_SYM = Symbol("SOURCE_NODE"); // Attach source node location to pseudo bytecode instructions
+export const SOURCE_NODE_SYM = Symbol("SOURCE_NODE");
 
-// Opcodes
+// ── Opcodes ──────────────────────────────────────────────────────────────────
+// Register-based encoding.  Operand convention (x86 / CPython style):
+//   destination register first, then source registers, then immediates.
+//
+//   dst      – register index that receives the result
+//   src      – register index holding an input value
+//   imm/Idx  – immediate integer (constant-pool index, upvalue index, argc …)
+//
+// Every arithmetic/comparison/unary instruction: [op, dst, src1, src2?]
+// Every load:                                    [op, dst, ...]
+// Every store:                                   [op, target, src]
+// Calls:     CALL  [op, dst, callee, argc, arg0, arg1, …]
+//            CALL_METHOD [op, dst, receiver, callee, argc, arg0, …]
 export const OP_ORIGINAL = {
-  LOAD_CONST: 0,
-  LOAD_LOCAL: 1,
-  STORE_LOCAL: 2,
-  LOAD_GLOBAL: 3,
-  STORE_GLOBAL: 4,
-  GET_PROP: 5,
-  ADD: 6, // a + b (both are popped)
-  SUB: 7, // a - b
-  MUL: 8, // a * b
-  DIV: 9, // a / b
-  MAKE_CLOSURE: 10,
-  CALL: 11,
-  CALL_METHOD: 12,
-  RETURN: 13,
-  POP: 14, // discard top of stack
-  LT: 15, // pop b, pop a -> push (a < b)
-  GT: 16, // pop b, pop a -> push (a > b)
-  EQ: 17, // pop b, pop a -> push (a === b)
-  JUMP: 18, // unconditional - operand = absolute bytecode index
-  JUMP_IF_FALSE: 19, // pop value; jump if falsy
-  LTE: 20, // a <= b
-  GTE: 21, // a >= b
-  NEQ: 22, // a !== b
-  LOAD_UPVALUE: 23, // push frame.closure.upvalues[operand].read()
-  STORE_UPVALUE: 24, // frame.closure.upvalues[operand].write(pop())
+  // ── Loads ─────────────────────────────────────────────────────────────────
+  LOAD_CONST: 0, // dst, constIdx      regs[dst] = constants[constIdx]
+  LOAD_INT: 1, // dst, imm           regs[dst] = imm  (raw u16 literal)
+  LOAD_GLOBAL: 2, // dst, nameIdx       regs[dst] = globals[constants[nameIdx]]
+  LOAD_UPVALUE: 3, // dst, uvIdx         regs[dst] = upvalues[uvIdx].read()
+  LOAD_THIS: 4, // dst                regs[dst] = frame.thisVal
+  MOVE: 5, // dst, src           regs[dst] = regs[src]
 
-  //  Unary
-  UNARY_NEG: 25, // -x
-  UNARY_POS: 26, // +x
-  UNARY_NOT: 27, // !x
-  UNARY_BITNOT: 28, // ~x
-  TYPEOF: 29, // typeof x
-  VOID: 30, // void x  -> always undefined
+  // ── Stores ────────────────────────────────────────────────────────────────
+  STORE_GLOBAL: 6, // nameIdx, src       globals[constants[nameIdx]] = regs[src]
+  STORE_UPVALUE: 7, // uvIdx,   src       upvalues[uvIdx].write(regs[src])
 
-  TYPEOF_SAFE: 31, // operand = name constIdx - typeof guard for undeclared globals
-  BUILD_ARRAY: 32, // operand = element count - pops N values -> pushes array
-  BUILD_OBJECT: 33, // operand = pair count   - pops N*2 (key,val) -> pushes object
-  SET_PROP: 34, // pop val, pop key, peek obj -> obj[key] = val (obj stays on stack)
-  GET_PROP_COMPUTED: 35, // pop key, peek obj -> push obj[key]  (computed: nums[i])
+  // ── Property access ───────────────────────────────────────────────────────
+  GET_PROP: 8, // dst, obj, key      regs[dst] = regs[obj][regs[key]]
+  SET_PROP: 9, // obj, key, val      regs[obj][regs[key]] = regs[val]  (result stays in val reg)
+  DELETE_PROP: 10, // dst, obj, key      regs[dst] = delete regs[obj][regs[key]]
 
-  MOD: 36, // a % b
-  BAND: 37, // a & b
-  BOR: 38, // a | b
-  BXOR: 39, // a ^ b
-  SHL: 40, // a << b
-  SHR: 41, // a >> b
-  USHR: 42, // a >>> b
+  // ── Arithmetic / bitwise  (dst, src1, src2) ───────────────────────────────
+  ADD: 11,
+  SUB: 12,
+  MUL: 13,
+  DIV: 14,
+  MOD: 15,
+  BAND: 16,
+  BOR: 17,
+  BXOR: 18,
+  SHL: 19,
+  SHR: 20,
+  USHR: 21,
 
-  JUMP_IF_FALSE_OR_POP: 43, // && - if top falsy:  jump (keep), else: pop, eval RHS
-  JUMP_IF_TRUE_OR_POP: 44, // || - if top truthy: jump (keep), else: pop, eval RHS
+  // ── Comparison  (dst, src1, src2) ─────────────────────────────────────────
+  LT: 22,
+  GT: 23,
+  LTE: 24,
+  GTE: 25,
+  EQ: 26,
+  NEQ: 27,
+  LOOSE_EQ: 28,
+  LOOSE_NEQ: 29,
+  IN: 30,
+  INSTANCEOF: 31,
 
-  DELETE_PROP: 45,
-  IN: 46, // a in b
-  INSTANCEOF: 47, // a instanceof b
+  // ── Unary  (dst, src) ─────────────────────────────────────────────────────
+  UNARY_NEG: 32,
+  UNARY_POS: 33,
+  UNARY_NOT: 34,
+  UNARY_BITNOT: 35,
+  TYPEOF: 36, // dst, src
+  VOID: 37, // dst, src   – regs[dst] = undefined (src evaluated for side-effects)
+  TYPEOF_SAFE: 38, // dst, nameConstIdx – safe typeof for potentially-undeclared globals
 
-  // NEW
-  LOAD_THIS: 48, // push frame.thisVal
-  NEW: 49, // operand = argCount - construct a new object
-  DUP: 50, // duplicate top of stack
-  THROW: 51, // pop value, throw it
-  LOOSE_EQ: 52, // a == b  (abstract equality)
-  LOOSE_NEQ: 53, // a != b  (abstract inequality)
+  // ── Control flow ──────────────────────────────────────────────────────────
+  JUMP: 39, // target
+  JUMP_IF_FALSE: 40, // src, target    if !regs[src] then pc = target
+  JUMP_IF_TRUE: 41, // src, target    if  regs[src] then pc = target  (|| short-circuit)
 
-  FOR_IN_SETUP: 54, // pop obj -> build enumerable-key iterator -> push {keys,i}
-  FOR_IN_NEXT: 55, // operand=exit_pc; pop iter; if done->jump; else push next key
+  // ── Calls & constructors ──────────────────────────────────────────────────
+  CALL: 42, // dst, callee, argc, [argRegs…]
+  CALL_METHOD: 43, // dst, receiver, callee, argc, [argRegs…]
+  NEW: 44, // dst, callee, argc, [argRegs…]
+  RETURN: 45, // src
+  THROW: 46, // src
 
-  // Self-modifying bytecode
-  PATCH: 56, // pop destPc; constants[operand]=word[]; write words into bytecode[destPc..]
+  // ── Closures ──────────────────────────────────────────────────────────────
+  // dst, startPc, paramCount, regCount, uvCount, [isLocal, idx, …]
+  MAKE_CLOSURE: 47,
 
-  // Try-Catch
-  TRY_SETUP: 57, // operand = catch_pc; push exception handler onto frame._handlerStack
-  TRY_END: 58, // pop exception handler (normal exit from try body)
+  // ── Collections ───────────────────────────────────────────────────────────
+  BUILD_ARRAY: 48, // dst, count,     [elemRegs…]
+  BUILD_OBJECT: 49, // dst, pairCount, [keyReg, valReg, …]
 
-  // Getter / Setter (ES5 object literal accessor syntax)
-  DEFINE_GETTER: 59, // pop fn, pop key, pop obj -> Object.defineProperty(obj, key, {get: fn})
-  DEFINE_SETTER: 60, // pop fn, pop key, pop obj -> Object.defineProperty(obj, key, {set: fn})
+  // ── Property definitions (getters / setters) ──────────────────────────────
+  DEFINE_GETTER: 50, // obj, key, fn
+  DEFINE_SETTER: 51, // obj, key, fn
 
-  DEBUGGER: 61, // emits a "debugger" statement
+  // ── For-in iteration ──────────────────────────────────────────────────────
+  FOR_IN_SETUP: 52, // dst, src              dst = { _keys: enumKeys(src), i: 0 }
+  FOR_IN_NEXT: 53, // dst, iter, exitTarget
 
-  // Push the raw integer operand directly onto the stack (no constant pool lookup).
-  // Identical pipeline to JUMP ops: {type:"label"} pseudo-operands resolve to a
-  // raw PC number that becomes the operand, which is pushed as-is at runtime.
-  LOAD_INT: 62,
+  // ── Exception handling ────────────────────────────────────────────────────
+  TRY_SETUP: 54, // handlerPc, exceptionReg
+  TRY_END: 55,
+
+  // ── Self-modifying bytecode ───────────────────────────────────────────────
+  PATCH: 56, // destPc, sliceStart, sliceEnd
+
+  // ── Debug ─────────────────────────────────────────────────────────────────
+  DEBUGGER: 57,
 };
 
-// Scope
-// Each function call gets its own Scope. Locals are resolved to
-// numeric slots at compile time -- zero name lookups at runtime.
+// ── Scope ─────────────────────────────────────────────────────────────────────
+// Maps variable names to register indices (slot numbers).
+// Locals are allocated at compile time; zero name lookups at runtime.
 class Scope {
   parent: Scope | null;
   _locals: Map<string, number>;
@@ -132,21 +151,20 @@ class Scope {
 
   constructor(parent = null) {
     this.parent = parent;
-    this._locals = new Map(); // name -> slot index
+    this._locals = new Map();
     this._next = 0;
   }
 
-  define(name) {
+  define(name: string): number {
     if (!this._locals.has(name)) {
       this._locals.set(name, this._next++);
     }
-    return this._locals.get(name);
+    return this._locals.get(name)!;
   }
 
-  // Walk up scope chain. If we fall off the top -> global.
-  resolve(name) {
+  resolve(name: string): { kind: "local"; slot: number } | { kind: "global" } {
     if (this._locals.has(name)) {
-      return { kind: "local", slot: this._locals.get(name) };
+      return { kind: "local", slot: this._locals.get(name)! };
     }
     if (this.parent) return this.parent.resolve(name);
     return { kind: "global" };
@@ -157,9 +175,9 @@ class Scope {
   }
 }
 
-// FnContext
+// ── FnContext ─────────────────────────────────────────────────────────────────
 // Compiler-side state for the function currently being compiled.
-// Distinct from runtime Frame -- this is compile-time only.
+// Distinct from the runtime Frame — this is compile-time only.
 class FnContext {
   upvalues: { name: string; isLocal: number; index: number }[];
   parentCtx: FnContext | null;
@@ -167,31 +185,62 @@ class FnContext {
   compiler: Compiler;
   bc: b.Instruction[];
 
-  constructor(compiler, parentCtx = null) {
+  // Register allocator.  Locals occupy regs[0..scope.localCount-1];
+  // temps are allocated above that and freed at statement boundaries.
+  regTop: number = 0;
+  maxRegTop: number = 0;
+
+  constructor(compiler: Compiler, parentCtx: FnContext | null = null) {
     this.compiler = compiler;
     this.parentCtx = parentCtx;
     this.scope = new Scope();
-
     this.bc = [];
-    this.upvalues = []; // { name, isLocal, index }
+    this.upvalues = [];
   }
 
-  // Find or register a captured variable as an upvalue.
-  // isLocal=true  -> captured directly from parent's locals[index]
-  // isLocal=false -> relayed from parent's own upvalue list[index]
-  addUpvalue(name, isLocal, index) {
+  /** Allocate the next free temp register and return its index. */
+  allocReg(): number {
+    const r = this.regTop++;
+    if (this.regTop > this.maxRegTop) this.maxRegTop = this.regTop;
+    return r;
+  }
+
+  /** Release all temps above the local region. Called at each statement boundary. */
+  resetTemps(): void {
+    this.regTop = this.scope.localCount;
+  }
+
+  addUpvalue(name: string, isLocal: number, index: number): number {
     const existing = this.upvalues.findIndex((u) => u.name === name);
     if (existing !== -1) return existing;
     const idx = this.upvalues.length;
-    this.upvalues.push({ name, isLocal, index: index });
+    this.upvalues.push({ name, isLocal, index });
     return idx;
   }
 }
 
-// Compiler
+interface FnDescriptor {
+  name?: string;
+  entryLabel?: string;
+  startLabel?: string;
+  bytecode?: b.Bytecode;
+  paramCount?: number;
+  regCount?: number;
+  upvalues?: any[];
+  _fnIdx?: number;
+
+  /**
+   * Only populated AFTER resolveLabels
+   */
+  startPc?: number;
+}
+
+// ── Compiler ──────────────────────────────────────────────────────────────────
 export class Compiler {
-  fnDescriptors: any[];
+  fnDescriptors: FnDescriptor[];
   bytecode: b.Bytecode;
+  mainRegCount: number;
+  mainFn: ReturnType<typeof this._compileFunctionDecl>;
   mainStartPc: number;
 
   _currentCtx: FnContext | null;
@@ -201,9 +250,7 @@ export class Compiler {
   _loopStack: {
     type: "loop" | "switch" | "block";
     label: string | null;
-    // Label that break statements targeting this entry should jump to.
     breakLabel: string;
-    // Label that continue statements targeting this entry should jump to.
     continueLabel: string;
   }[];
 
@@ -216,42 +263,41 @@ export class Compiler {
     number,
     {
       originalOp: number;
-      operand: b.InstrOperand;
-      resolvedOperand?: b.InstrOperand;
+      operands: b.InstrOperand[];
+      resolvedOperands?: b.InstrOperand[];
     }
   >;
+  ALIASED_OPS: Record<number, { originalOp: number; order: number[] }>;
 
   OP_NAME: Record<number, string>;
   JUMP_OPS: Set<number>;
 
+  constants: any[];
+
   emit(bc: b.Bytecode, instr: b.Instruction, node: t.Node) {
     bc.push(instr);
-
     instr[SOURCE_NODE_SYM] = node;
   }
 
-  // DO NOT USE THIS KEY UNLESS YOU ARE "RESOLVE CONSTANTS"
-  // CONSTANTS DURING COMPILATION MUST BE USED BY REFERENCE WITH b.constantOperand("myConstantHere")
-  constants: any[];
-
   constructor(options: Options = DEFAULT_OPTIONS) {
     this.options = options;
-    this.fnDescriptors = []; // populated in pass 1
+    this.fnDescriptors = [];
     this.bytecode = [];
     this.mainStartPc = 0;
-    this._currentCtx = null; // FnContext of the function being compiled, null at top-level
-    this._loopStack = []; // per active loop/switch/block/try
+    this.mainRegCount = 0;
+    this._currentCtx = null;
+    this._loopStack = [];
     this._pendingLabel = null;
-    this._forInCount = 0; // counter for synthetic for-in iterator global names
-    this._labelCount = 0; // monotonically increasing counter for unique label names
+    this._forInCount = 0;
+    this._labelCount = 0;
 
     this.serializer = new Serializer(this);
     this.MACRO_OPS = {};
     this.SPECIALIZED_OPS = {};
+    this.ALIASED_OPS = {};
 
     this.OP = { ...OP_ORIGINAL };
 
-    // Construct randomized opcode mapping
     if (this.options.randomizeOpcodes) {
       let usedNumbers = new Set<number>();
       for (const key in this.OP) {
@@ -264,7 +310,6 @@ export class Compiler {
       }
     }
 
-    // Reverse map for comment generation
     this.OP_NAME = Object.fromEntries(
       Object.entries(this.OP).map(([k, v]) => [v, k]),
     );
@@ -272,135 +317,221 @@ export class Compiler {
     this.JUMP_OPS = new Set([
       this.OP.JUMP,
       this.OP.JUMP_IF_FALSE,
-      this.OP.JUMP_IF_TRUE_OR_POP,
-      this.OP.JUMP_IF_FALSE_OR_POP,
+      this.OP.JUMP_IF_TRUE,
       this.OP.FOR_IN_NEXT,
-      this.OP.TRY_SETUP, // catch_pc operand needs offset adjustment like jump targets
+      this.OP.TRY_SETUP,
     ]);
   }
 
-  // Generate a globally unique label string with an optional hint for readability.
   _makeLabel(hint = ""): string {
-    var id = this._labelCount++;
-    return `${hint || "L"}_${id}`;
+    return `${hint || "L"}_${this._labelCount++}`;
   }
 
-  // Variable resolution
-  // Walks up the FnContext chain. Crossing a context boundary means
-  // we're capturing from an outer function - register an upvalue.
-  _resolve(name, ctx) {
+  _resolve(
+    name: string,
+    ctx: FnContext | null,
+  ):
+    | { kind: "local"; slot: number }
+    | { kind: "upvalue"; index: number }
+    | { kind: "global" } {
     if (!ctx) return { kind: "global" };
 
-    // 1. Own locals
     if (ctx.scope._locals.has(name)) {
-      return { kind: "local", slot: ctx.scope._locals.get(name) };
+      return { kind: "local", slot: ctx.scope._locals.get(name)! };
     }
 
-    // 2. No parent context -> must be global
     if (!ctx.parentCtx) return { kind: "global" };
 
-    // 3. Ask parent -- recurse up the chain
     const parentResult = this._resolve(name, ctx.parentCtx);
     if (parentResult.kind === "global") return { kind: "global" };
 
-    // 4. Parent has it (as local or upvalue) -- register an upvalue here.
-    //    isLocal=true means "take it straight from parent's locals[index]"
-    //    isLocal=false means "relay parent's upvalue[index]" (multi-level capture)
     const isLocal = parentResult.kind === "local";
     const index = isLocal ? parentResult.slot : parentResult.index;
-    const uvIdx = ctx.addUpvalue(name, isLocal, index);
+    const uvIdx = ctx.addUpvalue(name, isLocal ? 1 : 0, index);
     return { kind: "upvalue", index: uvIdx };
   }
 
-  // Entry point
+  // ── Variable hoisting ──────────────────────────────────────────────────────
+  // Pre-scan a statement list and reserve scope slots for every var declaration,
+  // function declaration, for-in iterator, and try-catch binding.
+  // Must be called before compilation begins so that ctx.regTop can be set
+  // safely above ALL locals (including those declared late in the body).
+  _hoistVars(stmts: t.Statement[], scope: Scope): void {
+    for (const stmt of stmts) {
+      switch (stmt.type) {
+        case "VariableDeclaration":
+          for (const decl of stmt.declarations) {
+            if (decl.id.type === "Identifier") scope.define(decl.id.name);
+          }
+          break;
+
+        case "FunctionDeclaration":
+          if (stmt.id) scope.define(stmt.id.name);
+          break;
+
+        case "BlockStatement":
+          this._hoistVars(stmt.body, scope);
+          break;
+
+        case "IfStatement": {
+          const cons =
+            stmt.consequent.type === "BlockStatement"
+              ? stmt.consequent.body
+              : [stmt.consequent];
+          this._hoistVars(cons, scope);
+          if (stmt.alternate) {
+            const alt =
+              stmt.alternate.type === "BlockStatement"
+                ? stmt.alternate.body
+                : [stmt.alternate];
+            this._hoistVars(alt, scope);
+          }
+          break;
+        }
+
+        case "WhileStatement":
+        case "DoWhileStatement": {
+          const body =
+            stmt.body.type === "BlockStatement" ? stmt.body.body : [stmt.body];
+          this._hoistVars(body, scope);
+          break;
+        }
+
+        case "ForStatement": {
+          if (stmt.init?.type === "VariableDeclaration") {
+            for (const decl of stmt.init.declarations) {
+              if (decl.id.type === "Identifier") scope.define(decl.id.name);
+            }
+          }
+          const body =
+            stmt.body.type === "BlockStatement" ? stmt.body.body : [stmt.body];
+          this._hoistVars(body, scope);
+          break;
+        }
+
+        case "ForInStatement": {
+          // Reserve a hidden register for the iterator object.
+          (stmt as any)._iterSlot = scope._next++;
+          if (stmt.left.type === "VariableDeclaration") {
+            for (const decl of stmt.left.declarations) {
+              if (decl.id.type === "Identifier") scope.define(decl.id.name);
+            }
+          }
+          const body =
+            stmt.body.type === "BlockStatement" ? stmt.body.body : [stmt.body];
+          this._hoistVars(body, scope);
+          break;
+        }
+
+        case "SwitchStatement":
+          for (const c of stmt.cases) this._hoistVars(c.consequent, scope);
+          break;
+
+        case "TryStatement":
+          this._hoistVars(stmt.block.body, scope);
+          if (stmt.handler) {
+            if (stmt.handler.param?.type === "Identifier") {
+              // Catch parameter IS the exception register.
+              scope.define((stmt.handler.param as t.Identifier).name);
+            } else {
+              // No catch binding – reserve a dummy slot for the exception value.
+              (stmt as any)._exceptionSlot = scope._next++;
+            }
+            this._hoistVars(stmt.handler.body.body, scope);
+          }
+          break;
+
+        case "LabeledStatement":
+          this._hoistVars([stmt.body], scope);
+          break;
+      }
+    }
+  }
+
+  // ── Entry point ───────────────────────────────────────────────────────────
   compile(source: string) {
     const ast = parse(source, { sourceType: "script" });
-
     return this.compileAST(ast);
   }
 
   compileAST(ast: t.File) {
-    // Pass 1 - compile every FunctionDeclaration into a descriptor.
-    //           Traverse finds them regardless of nesting depth.
     traverse(ast, {
       FunctionDeclaration: (path) => {
-        // Only handle top-level functions for this MVP.
-        // (Parent is Program node)
         if (path.parent.type !== "Program") return;
         this._compileFunctionDecl(path.node);
-        path.skip(); // don't recurse into nested functions
+        path.skip();
       },
     });
 
-    // Pass 2 -- compile top-level statements into BYTECODE.
     this._compileMain(ast.program.body);
-
     return this.bytecode;
   }
 
-  // Function Declaration
-
+  // ── Function compilation ───────────────────────────────────────────────────
   _compileFunctionDecl(node: t.FunctionDeclaration | t.FunctionExpression) {
-    // Reserve a slot in fnDescriptors NOW, before compiling the body, so that
-    // any nested _compileFunctionDecl calls see the correct .length and get a
-    // distinct _fnIdx.  The placeholder object is mutated in-place below once
-    // the body and header are ready.
+    ok(!node.generator, "Generator functions are not supported");
+    ok(!node.async, "Async functions are not supported");
+
     var fnIdx = this.fnDescriptors.length;
     const entryLabel = this._makeLabel(`fn_${fnIdx}`);
-    var desc: any = {}; // placeholder — filled in after compilation
+    var desc: FnDescriptor = {};
     this.fnDescriptors.push(desc);
 
-    // Create a context whose parent is whatever we're currently compiling.
-    // This is what lets _resolve cross function boundaries correctly.
     const ctx = new FnContext(this, this._currentCtx);
     const savedCtx = this._currentCtx;
     this._currentCtx = ctx;
 
-    // Isolate the loop stack so that try/loop entries from the outer scope
-    // don't cause spurious TRY_END / extra jumps inside this function body.
     const savedLoopStack = this._loopStack;
     this._loopStack = [];
 
-    // Params occupy the first N local slots (args are copied in on CALL)
+    // 1. Define parameters (occupy regs 0..paramCount-1).
     for (const param of node.params) {
       let identifier = param.type === "AssignmentPattern" ? param.left : param;
       ok(
         identifier.type === "Identifier",
         "Only simple identifiers allowed as parameters",
       );
-
-      ctx.scope.define(identifier.name);
+      ctx.scope.define((identifier as t.Identifier).name);
     }
 
-    // Reserve the next slot for the implicit `arguments` object.
-    // Slot index will always equal paramCount (params are 0..paramCount-1).
+    // 2. Reserve the `arguments` slot (reg index = paramCount).
     ctx.scope.define("arguments");
 
-    // Pass 2: emit default-value guards at top of fn body
-    // Mirrors what JS engines do: if the caller passed undefined (or
-    // nothing), evaluate the default expression and overwrite the slot.
+    // 3. Hoist all var declarations so temps start above every local.
+    this._hoistVars(node.body.body, ctx.scope);
+
+    // 4. Temps now start above all locals.
+    ctx.regTop = ctx.scope.localCount;
+    ctx.maxRegTop = ctx.regTop;
+
+    // 5. Emit default-value guards.
     for (const param of node.params) {
       if (param.type !== "AssignmentPattern") continue;
 
-      const slot = ctx.scope._locals.get((param.left as t.Identifier).name);
+      const slot = ctx.scope._locals.get((param.left as t.Identifier).name)!;
       const skipLabel = this._makeLabel("param_skip");
 
-      // if (param === undefined) param = <default expr>
-      this.emit(ctx.bc, [this.OP.LOAD_LOCAL, slot], param);
+      // if (param === undefined) param = <default>
+      const reg_undef = ctx.allocReg();
       this.emit(
         ctx.bc,
-        [this.OP.LOAD_CONST, b.constantOperand(undefined)],
+        [this.OP.LOAD_CONST, reg_undef, b.constantOperand(undefined)],
         param,
       );
-      this.emit(ctx.bc, [this.OP.EQ], param);
+      const reg_cmp = ctx.allocReg();
+      this.emit(ctx.bc, [this.OP.EQ, reg_cmp, slot, reg_undef], param);
       this.emit(
         ctx.bc,
-        [this.OP.JUMP_IF_FALSE, { type: "label", label: skipLabel }],
+        [this.OP.JUMP_IF_FALSE, reg_cmp, { type: "label", label: skipLabel }],
         param,
       );
+      ctx.resetTemps();
 
-      this._compileExpr(param.right, ctx.scope, ctx.bc); // eval default
-      this.emit(ctx.bc, [this.OP.STORE_LOCAL, slot], param);
+      const srcReg = this._compileExpr(param.right, ctx.scope, ctx.bc);
+      if (srcReg !== slot) {
+        this.emit(ctx.bc, [this.OP.MOVE, slot, srcReg], param);
+      }
+      ctx.resetTemps();
 
       this.emit(
         ctx.bc,
@@ -409,40 +540,41 @@ export class Compiler {
       );
     }
 
+    // 6. Compile body.
     for (const stmt of node.body.body) {
       this._compileStatement(stmt, ctx.scope, ctx.bc);
     }
 
-    // If we fall off the end of the function, implicitly return undefined.
-    this.emit(ctx.bc, [this.OP.LOAD_CONST, b.constantOperand(undefined)], node);
-    this.emit(ctx.bc, [this.OP.RETURN], node);
+    // Implicit return undefined at end of function.
+    const reg_undef = ctx.allocReg();
+    this.emit(
+      ctx.bc,
+      [this.OP.LOAD_CONST, reg_undef, b.constantOperand(undefined)],
+      node,
+    );
+    this.emit(ctx.bc, [this.OP.RETURN, reg_undef], node);
 
-    this._currentCtx = savedCtx; // restore before touching fnDescriptors
+    this._currentCtx = savedCtx;
     this._loopStack = savedLoopStack;
 
     (node as any)._fnIdx = fnIdx;
 
-    // Fill the placeholder that was reserved at the top of this function.
-    // Metadata (paramCount, localCount, upvalues) is stored on desc and emitted
-    // as inline operands on the MAKE_CLOSURE instruction via _emitMakeClosure.
-    desc.name = node.id?.name || "<anonymous>";
+    desc.name = (node as any).id?.name || "<anonymous>";
     desc.entryLabel = entryLabel;
     desc.bytecode = ctx.bc as b.Bytecode;
     desc._fnIdx = fnIdx;
     desc.paramCount = node.params.length;
-    desc.localCount = ctx.scope.localCount;
+    desc.regCount = ctx.maxRegTop; // total registers needed at runtime
     desc.upvalues = ctx.upvalues.slice();
 
     return desc;
   }
 
-  // Emit a single MAKE_CLOSURE instruction with all closure metadata packed
-  // as inline operands.  The runtime reads them via _operand() — no stack
-  // shuffling needed.
-  //
-  // Flat operand layout:  startPc, paramCount, localCount, uvCount,
-  //                       [isLocal_0, idx_0, isLocal_1, idx_1, ...]
+  // Emit MAKE_CLOSURE with all metadata as inline operands.
+  // Layout: dst, startPc, paramCount, regCount, uvCount, [isLocal, idx, …]
   _emitMakeClosure(desc: any, node: t.Node, bc: b.Bytecode) {
+    const ctx = this._currentCtx!;
+    const dst = ctx.allocReg();
     const uvOperands: (number | b.InstrOperand)[] = [];
     for (const uv of desc.upvalues) {
       uvOperands.push(uv.isLocal ? 1 : 0);
@@ -452,43 +584,33 @@ export class Compiler {
       bc,
       [
         this.OP.MAKE_CLOSURE,
+        dst,
         { type: "label", label: desc.entryLabel },
         desc.paramCount,
-        desc.localCount,
+        desc.regCount,
         desc.upvalues.length,
         ...uvOperands,
       ] as b.Instruction,
       node,
     );
+    return dst;
   }
 
-  // Main (top-level)
+  // ── Main (top-level) ───────────────────────────────────────────────────────
   _compileMain(body: t.Statement[]) {
-    const bc = this.bytecode;
+    const mainCtx = new FnContext(this, null);
+    const savedCtx = this._currentCtx;
+    this._currentCtx = mainCtx;
 
-    // Hoist all FunctionDeclarations: MAKE_CLOSURE -> STORE_GLOBAL
-    // (mirrors JS hoisting -- functions are available before other code)
-    for (const node of body) {
-      if (node.type !== "FunctionDeclaration") continue;
-      const desc = this.fnDescriptors.find(
-        (d) => d._fnIdx === (node as any)._fnIdx,
-      );
-      const nameRef = b.constantOperand(node.id.name);
-      this._emitMakeClosure(desc, node, bc);
-      this.emit(bc, [this.OP.STORE_GLOBAL, nameRef], node);
-    }
+    var desc = this._compileFunctionDecl({
+      type: "FunctionDeclaration",
+      async: false,
+      generator: false,
+      params: [],
+      id: null,
+      body: t.blockStatement([...body]),
+    });
 
-    // Compile everything else in order
-    for (const node of body) {
-      if (node.type === "FunctionDeclaration") continue;
-      this._compileStatement(node, null, bc); // null scope -> global context
-    }
-
-    this.emit(bc, [this.OP.RETURN], null); // end program
-
-    // Append all function bodies. Each function's entryLabel (already generated
-    // in _compileFunctionDecl) points directly to the first body instruction;
-    // metadata is pushed onto the stack at each call site, not stored inline.
     for (const descriptor of this.fnDescriptors) {
       this.bytecode.push([
         null,
@@ -498,40 +620,57 @@ export class Compiler {
         this.bytecode.push(instr);
       }
     }
+
+    this.mainRegCount = mainCtx.maxRegTop;
+    this.mainFn = desc;
+    this._currentCtx = savedCtx;
   }
 
-  // Statements
-  _compileStatement(node: t.Statement, scope: Scope, bc: b.Bytecode) {
+  // ── Statements ────────────────────────────────────────────────────────────
+  // Wrapper that resets temps after every statement so that short-lived
+  // expression temps don't accumulate across statements.
+  _compileStatement(node: t.Statement, scope: Scope | null, bc: b.Bytecode) {
+    this._compileStatementImpl(node, scope, bc);
+    this._currentCtx?.resetTemps();
+  }
+
+  _compileStatementImpl(
+    node: t.Statement,
+    scope: Scope | null,
+    bc: b.Bytecode,
+  ) {
+    const ctx = this._currentCtx!;
+
     switch (node.type) {
-      case "EmptyStatement": {
-        // nothing to emit -- bare semicolon is a no-op
+      case "EmptyStatement":
         break;
-      }
 
       case "DebuggerStatement":
         this.emit(bc, [this.OP.DEBUGGER], node);
         break;
 
-      case "BlockStatement": {
+      case "BlockStatement":
         for (const stmt of node.body) {
           this._compileStatement(stmt, scope, bc);
         }
         break;
-      }
 
       case "FunctionDeclaration": {
-        // Nested function -- compile it into a descriptor, then emit
-        // MAKE_CLOSURE so it's captured as a live closure at runtime.
-        // (_compileFunctionDecl pushes/pops _currentCtx internally)
         const desc = this._compileFunctionDecl(node);
-        this._emitMakeClosure(desc, node, bc);
+        const closureReg = this._emitMakeClosure(desc, node, bc);
         if (scope) {
-          const slot = scope.define(node.id.name);
-          this.emit(bc, [this.OP.STORE_LOCAL, slot], node);
+          const slot = scope._locals.get(node.id!.name)!;
+          if (closureReg !== slot) {
+            this.emit(bc, [this.OP.MOVE, slot, closureReg], node);
+          }
         } else {
           this.emit(
             bc,
-            [this.OP.STORE_GLOBAL, b.constantOperand(node.id.name)],
+            [
+              this.OP.STORE_GLOBAL,
+              b.constantOperand(node.id!.name),
+              closureReg,
+            ],
             node,
           );
         }
@@ -539,67 +678,87 @@ export class Compiler {
       }
 
       case "ThrowStatement": {
-        this._compileExpr(node.argument, scope, bc);
-        this.emit(bc, [this.OP.THROW], node);
+        const reg = this._compileExpr(node.argument, scope, bc);
+        this.emit(bc, [this.OP.THROW, reg], node);
         break;
       }
 
       case "ReturnStatement": {
+        let reg: number;
         if (node.argument) {
-          this._compileExpr(node.argument, scope, bc);
+          reg = this._compileExpr(node.argument, scope, bc);
         } else {
+          reg = ctx.allocReg();
           this.emit(
             bc,
-            [this.OP.LOAD_CONST, b.constantOperand(undefined)],
+            [this.OP.LOAD_CONST, reg, b.constantOperand(undefined)],
             node,
           );
         }
-        // Disarm any open try handlers before leaving the function.
-        // TRY_END only touches frame._handlerStack, not the value stack,
-        // so the return value sitting on top is safe.
         for (let _ri = this._loopStack.length - 1; _ri >= 0; _ri--) {
           if ((this._loopStack[_ri].type as any) === "try") {
             this.emit(bc, [this.OP.TRY_END], node);
           }
         }
-        this.emit(bc, [this.OP.RETURN], node);
+        this.emit(bc, [this.OP.RETURN, reg], node);
         break;
       }
 
-      case "ExpressionStatement": {
+      case "ExpressionStatement":
         this._compileExpr(node.expression, scope, bc);
-        this.emit(bc, [this.OP.POP], node); // discard return value of statement-level expressions
+        // Result is discarded; resetTemps in the wrapper handles cleanup.
         break;
-      }
 
       case "VariableDeclaration": {
         for (const decl of node.declarations) {
-          // Push the initialiser (or undefined if absent)
-          if (decl.init) {
-            this._compileExpr(decl.init, scope, bc);
-          } else {
-            this.emit(
-              bc,
-              [this.OP.LOAD_CONST, b.constantOperand(undefined)],
-              node,
-            );
-          }
-
           ok(
             decl.id.type === "Identifier",
             "Only simple identifiers can be declared",
           );
+          const name = (decl.id as t.Identifier).name;
 
-          // Store: local slot if inside a function, global name otherwise
           if (scope) {
-            const slot = scope.define(decl.id.name);
-            this.emit(bc, [this.OP.STORE_LOCAL, slot], node);
+            const slot = scope._locals.get(name)!; // already defined by _hoistVars
+            if (decl.init) {
+              const srcReg = this._compileExpr(decl.init, scope, bc);
+              if (srcReg !== slot) {
+                this.emit(bc, [this.OP.MOVE, slot, srcReg], node);
+              }
+            } else {
+              this.emit(bc, [this.OP.MOVE, slot, ctx.allocReg()], node);
+              // Load undefined into the just-allocated temp, then move.
+              // Actually: just emit LOAD_CONST directly into slot.
+              // Undo the allocReg – instead emit directly:
+              ctx.regTop--; // undo the allocReg above
+              const tmp = ctx.allocReg();
+              this.emit(
+                bc,
+                [this.OP.LOAD_CONST, tmp, b.constantOperand(undefined)],
+                node,
+              );
+              if (tmp !== slot) this.emit(bc, [this.OP.MOVE, slot, tmp], node);
+            }
           } else {
-            this.emit(
-              bc,
-              [this.OP.STORE_GLOBAL, b.constantOperand(decl.id.name)],
-              node,
-            );
+            if (decl.init) {
+              const srcReg = this._compileExpr(decl.init, scope, bc);
+              this.emit(
+                bc,
+                [this.OP.STORE_GLOBAL, b.constantOperand(name), srcReg],
+                node,
+              );
+            } else {
+              const tmp = ctx.allocReg();
+              this.emit(
+                bc,
+                [this.OP.LOAD_CONST, tmp, b.constantOperand(undefined)],
+                node,
+              );
+              this.emit(
+                bc,
+                [this.OP.STORE_GLOBAL, b.constantOperand(name), tmp],
+                node,
+              );
+            }
           }
         }
         break;
@@ -607,15 +766,20 @@ export class Compiler {
 
       case "IfStatement": {
         const elseOrEndLabel = this._makeLabel("if_else");
-        // 1. Compile the test expression -> leaves a value on the stack
-        this._compileExpr(node.test, scope, bc);
-        // 2. Emit JUMP_IF_FALSE to the else branch (or end if no else)
+
+        const savedTop = ctx.regTop;
+        const testReg = this._compileExpr(node.test, scope, bc);
         this.emit(
           bc,
-          [this.OP.JUMP_IF_FALSE, { type: "label", label: elseOrEndLabel }],
+          [
+            this.OP.JUMP_IF_FALSE,
+            testReg,
+            { type: "label", label: elseOrEndLabel },
+          ],
           node,
         );
-        // 3. Compile the consequent block (the "then" branch)
+        ctx.regTop = savedTop; // free test temps
+
         const consequentBody =
           node.consequent.type === "BlockStatement"
             ? node.consequent.body
@@ -623,32 +787,28 @@ export class Compiler {
         for (const stmt of consequentBody) {
           this._compileStatement(stmt, scope, bc);
         }
+
         if (node.alternate) {
-          // 4a. Consequent needs to jump OVER the else block when done
           const endLabel = this._makeLabel("if_end");
           this.emit(
             bc,
             [this.OP.JUMP, { type: "label", label: endLabel }],
             node,
           );
-          // Mark start of else
           this.emit(
             bc,
             [null, { type: "defineLabel", label: elseOrEndLabel }],
             node,
           );
-          // 5. Compile the alternate (else) block
           const altBody =
             node.alternate.type === "BlockStatement"
               ? node.alternate.body
-              : [node.alternate]; // handles `else if` -- it's just a nested IfStatement
+              : [node.alternate];
           for (const stmt of altBody) {
             this._compileStatement(stmt, scope, bc);
           }
-          // Mark end (consequent's jump lands here)
           this.emit(bc, [null, { type: "defineLabel", label: endLabel }], node);
         } else {
-          // 4b. No else -- label lands right after the then block
           this.emit(
             bc,
             [null, { type: "defineLabel", label: elseOrEndLabel }],
@@ -669,7 +829,7 @@ export class Compiler {
           type: "loop",
           label: _wLabel,
           breakLabel: exitLabel,
-          continueLabel: loopTopLabel, // continue re-evaluates the test
+          continueLabel: loopTopLabel,
         });
 
         this.emit(
@@ -677,12 +837,15 @@ export class Compiler {
           [null, { type: "defineLabel", label: loopTopLabel }],
           node,
         );
-        this._compileExpr(node.test, scope, bc);
+
+        const savedTop = ctx.regTop;
+        const testReg = this._compileExpr(node.test, scope, bc);
         this.emit(
           bc,
-          [this.OP.JUMP_IF_FALSE, { type: "label", label: exitLabel }],
+          [this.OP.JUMP_IF_FALSE, testReg, { type: "label", label: exitLabel }],
           node,
         );
+        ctx.regTop = savedTop;
 
         const whileBody =
           node.body.type === "BlockStatement" ? node.body.body : [node.body];
@@ -713,7 +876,7 @@ export class Compiler {
           type: "loop",
           label: _dwLabel,
           breakLabel: exitLabel,
-          continueLabel: continueLabel, // continue falls to the test
+          continueLabel: continueLabel,
         });
 
         this.emit(
@@ -728,18 +891,20 @@ export class Compiler {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // continue -> skip rest of body, fall through to test
         this.emit(
           bc,
           [null, { type: "defineLabel", label: continueLabel }],
           node,
         );
-        this._compileExpr(node.test, scope, bc);
+
+        const savedTop = ctx.regTop;
+        const testReg = this._compileExpr(node.test, scope, bc);
         this.emit(
           bc,
-          [this.OP.JUMP_IF_FALSE, { type: "label", label: exitLabel }],
+          [this.OP.JUMP_IF_FALSE, testReg, { type: "label", label: exitLabel }],
           node,
         );
+        ctx.regTop = savedTop;
         this.emit(
           bc,
           [this.OP.JUMP, { type: "label", label: loopTopLabel }],
@@ -747,7 +912,6 @@ export class Compiler {
         );
 
         this.emit(bc, [null, { type: "defineLabel", label: exitLabel }], node);
-
         this._loopStack.pop();
         break;
       }
@@ -758,7 +922,6 @@ export class Compiler {
 
         const loopTopLabel = this._makeLabel("for_top");
         const exitLabel = this._makeLabel("for_exit");
-        // continue jumps to the update clause if present, else straight to test
         const updateLabel = node.update
           ? this._makeLabel("for_update")
           : loopTopLabel;
@@ -774,8 +937,8 @@ export class Compiler {
           if (node.init.type === "VariableDeclaration") {
             this._compileStatement(node.init, scope, bc);
           } else {
-            this._compileExpr(node.init, scope, bc);
-            this.emit(bc, [this.OP.POP], node);
+            this._compileExpr(node.init as t.Expression, scope, bc);
+            // result discarded; resetTemps in next iteration
           }
         }
 
@@ -784,13 +947,20 @@ export class Compiler {
           [null, { type: "defineLabel", label: loopTopLabel }],
           node,
         );
+
         if (node.test) {
-          this._compileExpr(node.test, scope, bc);
+          const savedTop = ctx.regTop;
+          const testReg = this._compileExpr(node.test, scope, bc);
           this.emit(
             bc,
-            [this.OP.JUMP_IF_FALSE, { type: "label", label: exitLabel }],
+            [
+              this.OP.JUMP_IF_FALSE,
+              testReg,
+              { type: "label", label: exitLabel },
+            ],
             node,
           );
+          ctx.regTop = savedTop;
         }
 
         const forBody =
@@ -799,7 +969,6 @@ export class Compiler {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // continue -> run update (if any) then back to test
         if (node.update) {
           this.emit(
             bc,
@@ -807,7 +976,7 @@ export class Compiler {
             node,
           );
           this._compileExpr(node.update, scope, bc);
-          this.emit(bc, [this.OP.POP], node);
+          ctx.resetTemps(); // discard update expression result
         }
 
         this.emit(
@@ -822,7 +991,6 @@ export class Compiler {
       }
 
       case "BreakStatement": {
-        // Find the jump target in the loop stack.
         let _bTargetIdx = -1;
         if (node.label) {
           const _bLabelName = node.label.name;
@@ -835,7 +1003,6 @@ export class Compiler {
           if (_bTargetIdx === -1)
             throw new Error(`Label '${node.label.name}' not found`);
         } else {
-          // Find innermost loop/switch/block (skip "try" entries)
           for (let _bi = this._loopStack.length - 1; _bi >= 0; _bi--) {
             if ((this._loopStack[_bi].type as any) !== "try") {
               _bTargetIdx = _bi;
@@ -844,7 +1011,6 @@ export class Compiler {
           }
           if (_bTargetIdx === -1) throw new Error("break outside loop");
         }
-        // Emit TRY_END for every open try block between here and the target.
         for (let _bi = this._loopStack.length - 1; _bi > _bTargetIdx; _bi--) {
           if ((this._loopStack[_bi].type as any) === "try") {
             this.emit(bc, [this.OP.TRY_END], node);
@@ -862,7 +1028,6 @@ export class Compiler {
       }
 
       case "ContinueStatement": {
-        // Find the target loop in the loop stack.
         let _cTargetIdx = -1;
         if (node.label) {
           const _cLabelName = node.label.name;
@@ -880,7 +1045,6 @@ export class Compiler {
               `Label '${node.label.name}' not found for continue`,
             );
         } else {
-          // Find the innermost loop (skip switch, block, and try contexts)
           for (let _ci = this._loopStack.length - 1; _ci >= 0; _ci--) {
             if (this._loopStack[_ci].type === "loop") {
               _cTargetIdx = _ci;
@@ -889,7 +1053,6 @@ export class Compiler {
           }
           if (_cTargetIdx === -1) throw new Error("continue outside loop");
         }
-        // Emit TRY_END for every open try block between here and the target loop.
         for (let _ci = this._loopStack.length - 1; _ci > _cTargetIdx; _ci--) {
           if ((this._loopStack[_ci].type as any) === "try") {
             this.emit(bc, [this.OP.TRY_END], node);
@@ -919,34 +1082,36 @@ export class Compiler {
           type: "switch",
           label: _swLabel,
           breakLabel: switchBreakLabel,
-          continueLabel: switchBreakLabel, // not used for switch
+          continueLabel: switchBreakLabel,
         });
 
-        // Compile the discriminant and leave it on the stack
-        this._compileExpr(node.discriminant, scope, bc);
+        // Compile discriminant into a register that lives for the whole switch.
+        const discReg = this._compileExpr(node.discriminant, scope, bc);
 
         const cases = node.cases;
         const defaultIdx = cases.findIndex((c) => c.test === null);
-
-        // Pre-allocate a label for each case body so dispatch can reference them
         const caseLabels = cases.map((_, i) => this._makeLabel(`sw_case_${i}`));
 
-        // Dispatch section: for each non-default case, check and jump to its body
+        // Dispatch: for each non-default case, test and jump.
         for (let i = 0; i < cases.length; i++) {
           const cas = cases[i];
-          if (cas.test === null) continue; // skip default in dispatch
+          if (cas.test === null) continue;
 
           const nextCheckLabel = this._makeLabel("sw_next");
-          this.emit(bc, [this.OP.DUP], node);
-          this._compileExpr(cas.test, scope, bc);
-          this.emit(bc, [this.OP.EQ], node);
-          // If not matched, fall through to the next check
+          const savedTop = ctx.regTop;
+          const caseValReg = this._compileExpr(cas.test, scope, bc);
+          const cmpReg = ctx.allocReg();
+          this.emit(bc, [this.OP.EQ, cmpReg, discReg, caseValReg], node);
           this.emit(
             bc,
-            [this.OP.JUMP_IF_FALSE, { type: "label", label: nextCheckLabel }],
+            [
+              this.OP.JUMP_IF_FALSE,
+              cmpReg,
+              { type: "label", label: nextCheckLabel },
+            ],
             node,
           );
-          // If matched, jump directly to this case's body
+          ctx.regTop = savedTop;
           this.emit(
             bc,
             [this.OP.JUMP, { type: "label", label: caseLabels[i] }],
@@ -959,7 +1124,6 @@ export class Compiler {
           );
         }
 
-        // No case matched: jump to default body or exit (which pops discriminant)
         this.emit(
           bc,
           [
@@ -973,7 +1137,6 @@ export class Compiler {
           node,
         );
 
-        // Body section: compile all case bodies in source order (fallthrough intact)
         for (let i = 0; i < cases.length; i++) {
           this.emit(
             bc,
@@ -985,13 +1148,12 @@ export class Compiler {
           }
         }
 
-        // break label lands here; pop the discriminant and continue after switch
+        // Break lands here – discriminant register is simply abandoned.
         this.emit(
           bc,
           [null, { type: "defineLabel", label: switchBreakLabel }],
           node,
         );
-        this.emit(bc, [this.OP.POP], node);
 
         this._loopStack.pop();
         break;
@@ -1008,18 +1170,16 @@ export class Compiler {
         const _lIsSwitch = _lBody.type === "SwitchStatement";
 
         if (_lIsLoop || _lIsSwitch) {
-          // Pass label down to the loop/switch handler via _pendingLabel
           this._pendingLabel = _lName;
           this._compileStatement(_lBody, scope, bc);
-          this._pendingLabel = null; // safety clear if handler didn't consume it
+          this._pendingLabel = null;
         } else {
-          // Non-loop labeled statement (e.g. labeled block) -- only break is valid
           const blockBreakLabel = this._makeLabel("block_break");
           this._loopStack.push({
             type: "block",
             label: _lName,
             breakLabel: blockBreakLabel,
-            continueLabel: blockBreakLabel, // unused
+            continueLabel: blockBreakLabel,
           });
           this._compileStatement(_lBody, scope, bc);
           this._loopStack.pop();
@@ -1036,30 +1196,12 @@ export class Compiler {
         const _fiLabel = this._pendingLabel;
         this._pendingLabel = null;
 
-        // Evaluate the object expression -> on stack
-        this._compileExpr(node.right, scope, bc);
-        // FOR_IN_SETUP: pops obj, pushes iterator {keys, i}
-        this.emit(bc, [this.OP.FOR_IN_SETUP], node);
+        // Iterator register was reserved by _hoistVars.
+        const iterSlot: number = (node as any)._iterSlot;
 
-        // Store iterator in a hidden slot so break/continue need no cleanup
-        let emitLoadIter: () => void;
-        let emitStoreIter: () => void;
-        if (scope) {
-          // Reserve a hidden local slot (no name mapping needed)
-          const iterSlot = scope._next++;
-          emitLoadIter = () =>
-            this.emit(bc, [this.OP.LOAD_LOCAL, iterSlot], node);
-          emitStoreIter = () =>
-            this.emit(bc, [this.OP.STORE_LOCAL, iterSlot], node);
-        } else {
-          // Top level -- use a synthetic global that won't collide with user code
-          const iterNameIdx = b.constantOperand("__fi" + this._forInCount++);
-          emitLoadIter = () =>
-            this.emit(bc, [this.OP.LOAD_GLOBAL, iterNameIdx], node);
-          emitStoreIter = () =>
-            this.emit(bc, [this.OP.STORE_GLOBAL, iterNameIdx], node);
-        }
-        emitStoreIter();
+        // FOR_IN_SETUP dst, src
+        const objReg = this._compileExpr(node.right, scope, bc);
+        this.emit(bc, [this.OP.FOR_IN_SETUP, iterSlot, objReg], node);
 
         const loopTopLabel = this._makeLabel("forin_top");
         const exitLabel = this._makeLabel("forin_exit");
@@ -1068,7 +1210,7 @@ export class Compiler {
           type: "loop",
           label: _fiLabel,
           breakLabel: exitLabel,
-          continueLabel: loopTopLabel, // continue re-checks the iterator
+          continueLabel: loopTopLabel,
         });
 
         this.emit(
@@ -1077,42 +1219,49 @@ export class Compiler {
           node,
         );
 
-        // Load iterator, attempt to get next key
-        emitLoadIter();
+        // FOR_IN_NEXT keyDst, iter, exitTarget
+        const keyReg = ctx.allocReg();
         this.emit(
           bc,
-          [this.OP.FOR_IN_NEXT, { type: "label", label: exitLabel }],
+          [
+            this.OP.FOR_IN_NEXT,
+            keyReg,
+            iterSlot,
+            { type: "label", label: exitLabel },
+          ],
           node,
         );
 
-        // Assign the key (now on top of stack) to the loop variable
+        // Assign the key to the loop variable.
         if (node.left.type === "VariableDeclaration") {
           const identifier = node.left.declarations[0].id;
           ok(
             identifier.type === "Identifier",
             "Only simple identifiers can be declared in for-in loops",
           );
-          const name = identifier.name;
+          const name = (identifier as t.Identifier).name;
           if (scope) {
-            const slot = scope.define(name);
-            this.emit(bc, [this.OP.STORE_LOCAL, slot], node);
+            const slot = scope._locals.get(name)!;
+            if (keyReg !== slot)
+              this.emit(bc, [this.OP.MOVE, slot, keyReg], node);
           } else {
             this.emit(
               bc,
-              [this.OP.STORE_GLOBAL, b.constantOperand(name)],
+              [this.OP.STORE_GLOBAL, b.constantOperand(name), keyReg],
               node,
             );
           }
         } else if (node.left.type === "Identifier") {
           const res = this._resolve(node.left.name, this._currentCtx);
           if (res.kind === "local") {
-            this.emit(bc, [this.OP.STORE_LOCAL, res.slot], node);
+            if (keyReg !== res.slot)
+              this.emit(bc, [this.OP.MOVE, res.slot, keyReg], node);
           } else if (res.kind === "upvalue") {
-            this.emit(bc, [this.OP.STORE_UPVALUE, res.index], node);
+            this.emit(bc, [this.OP.STORE_UPVALUE, res.index, keyReg], node);
           } else {
             this.emit(
               bc,
-              [this.OP.STORE_GLOBAL, b.constantOperand(node.left.name)],
+              [this.OP.STORE_GLOBAL, b.constantOperand(node.left.name), keyReg],
               node,
             );
           }
@@ -1123,7 +1272,6 @@ export class Compiler {
           );
         }
 
-        // Compile the loop body
         const fiBody =
           node.body.type === "BlockStatement" ? node.body.body : [node.body];
         for (const stmt of fiBody) {
@@ -1148,7 +1296,6 @@ export class Compiler {
           );
         }
         if (!node.handler) {
-          // try without catch requires finally — not supported
           throw new Error(
             "try without catch is not supported (requires finally).",
           );
@@ -1157,69 +1304,51 @@ export class Compiler {
         const catchLabel = this._makeLabel("catch");
         const afterCatchLabel = this._makeLabel("after_catch");
 
-        // Emit TRY_SETUP with the catch block's label as the handler PC.
-        // At runtime: saves stack depth + frame stack depth, pushes handler.
+        // Determine where the caught exception is written.
+        const exceptionReg =
+          node.handler.param?.type === "Identifier"
+            ? (scope?._locals.get((node.handler.param as t.Identifier).name) ??
+              ctx.allocReg()) // shouldn't normally reach here
+            : (node as any)._exceptionSlot;
+
         this.emit(
           bc,
-          [this.OP.TRY_SETUP, { type: "label", label: catchLabel }],
+          [
+            this.OP.TRY_SETUP,
+            { type: "label", label: catchLabel },
+            exceptionReg,
+          ],
           node,
         );
 
-        // Track the open try block so that break/continue/return inside the
-        // try body can emit the matching TRY_END before their jump.
         this._loopStack.push({
           type: "try" as any,
           label: null,
-          breakLabel: "", // unused
-          continueLabel: "", // unused
+          breakLabel: "",
+          continueLabel: "",
         });
 
-        // Compile try body
         for (const stmt of node.block.body) {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // Done compiling the try body — pop the tracking entry.
         this._loopStack.pop();
 
-        // Normal exit: disarm the exception handler.
         this.emit(bc, [this.OP.TRY_END], node);
-
-        // Jump over the catch block on normal path.
         this.emit(
           bc,
           [this.OP.JUMP, { type: "label", label: afterCatchLabel }],
           node,
         );
 
-        // Catch block: exception is on top of the stack (pushed by the VM).
+        // Catch block: exceptionReg already holds the caught value.
         this.emit(bc, [null, { type: "defineLabel", label: catchLabel }], node);
 
-        const handler = node.handler;
-        if (handler.param) {
-          // Bind the exception value to the catch variable.
-          const name = (handler.param as t.Identifier).name;
-          if (scope) {
-            const slot = scope.define(name);
-            this.emit(bc, [this.OP.STORE_LOCAL, slot], node);
-          } else {
-            this.emit(
-              bc,
-              [this.OP.STORE_GLOBAL, b.constantOperand(name)],
-              node,
-            );
-          }
-        } else {
-          // Optional catch binding (catch without a variable — ES2019+)
-          this.emit(bc, [this.OP.POP], node);
-        }
-
-        // Compile catch body
-        for (const stmt of handler.body.body) {
+        // If no param binding, just ignore the exception (it's in the dummy slot).
+        for (const stmt of node.handler!.body.body) {
           this._compileStatement(stmt, scope, bc);
         }
 
-        // Normal-path jump lands here (after the catch block).
         this.emit(
           bc,
           [null, { type: "defineLabel", label: afterCatchLabel }],
@@ -1229,574 +1358,744 @@ export class Compiler {
       }
 
       default: {
-        // Use @babel/generator to reproduce the source of unsupported nodes
-        // so we can emit a clear error with context.
         const src = generate(node).code;
         throw new Error(`Unsupported statement: ${node.type}\n  -> ${src}`);
       }
     }
   }
 
-  // Expressions
-  _compileExpr(node, scope, bc) {
-    switch (node.type) {
-      case "NumericLiteral":
-      case "StringLiteral": {
-        this.emit(
-          bc,
-          [this.OP.LOAD_CONST, b.constantOperand(node.value)],
-          node,
-        );
-        break;
-      }
+  // ── Expressions ───────────────────────────────────────────────────────────
+  // Returns the register index that holds the result.
+  // For local variables: returns their slot directly (no instruction emitted).
+  // For all others: allocates a fresh temp register, emits the instruction(s),
+  // and returns the allocated register.
+  _compileExpr(
+    node: t.Expression | t.Node,
+    scope: Scope | null,
+    bc: b.Bytecode,
+  ): number {
+    const ctx = this._currentCtx!;
 
+    switch ((node as any).type) {
+      case "NumericLiteral":
+      case "StringLiteral":
       case "BooleanLiteral": {
+        const dst = ctx.allocReg();
         this.emit(
           bc,
-          [this.OP.LOAD_CONST, b.constantOperand(node.value)],
+          [this.OP.LOAD_CONST, dst, b.constantOperand((node as any).value)],
           node,
         );
-        break;
+        return dst;
       }
 
       case "NullLiteral": {
-        this.emit(bc, [this.OP.LOAD_CONST, b.constantOperand(null)], node);
-        break;
+        const dst = ctx.allocReg();
+        this.emit(bc, [this.OP.LOAD_CONST, dst, b.constantOperand(null)], node);
+        return dst;
       }
 
       case "Identifier": {
-        // scope=null means we're at the top-level -> always global
-        const res = this._resolve(node.name, this._currentCtx);
-        if (res.kind === "local") {
-          this.emit(bc, [this.OP.LOAD_LOCAL, res.slot], node);
-        } else if (res.kind === "upvalue") {
-          this.emit(bc, [this.OP.LOAD_UPVALUE, res.index], node);
-        } else {
-          this.emit(
-            bc,
-            [this.OP.LOAD_GLOBAL, b.constantOperand(node.name)],
-            node,
-          );
+        const res = this._resolve(
+          (node as t.Identifier).name,
+          this._currentCtx,
+        );
+        if (res.kind === "local") return res.slot; // register IS the local
+        if (res.kind === "upvalue") {
+          const dst = ctx.allocReg();
+          this.emit(bc, [this.OP.LOAD_UPVALUE, dst, res.index], node);
+          return dst;
         }
-        break;
+        // global
+        const dst = ctx.allocReg();
+        this.emit(
+          bc,
+          [
+            this.OP.LOAD_GLOBAL,
+            dst,
+            b.constantOperand((node as t.Identifier).name),
+          ],
+          node,
+        );
+        return dst;
       }
 
       case "ThisExpression": {
-        this.emit(bc, [this.OP.LOAD_THIS], node);
-        break;
+        const dst = ctx.allocReg();
+        this.emit(bc, [this.OP.LOAD_THIS, dst], node);
+        return dst;
       }
 
       case "NewExpression": {
-        // Push callee, then args -- identical layout to CALL but uses NEW opcode
-        this._compileExpr(node.callee, scope, bc);
-        for (const arg of node.arguments) this._compileExpr(arg, scope, bc);
-        this.emit(bc, [this.OP.NEW, node.arguments.length], node);
-        break;
-      }
-
-      case "SequenceExpression": {
-        // (a, b, c)  ->  eval a -> POP, eval b -> POP, eval c -> leave on stack
-        for (let i = 0; i < node.expressions.length - 1; i++) {
-          this._compileExpr(node.expressions[i], scope, bc);
-          this.emit(bc, [this.OP.POP], node); // discard intermediate result
-        }
-        // Last expression -- its value is the result of the whole sequence
-        this._compileExpr(
-          node.expressions[node.expressions.length - 1],
+        const calleeReg = this._compileExpr(
+          (node as t.NewExpression).callee,
           scope,
           bc,
         );
-        break;
+        const argRegs = (node as t.NewExpression).arguments.map((a) =>
+          this._compileExpr(a as t.Expression, scope, bc),
+        );
+        const dst = ctx.allocReg();
+        this.emit(
+          bc,
+          [
+            this.OP.NEW,
+            dst,
+            calleeReg,
+            (node as t.NewExpression).arguments.length,
+            ...argRegs,
+          ],
+          node,
+        );
+        return dst;
+      }
+
+      case "SequenceExpression": {
+        const exprs = (node as t.SequenceExpression).expressions;
+        for (let i = 0; i < exprs.length - 1; i++) {
+          const savedTop = ctx.regTop;
+          this._compileExpr(exprs[i], scope, bc);
+          ctx.regTop = savedTop; // discard intermediate result
+        }
+        return this._compileExpr(exprs[exprs.length - 1], scope, bc);
       }
 
       case "ConditionalExpression": {
-        // test ? consequent : alternate
+        const n = node as t.ConditionalExpression;
         const elseLabel = this._makeLabel("ternary_else");
         const endLabel = this._makeLabel("ternary_end");
 
-        this._compileExpr(node.test, scope, bc);
+        // Compile test; free its temps after the jump is emitted.
+        const baseTop = ctx.regTop;
+        const testReg = this._compileExpr(n.test, scope, bc);
         this.emit(
           bc,
-          [this.OP.JUMP_IF_FALSE, { type: "label", label: elseLabel }],
+          [this.OP.JUMP_IF_FALSE, testReg, { type: "label", label: elseLabel }],
           node,
         );
+        ctx.regTop = baseTop; // free test temps
 
-        this._compileExpr(node.consequent, scope, bc);
+        // Reserve reg_result at the base of the temp space.
+        const reg_result = ctx.allocReg();
+
+        // Consequent branch.
+        const consReg = this._compileExpr(n.consequent, scope, bc);
+        if (consReg !== reg_result)
+          this.emit(bc, [this.OP.MOVE, reg_result, consReg], node);
         this.emit(bc, [this.OP.JUMP, { type: "label", label: endLabel }], node);
 
+        // Alternate branch: reset to baseTop then re-reserve reg_result.
         this.emit(bc, [null, { type: "defineLabel", label: elseLabel }], node);
-        this._compileExpr(node.alternate, scope, bc);
+        ctx.regTop = baseTop;
+        ctx.allocReg(); // re-occupy reg_result slot
+        const altReg = this._compileExpr(n.alternate, scope, bc);
+        if (altReg !== reg_result)
+          this.emit(bc, [this.OP.MOVE, reg_result, altReg], node);
 
         this.emit(bc, [null, { type: "defineLabel", label: endLabel }], node);
-        break;
+
+        // Leave reg_result allocated above baseTop.
+        ctx.regTop = baseTop + 1;
+        return reg_result;
       }
 
       case "LogicalExpression": {
-        // Pattern (CPython-style):
-        //   eval LHS
-        //   JUMP_IF_*_OR_POP  -> target (past RHS)
-        //   eval RHS          ← only reached if LHS didn't short-circuit
-        //   [target lands here, stack top is the result either way]
+        const n = node as t.LogicalExpression;
+        const endLabel = this._makeLabel("logical_end");
+        const isOr = n.operator === "||";
+        if (!isOr && n.operator !== "&&")
+          throw new Error(`Unsupported logical operator: ${n.operator}`);
 
-        this._compileExpr(node.left, scope, bc);
+        const baseTop = ctx.regTop;
+        const lhsReg = this._compileExpr(n.left, scope, bc);
+        ctx.regTop = baseTop;
+        const reg_result = ctx.allocReg();
+        if (lhsReg !== reg_result)
+          this.emit(bc, [this.OP.MOVE, reg_result, lhsReg], node);
 
-        if (node.operator === "||") {
-          // Short-circuit if LHS is TRUTHY -- keep it, skip RHS
-          const endLabel = this._makeLabel("or_end");
-          this.emit(
-            bc,
-            [this.OP.JUMP_IF_TRUE_OR_POP, { type: "label", label: endLabel }],
-            node,
-          );
-          this._compileExpr(node.right, scope, bc);
-          this.emit(bc, [null, { type: "defineLabel", label: endLabel }], node);
-        } else if (node.operator === "&&") {
-          // Short-circuit if LHS is FALSY -- keep it, skip RHS
-          const endLabel = this._makeLabel("and_end");
-          this.emit(
-            bc,
-            [this.OP.JUMP_IF_FALSE_OR_POP, { type: "label", label: endLabel }],
-            node,
-          );
-          this._compileExpr(node.right, scope, bc);
-          this.emit(bc, [null, { type: "defineLabel", label: endLabel }], node);
-        } else {
-          throw new Error(`Unsupported logical operator: ${node.operator}`);
-        }
-        break;
+        // For ||: if truthy keep LHS, jump past RHS.
+        // For &&: if falsy keep LHS, jump past RHS.
+        this.emit(
+          bc,
+          [
+            isOr ? this.OP.JUMP_IF_TRUE : this.OP.JUMP_IF_FALSE,
+            reg_result,
+            { type: "label", label: endLabel },
+          ],
+          node,
+        );
+
+        // Compile RHS into reg_result.
+        ctx.regTop = baseTop;
+        ctx.allocReg(); // re-occupy reg_result
+        const rhsReg = this._compileExpr(n.right, scope, bc);
+        if (rhsReg !== reg_result)
+          this.emit(bc, [this.OP.MOVE, reg_result, rhsReg], node);
+
+        this.emit(bc, [null, { type: "defineLabel", label: endLabel }], node);
+
+        ctx.regTop = baseTop + 1;
+        return reg_result;
       }
 
       case "BinaryExpression": {
-        this._compileExpr(node.left, scope, bc);
-        this._compileExpr(node.right, scope, bc);
-        const arithOp = {
-          "+": this.OP.ADD,
-          "-": this.OP.SUB,
-          "*": this.OP.MUL,
-          "/": this.OP.DIV,
-          "%": this.OP.MOD,
-          "&": this.OP.BAND,
-          "|": this.OP.BOR,
-          "^": this.OP.BXOR,
-          "<<": this.OP.SHL,
-          ">>": this.OP.SHR,
-          ">>>": this.OP.USHR,
-        }[node.operator];
+        const n = node as t.BinaryExpression;
+        const lhsReg = this._compileExpr(n.left as t.Expression, scope, bc);
+        const rhsReg = this._compileExpr(n.right as t.Expression, scope, bc);
+        const dst = ctx.allocReg();
 
-        const cmpOp = {
-          "<": this.OP.LT,
-          ">": this.OP.GT,
-          "===": this.OP.EQ,
-          "==": this.OP.LOOSE_EQ,
-          "<=": this.OP.LTE,
-          ">=": this.OP.GTE,
-          "!==": this.OP.NEQ,
-          "!=": this.OP.LOOSE_NEQ,
-          in: this.OP.IN, // ← add
-          instanceof: this.OP.INSTANCEOF, // ← add
-        }[node.operator];
-        const resolvedOp = arithOp ?? cmpOp;
-        if (resolvedOp === undefined)
-          throw new Error(`Unsupported operator: ${node.operator}`);
-        this.emit(bc, [resolvedOp], node);
+        const op = (
+          {
+            "+": this.OP.ADD,
+            "-": this.OP.SUB,
+            "*": this.OP.MUL,
+            "/": this.OP.DIV,
+            "%": this.OP.MOD,
+            "&": this.OP.BAND,
+            "|": this.OP.BOR,
+            "^": this.OP.BXOR,
+            "<<": this.OP.SHL,
+            ">>": this.OP.SHR,
+            ">>>": this.OP.USHR,
+            "<": this.OP.LT,
+            ">": this.OP.GT,
+            "===": this.OP.EQ,
+            "==": this.OP.LOOSE_EQ,
+            "<=": this.OP.LTE,
+            ">=": this.OP.GTE,
+            "!==": this.OP.NEQ,
+            "!=": this.OP.LOOSE_NEQ,
+            in: this.OP.IN,
+            instanceof: this.OP.INSTANCEOF,
+          } as Record<string, number | undefined>
+        )[n.operator];
 
-        break;
+        if (op === undefined)
+          throw new Error(`Unsupported operator: ${n.operator}`);
+
+        this.emit(bc, [op, dst, lhsReg, rhsReg], node);
+        return dst;
       }
 
       case "UpdateExpression": {
-        const res = this._resolve(node.argument.name, this._currentCtx);
-        const bumpOp = node.operator === "++" ? this.OP.ADD : this.OP.SUB;
-        const one = b.constantOperand(1);
+        const n = node as t.UpdateExpression;
+        ok(
+          n.argument.type === "Identifier",
+          "UpdateExpression requires identifier",
+        );
+        const name = (n.argument as t.Identifier).name;
+        const res = this._resolve(name, this._currentCtx);
+        const bumpOp = n.operator === "++" ? this.OP.ADD : this.OP.SUB;
 
-        // Helper closures: emit load / store for whichever resolution kind we have
-        const emitLoad = () => {
-          if (res.kind === "local")
-            this.emit(bc, [this.OP.LOAD_LOCAL, res.slot], node);
-          else if (res.kind === "upvalue")
-            this.emit(bc, [this.OP.LOAD_UPVALUE, res.index], node);
-          else
-            this.emit(
-              bc,
-              [this.OP.LOAD_GLOBAL, b.constantOperand(node.argument.name)],
-              node,
-            );
-        };
-        const emitStore = () => {
-          if (res.kind === "local")
-            this.emit(bc, [this.OP.STORE_LOCAL, res.slot], node);
-          else if (res.kind === "upvalue")
-            this.emit(bc, [this.OP.STORE_UPVALUE, res.index], node);
-          else
-            this.emit(
-              bc,
-              [this.OP.STORE_GLOBAL, b.constantOperand(node.argument.name)],
-              node,
-            );
-        };
+        // Load current value into a register (locals are already in place)
+        let curReg: number;
+        if (res.kind === "local") {
+          curReg = res.slot;
+        } else if (res.kind === "upvalue") {
+          curReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.LOAD_UPVALUE, curReg, res.index],
+            node as t.Node,
+          );
+        } else {
+          curReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.LOAD_GLOBAL, curReg, b.constantOperand(name)],
+            node as t.Node,
+          );
+        }
 
-        emitLoad();
-        if (!node.prefix) this.emit(bc, [this.OP.DUP], node); // post: save old value before mutating
-        this.emit(bc, [this.OP.LOAD_CONST, one], node);
-        this.emit(bc, [bumpOp], node);
-        emitStore();
-        if (node.prefix) emitLoad(); // pre: reload new value as result
+        // For postfix we need to preserve the *old* value as the result
+        let resultReg: number;
+        if (!n.prefix) {
+          resultReg = ctx.allocReg();
+          this.emit(bc, [this.OP.MOVE, resultReg, curReg], node as t.Node);
+        } else {
+          resultReg = -1; // placeholder – will become newReg below
+        }
 
-        break;
+        const oneReg = ctx.allocReg();
+        this.emit(
+          bc,
+          [this.OP.LOAD_CONST, oneReg, b.constantOperand(1)],
+          node as t.Node,
+        );
+
+        // Compute new value (always into a fresh register)
+        const newReg = ctx.allocReg();
+        this.emit(bc, [bumpOp, newReg, curReg, oneReg], node as t.Node);
+
+        // Write the new value back (local = MOVE, others = STORE_xxx)
+        if (res.kind === "local") {
+          this.emit(bc, [this.OP.MOVE, res.slot, newReg], node as t.Node);
+        } else if (res.kind === "upvalue") {
+          this.emit(
+            bc,
+            [this.OP.STORE_UPVALUE, res.index, newReg],
+            node as t.Node,
+          );
+        } else {
+          this.emit(
+            bc,
+            [this.OP.STORE_GLOBAL, b.constantOperand(name), newReg],
+            node as t.Node,
+          );
+        }
+
+        // Prefix returns the *new* value (we already have it in newReg – no reload needed)
+        if (n.prefix) {
+          resultReg = newReg;
+        }
+
+        return resultReg;
       }
 
       case "AssignmentExpression": {
-        const compoundOp = {
-          "+=": this.OP.ADD,
-          "-=": this.OP.SUB,
-          "*=": this.OP.MUL,
-          "/=": this.OP.DIV,
-          "%=": this.OP.MOD,
-          "&=": this.OP.BAND,
-          "|=": this.OP.BOR,
-          "^=": this.OP.BXOR,
-          "<<=": this.OP.SHL,
-          ">>=": this.OP.SHR,
-          ">>>=": this.OP.USHR,
-        }[node.operator];
-
+        const n = node as t.AssignmentExpression;
+        const compoundOp = (
+          {
+            "+=": this.OP.ADD,
+            "-=": this.OP.SUB,
+            "*=": this.OP.MUL,
+            "/=": this.OP.DIV,
+            "%=": this.OP.MOD,
+            "&=": this.OP.BAND,
+            "|=": this.OP.BOR,
+            "^=": this.OP.BXOR,
+            "<<=": this.OP.SHL,
+            ">>=": this.OP.SHR,
+            ">>>=": this.OP.USHR,
+          } as Record<string, number | undefined>
+        )[n.operator];
         const isCompound = compoundOp !== undefined;
 
-        if (node.operator !== "=" && !isCompound) {
-          throw new Error(`Unsupported assignment operator: ${node.operator}`);
-        }
+        if (n.operator !== "=" && !isCompound)
+          throw new Error(`Unsupported assignment operator: ${n.operator}`);
 
         // Member assignment: obj.x = val  or  arr[i] = val
-        if (node.left.type === "MemberExpression") {
-          this._compileExpr(node.left.object, scope, bc); // push obj
+        if (n.left.type === "MemberExpression") {
+          const objReg = this._compileExpr(n.left.object, scope, bc);
 
-          if (node.left.computed) {
-            this._compileExpr(node.left.property, scope, bc); // push key (runtime)
+          let keyReg: number;
+          if (n.left.computed) {
+            keyReg = this._compileExpr(
+              n.left.property as t.Expression,
+              scope,
+              bc,
+            );
           } else {
+            keyReg = ctx.allocReg();
             this.emit(
               bc,
-              [this.OP.LOAD_CONST, b.constantOperand(node.left.property.name)],
+              [
+                this.OP.LOAD_CONST,
+                keyReg,
+                b.constantOperand((n.left.property as t.Identifier).name),
+              ],
               node,
             );
           }
 
+          let valReg: number;
           if (isCompound) {
-            // Duplicate obj+key on the stack so we can read before we write.
-            // Stack before DUP2: [..., obj, key]
-            // We need: [..., obj, key, obj, key] -> GET_PROP_COMPUTED -> [..., obj, key, currentVal]
-            // Cheapest approach without a DUP opcode: re-compile the member read.
-            // (emits obj + key again; a future peephole pass could DUP instead)
-            this._compileExpr(node.left.object, scope, bc);
-            if (node.left.computed) {
-              this._compileExpr(node.left.property, scope, bc);
+            const curReg = ctx.allocReg();
+            this.emit(bc, [this.OP.GET_PROP, curReg, objReg, keyReg], node);
+            const rhsReg = this._compileExpr(n.right, scope, bc);
+            valReg = ctx.allocReg();
+            this.emit(bc, [compoundOp!, valReg, curReg, rhsReg], node);
+          } else {
+            valReg = this._compileExpr(n.right, scope, bc);
+          }
+
+          this.emit(bc, [this.OP.SET_PROP, objReg, keyReg, valReg], node);
+          return valReg;
+        }
+
+        // Plain identifier assignment.
+        const res = this._resolve(
+          (n.left as t.Identifier).name,
+          this._currentCtx,
+        );
+
+        let rhsReg: number;
+        if (isCompound) {
+          // Load current value of the variable.
+          let curReg: number;
+          if (res.kind === "local") {
+            curReg = res.slot;
+          } else if (res.kind === "upvalue") {
+            curReg = ctx.allocReg();
+            this.emit(bc, [this.OP.LOAD_UPVALUE, curReg, res.index], node);
+          } else {
+            curReg = ctx.allocReg();
+            this.emit(
+              bc,
+              [
+                this.OP.LOAD_GLOBAL,
+                curReg,
+                b.constantOperand((n.left as t.Identifier).name),
+              ],
+              node,
+            );
+          }
+          const rhs2 = this._compileExpr(n.right, scope, bc);
+          rhsReg = ctx.allocReg();
+          this.emit(bc, [compoundOp!, rhsReg, curReg, rhs2], node);
+        } else {
+          rhsReg = this._compileExpr(n.right, scope, bc);
+        }
+
+        // Store result and return it.
+        if (res.kind === "local") {
+          if (rhsReg !== res.slot)
+            this.emit(bc, [this.OP.MOVE, res.slot, rhsReg], node);
+          return res.slot;
+        } else if (res.kind === "upvalue") {
+          this.emit(bc, [this.OP.STORE_UPVALUE, res.index, rhsReg], node);
+          return rhsReg;
+        } else {
+          const nameIdx = b.constantOperand((n.left as t.Identifier).name);
+          this.emit(bc, [this.OP.STORE_GLOBAL, nameIdx, rhsReg], node);
+          return rhsReg;
+        }
+      }
+
+      case "CallExpression": {
+        const n = node as t.CallExpression;
+
+        if (n.callee.type === "MemberExpression") {
+          // Method call: receiver.method(args)
+          const receiverReg = this._compileExpr(n.callee.object, scope, bc);
+
+          let methodKeyReg: number;
+          if (n.callee.computed) {
+            methodKeyReg = this._compileExpr(
+              n.callee.property as t.Expression,
+              scope,
+              bc,
+            );
+          } else {
+            methodKeyReg = ctx.allocReg();
+            this.emit(
+              bc,
+              [
+                this.OP.LOAD_CONST,
+                methodKeyReg,
+                b.constantOperand((n.callee.property as t.Identifier).name),
+              ],
+              node,
+            );
+          }
+
+          const calleeReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.GET_PROP, calleeReg, receiverReg, methodKeyReg],
+            node,
+          );
+
+          const argRegs = n.arguments.map((a) =>
+            this._compileExpr(a as t.Expression, scope, bc),
+          );
+          const dst = ctx.allocReg();
+          this.emit(
+            bc,
+            [
+              this.OP.CALL_METHOD,
+              dst,
+              receiverReg,
+              calleeReg,
+              n.arguments.length,
+              ...argRegs,
+            ],
+            node,
+          );
+          return dst;
+        } else {
+          // Plain call: fn(args)
+          const calleeReg = this._compileExpr(
+            n.callee as t.Expression,
+            scope,
+            bc,
+          );
+          const argRegs = n.arguments.map((a) =>
+            this._compileExpr(a as t.Expression, scope, bc),
+          );
+          const dst = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.CALL, dst, calleeReg, n.arguments.length, ...argRegs],
+            node,
+          );
+          return dst;
+        }
+      }
+
+      case "UnaryExpression": {
+        const n = node as t.UnaryExpression;
+
+        // typeof on a potentially-undeclared global -- safe guard.
+        if (n.operator === "typeof" && n.argument.type === "Identifier") {
+          const res = this._resolve(n.argument.name, this._currentCtx);
+          if (res.kind === "global") {
+            const dst = ctx.allocReg();
+            this.emit(
+              bc,
+              [this.OP.TYPEOF_SAFE, dst, b.constantOperand(n.argument.name)],
+              node,
+            );
+            return dst;
+          }
+        }
+
+        // delete expression.
+        if (n.operator === "delete") {
+          const arg = n.argument;
+          if (arg.type === "MemberExpression") {
+            const objReg = this._compileExpr(arg.object, scope, bc);
+            let keyReg: number;
+            if (arg.computed) {
+              keyReg = this._compileExpr(
+                arg.property as t.Expression,
+                scope,
+                bc,
+              );
             } else {
+              keyReg = ctx.allocReg();
               this.emit(
                 bc,
                 [
                   this.OP.LOAD_CONST,
-                  b.constantOperand(node.left.property.name),
+                  keyReg,
+                  b.constantOperand((arg.property as t.Identifier).name),
                 ],
                 node,
               );
             }
-            this.emit(bc, [this.OP.GET_PROP_COMPUTED], node); // [..., obj, key, currentVal]
-            this._compileExpr(node.right, scope, bc); // [..., obj, key, currentVal, rhs]
-            this.emit(bc, [compoundOp], node); // [..., obj, key, newVal]
+            const dst = ctx.allocReg();
+            this.emit(bc, [this.OP.DELETE_PROP, dst, objReg, keyReg], node);
+            return dst;
           } else {
-            this._compileExpr(node.right, scope, bc); // [..., obj, key, val]
-          }
-
-          this.emit(bc, [this.OP.SET_PROP], node); // obj[key] = val, leaves val on stack
-          break;
-        }
-
-        // Plain identifier assignment
-        const res = this._resolve(node.left.name, this._currentCtx);
-
-        if (isCompound) {
-          // Load the current value of the target first
-          if (res.kind === "local") {
-            this.emit(bc, [this.OP.LOAD_LOCAL, res.slot], node);
-          } else if (res.kind === "upvalue") {
-            this.emit(bc, [this.OP.LOAD_UPVALUE, res.index], node);
-          } else {
+            // delete x or delete 0 -- always true in sloppy mode.
+            const dst = ctx.allocReg();
             this.emit(
               bc,
-              [this.OP.LOAD_GLOBAL, b.constantOperand(node.left.name)],
+              [this.OP.LOAD_CONST, dst, b.constantOperand(true)],
               node,
             );
+            return dst;
           }
         }
 
-        this._compileExpr(node.right, scope, bc); // push RHS
+        // All other unary operators.
+        const srcReg = this._compileExpr(n.argument, scope, bc);
+        const dst = ctx.allocReg();
+        const unaryOp = (
+          {
+            "-": this.OP.UNARY_NEG,
+            "+": this.OP.UNARY_POS,
+            "!": this.OP.UNARY_NOT,
+            "~": this.OP.UNARY_BITNOT,
+            typeof: this.OP.TYPEOF,
+            void: this.OP.VOID,
+          } as Record<string, number | undefined>
+        )[n.operator];
 
-        if (isCompound) {
-          this.emit(bc, [compoundOp], node); // apply binary op -> leaves newVal on stack
-        }
+        if (unaryOp === undefined)
+          throw new Error(`Unsupported unary operator: ${n.operator}`);
 
-        // Store & leave value on stack (assignment is an expression)
-        if (res.kind === "local") {
-          this.emit(bc, [this.OP.STORE_LOCAL, res.slot], node);
-          this.emit(bc, [this.OP.LOAD_LOCAL, res.slot], node);
-        } else if (res.kind === "upvalue") {
-          this.emit(bc, [this.OP.STORE_UPVALUE, res.index], node);
-          this.emit(bc, [this.OP.LOAD_UPVALUE, res.index], node);
-        } else {
-          const nameIdx = b.constantOperand(node.left.name);
-          this.emit(bc, [this.OP.STORE_GLOBAL, nameIdx], node);
-          this.emit(bc, [this.OP.LOAD_GLOBAL, nameIdx], node);
-        }
-        break;
-      }
-
-      case "CallExpression": {
-        if (node.callee.type === "MemberExpression") {
-          // ── Method call: console.log(...)
-          // Push receiver first (GET_PROP leaves it; CALL_METHOD pops it as `this`)
-          this._compileExpr(node.callee.object, scope, bc);
-          const prop = node.callee.property.name;
-          const propIdx = b.constantOperand(prop);
-          this.emit(bc, [this.OP.LOAD_CONST, propIdx], node);
-          this.emit(bc, [this.OP.GET_PROP], node);
-          for (const arg of node.arguments) this._compileExpr(arg, scope, bc);
-          this.emit(bc, [this.OP.CALL_METHOD, node.arguments.length], node);
-        } else {
-          // ── Plain call: add(5, 10)
-          this._compileExpr(node.callee, scope, bc);
-          for (const arg of node.arguments) this._compileExpr(arg, scope, bc);
-          this.emit(bc, [this.OP.CALL, node.arguments.length], node);
-        }
-        break;
-      }
-
-      case "UnaryExpression": {
-        // Special case: typeof on a bare identifier must not throw if undeclared.
-        // We emit TYPEOF_SAFE (operand = name constant index) instead of
-        // compiling the argument first. The VM does the guard itself.
-        if (node.operator === "typeof" && node.argument.type === "Identifier") {
-          const res = this._resolve(node.argument.name, this._currentCtx);
-          if (res.kind === "global") {
-            // Potentially undeclared -- let VM guard it
-            this.emit(
-              bc,
-              [this.OP.LOAD_CONST, b.constantOperand(node.argument.name)],
-              node,
-            );
-            this.emit(bc, [this.OP.TYPEOF_SAFE], node);
-            break;
-          }
-          // Known local or upvalue -- safe to load first, then typeof
-        }
-
-        // Special case: delete -- argument must NOT be pre-evaluated.
-        if (node.operator === "delete") {
-          const arg = node.argument;
-          if (arg.type === "MemberExpression") {
-            this._compileExpr(arg.object, scope, bc);
-            if (arg.computed) {
-              this._compileExpr(arg.property, scope, bc);
-            } else {
-              this.emit(
-                bc,
-                [this.OP.LOAD_CONST, b.constantOperand(arg.property.name)],
-                node,
-              );
-            }
-            this.emit(bc, [this.OP.DELETE_PROP], node);
-          } else {
-            // delete x, delete 0, etc. -- always true in non-strict, just push true
-            this.emit(bc, [this.OP.LOAD_CONST, b.constantOperand(true)], node);
-          }
-          break;
-        }
-
-        // All other unary ops: compile argument first, then apply operator
-        this._compileExpr(node.argument, scope, bc);
-        switch (node.operator) {
-          case "-":
-            this.emit(bc, [this.OP.UNARY_NEG], node);
-            break;
-          case "+":
-            this.emit(bc, [this.OP.UNARY_POS], node);
-            break;
-          case "!":
-            this.emit(bc, [this.OP.UNARY_NOT], node);
-            break;
-          case "~":
-            this.emit(bc, [this.OP.UNARY_BITNOT], node);
-            break;
-          case "typeof":
-            this.emit(bc, [this.OP.TYPEOF], node);
-            break;
-          case "void":
-            this.emit(bc, [this.OP.VOID], node);
-            break;
-
-          default:
-            throw new Error(`Unsupported unary operator: ${node.operator}`);
-        }
-        break;
+        this.emit(bc, [unaryOp, dst, srcReg], node);
+        return dst;
       }
 
       case "RegExpLiteral": {
-        // Emit: new RegExp(pattern, flags)
-        // Fresh object per evaluation -- correct for stateful g/y flags.
-        this.emit(bc, [this.OP.LOAD_GLOBAL, b.constantOperand("RegExp")], node);
+        const n = node as t.RegExpLiteral;
+        // new RegExp(pattern, flags)
+        const regExpReg = ctx.allocReg();
         this.emit(
           bc,
-          [this.OP.LOAD_CONST, b.constantOperand(node.pattern)],
+          [this.OP.LOAD_GLOBAL, regExpReg, b.constantOperand("RegExp")],
           node,
         );
+        const patternReg = ctx.allocReg();
         this.emit(
           bc,
-          [this.OP.LOAD_CONST, b.constantOperand(node.flags)],
+          [this.OP.LOAD_CONST, patternReg, b.constantOperand(n.pattern)],
           node,
         );
-        this.emit(bc, [this.OP.NEW, 2], node);
-        break;
+        const flagsReg = ctx.allocReg();
+        this.emit(
+          bc,
+          [this.OP.LOAD_CONST, flagsReg, b.constantOperand(n.flags)],
+          node,
+        );
+        const dst = ctx.allocReg();
+        this.emit(
+          bc,
+          [this.OP.NEW, dst, regExpReg, 2, patternReg, flagsReg],
+          node,
+        );
+        return dst;
       }
 
       case "FunctionExpression": {
-        // Compile into a descriptor exactly like a declaration,
-        // but leave the resulting closure ON THE STACK -- no store.
-        // The surrounding expression (assignment, call arg, return) consumes it.
-        const desc = this._compileFunctionDecl(node);
-        this._emitMakeClosure(desc, node, bc);
-        break;
+        const desc = this._compileFunctionDecl(node as t.FunctionExpression);
+        return this._emitMakeClosure(desc, node, bc);
       }
 
       case "MemberExpression": {
-        this._compileExpr(node.object, scope, bc);
-        if (node.computed) {
-          // nums[i] -- key is runtime value
-          this._compileExpr(node.property, scope, bc);
+        const n = node as t.MemberExpression;
+        const objReg = this._compileExpr(n.object, scope, bc);
+        let keyReg: number;
+        if (n.computed) {
+          keyReg = this._compileExpr(n.property as t.Expression, scope, bc);
         } else {
-          // point.x -- push key as string, same opcode handles both
+          keyReg = ctx.allocReg();
           this.emit(
             bc,
-            [this.OP.LOAD_CONST, b.constantOperand(node.property.name)],
+            [
+              this.OP.LOAD_CONST,
+              keyReg,
+              b.constantOperand((n.property as t.Identifier).name),
+            ],
             node,
           );
         }
-
-        // GET_PROP_COMPUTED pops the object -- correct for value access.
-        // GET_PROP (peek) is only used in CallExpression's method call path
-        // where the receiver must survive on the stack for CALL_METHOD.
-        this.emit(bc, [this.OP.GET_PROP_COMPUTED], node);
-        break;
+        const dst = ctx.allocReg();
+        this.emit(bc, [this.OP.GET_PROP, dst, objReg, keyReg], node);
+        return dst;
       }
 
       case "ArrayExpression": {
-        // Compile each element left->right, then BUILD_ARRAY collapses them.
-        // Sparse arrays (holes) get explicit undefined per slot.
-        for (const el of node.elements) {
+        const n = node as t.ArrayExpression;
+        const elemRegs = n.elements.map((el) => {
           if (el === null) {
-            // hole: e.g. [1,,3]
+            const r = ctx.allocReg();
             this.emit(
               bc,
-              [this.OP.LOAD_CONST, b.constantOperand(undefined)],
+              [this.OP.LOAD_CONST, r, b.constantOperand(undefined)],
               node,
             );
-          } else {
-            this._compileExpr(el, scope, bc);
+            return r;
           }
-        }
-        this.emit(bc, [this.OP.BUILD_ARRAY, node.elements.length], node);
-        break;
+          return this._compileExpr(el as t.Expression, scope, bc);
+        });
+        const dst = ctx.allocReg();
+        this.emit(
+          bc,
+          [this.OP.BUILD_ARRAY, dst, n.elements.length, ...elemRegs],
+          node,
+        );
+        return dst;
       }
+
       case "ObjectExpression": {
-        // Separate regular data properties from ES5 accessor methods (get/set).
+        const n = node as t.ObjectExpression;
         const regularProps: t.ObjectProperty[] = [];
         const accessorProps: t.ObjectMethod[] = [];
 
-        for (const prop of node.properties) {
-          if (prop.type === "SpreadElement") {
+        for (const prop of n.properties) {
+          if (prop.type === "SpreadElement")
             throw new Error("Object spread not supported");
-          }
           if (prop.type === "ObjectMethod") {
             if (prop.kind === "get" || prop.kind === "set") {
-              if (prop.computed) {
+              if (prop.computed)
                 throw new Error(
                   "Computed getter/setter keys are not supported",
                 );
-              }
               accessorProps.push(prop);
             } else {
-              throw new Error(`Shorthand method syntax is not supported`);
+              throw new Error("Shorthand method syntax is not supported");
             }
           } else {
             regularProps.push(prop as t.ObjectProperty);
           }
         }
 
-        // Build the base object from data properties.
+        // Build flat [key, val, key, val, …] register list.
+        const pairRegs: number[] = [];
         for (const prop of regularProps) {
-          const key = prop.key;
           let keyStr: string;
-          if (key.type === "Identifier") {
-            keyStr = key.name;
-          } else if (
+          const key = prop.key;
+          if (key.type === "Identifier") keyStr = key.name;
+          else if (
             key.type === "StringLiteral" ||
             key.type === "NumericLiteral"
-          ) {
+          )
             keyStr = String(key.value);
-          } else {
-            throw new Error(`Unsupported object key type: ${key.type}`);
-          }
-          this.emit(bc, [this.OP.LOAD_CONST, b.constantOperand(keyStr)], node);
-          this._compileExpr(prop.value, scope, bc);
-        }
-        this.emit(bc, [this.OP.BUILD_OBJECT, regularProps.length], node);
+          else throw new Error(`Unsupported object key type: ${key.type}`);
 
-        // Define each accessor on the object that is now on top of the stack.
-        // Stack after BUILD_OBJECT: [..., obj]
-        // For each accessor: DUP obj, push key, compile fn, DEFINE_GETTER/DEFINE_SETTER
-        // DEFINE_GETTER/DEFINE_SETTER pops fn+key+obj, leaving the original obj.
+          const keyReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.LOAD_CONST, keyReg, b.constantOperand(keyStr)],
+            node,
+          );
+          const valReg = this._compileExpr(
+            prop.value as t.Expression,
+            scope,
+            bc,
+          );
+          pairRegs.push(keyReg, valReg);
+        }
+
+        const dst = ctx.allocReg();
+        this.emit(
+          bc,
+          [this.OP.BUILD_OBJECT, dst, regularProps.length, ...pairRegs],
+          node,
+        );
+
+        // Define accessors on the object now sitting in `dst`.
         for (const prop of accessorProps) {
           const key = prop.key;
           let keyStr: string;
-          if (key.type === "Identifier") {
-            keyStr = key.name;
-          } else if (
+          if (key.type === "Identifier") keyStr = key.name;
+          else if (
             key.type === "StringLiteral" ||
             key.type === "NumericLiteral"
-          ) {
+          )
             keyStr = String(key.value);
-          } else {
-            throw new Error(`Unsupported object key type: ${key.type}`);
-          }
+          else throw new Error(`Unsupported object key type: ${key.type}`);
 
-          this.emit(bc, [this.OP.DUP], node); // dup so the original obj stays after the define
-          this.emit(bc, [this.OP.LOAD_CONST, b.constantOperand(keyStr)], node);
-
-          // Compile the accessor body as an anonymous function descriptor.
-          const desc = this._compileFunctionDecl(prop as any);
-          this._emitMakeClosure(desc, prop as any, bc);
-
+          const keyReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.LOAD_CONST, keyReg, b.constantOperand(keyStr)],
+            node,
+          );
+          const fnReg = this._emitMakeClosure(
+            this._compileFunctionDecl(prop as any),
+            prop as any,
+            bc,
+          );
           this.emit(
             bc,
             [
               prop.kind === "get"
                 ? this.OP.DEFINE_GETTER
                 : this.OP.DEFINE_SETTER,
+              dst,
+              keyReg,
+              fnReg,
             ],
             node,
           );
         }
 
-        break;
+        return dst;
       }
 
       default: {
-        throw new Error(`Unsupported expression: ${node.type}`);
+        throw new Error(`Unsupported expression: ${(node as any).type}`);
       }
     }
   }
 }
 
-// Serializer
-// Turns the compiled output into a commented JS source string.
-// Expects fully-resolved bytecode (all label refs and constant refs already
-// converted to plain integers by resolveLabels + resolveConstants passes).
+// ── Serializer ────────────────────────────────────────────────────────────────
 class Serializer {
   compiler: Compiler;
 
@@ -1807,30 +2106,38 @@ class Serializer {
   get options() {
     return this.compiler.options;
   }
-
   get OP() {
     return this.compiler.OP;
   }
-
   get OP_NAME() {
     return this.compiler.OP_NAME;
   }
-
   get JUMP_OPS() {
     return this.compiler.JUMP_OPS;
   }
 
-  // Produce a JS literal for a constant pool entry
-  _serializeConst(val) {
+  _serializeConst(val: any) {
     if (val === null) return "null";
     if (val === undefined) return "undefined";
-    return JSON.stringify(val); // number / string / bool
+    return JSON.stringify(val);
   }
 
-  // One instruction -> "[op, op1, op2, ...]  // MNEMONIC description"
-  // Expects a fully-resolved instruction: all operands are plain numbers.
-  // Returns { text, values } where values is the flat u16 slots for this
-  // instruction (opcode first, then one entry per operand).
+  // Reverse the concealment applied by resolveConstants so disassembly comments
+  // always show the plaintext value regardless of the concealConstants option.
+  _decryptConst(constants: any[], idx: number, key: number): any {
+    const v = constants[idx];
+    if (!key) return v;
+    if (typeof v === "number") return v ^ key;
+    // String: base64 → u16 LE byte pairs → XOR with (key + i) (mirrors _readConstant)
+    const bytes = Buffer.from(v as string, "base64");
+    let out = "";
+    for (let i = 0; i < bytes.length / 2; i++) {
+      const code = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
+      out += String.fromCharCode(code ^ ((key + i) & 0xffff));
+    }
+    return out;
+  }
+
   _serializeInstr(
     instr: b.Instruction,
     constants: any[],
@@ -1848,74 +2155,90 @@ class Serializer {
     }
     ok(op >= 0 && op <= 0xffff, `Opcode overflow (max 0xFFFF u16): ${op}`);
 
-    const operand = resolvedOperands[0]; // first operand for single-operand comment cases
     const name = this.OP_NAME[op] || `OP_${op}`;
     let comment = name;
 
+    function formatLoc(loc: t.Node["loc"]["start"]) {
+      return loc ? `${loc.line}:${loc.column}` : "";
+    }
+
     const sourceNode = instr[SOURCE_NODE_SYM];
-    const sourceLocation = sourceNode
-      ? sourceNode.loc.start?.line +
-        ":" +
-        sourceNode.loc.start?.column +
-        "-" +
-        (sourceNode.loc.end?.line + ":" + sourceNode.loc.end?.column)
+    const sourceLocation = sourceNode?.loc
+      ? [formatLoc(sourceNode.loc.start), formatLoc(sourceNode.loc.end)]
+          .filter(Boolean)
+          .join("-")
       : "";
 
-    // Annotate with human-readable operand meaning
     if (resolvedOperands.length > 0) {
+      // Operand[0] is always `dst` for instruction types that produce a value.
+      const dst = resolvedOperands[0];
+
       switch (op) {
         case this.OP.LOAD_CONST: {
-          const val = constants[operand];
-          comment += `  ${this._serializeConst(val)}`;
+          // resolvedOperands: [dst, constIdx, concealKey]
+          const val = this._decryptConst(
+            constants,
+            resolvedOperands[1],
+            resolvedOperands[2],
+          );
+          comment += `  reg[${dst}] = ${this._serializeConst(val)}`;
           break;
         }
-        case this.OP.MAKE_CLOSURE: {
-          comment += `  PC ${operand} (params=${resolvedOperands[1]} locals=${resolvedOperands[2]} upvalues=${resolvedOperands[3]})`;
+        case this.OP.LOAD_GLOBAL:
+          // resolvedOperands: [dst, constIdx, concealKey]
+          comment += `  reg[${dst}] = ${this._decryptConst(constants, resolvedOperands[1], resolvedOperands[2])}`;
           break;
-        }
-        case this.OP.LOAD_LOCAL:
-        case this.OP.STORE_LOCAL:
-          comment += `  slot[${operand}]`;
+        case this.OP.STORE_GLOBAL:
+          // resolvedOperands: [constIdx, concealKey, srcReg]
+          comment += `  ${this._decryptConst(constants, resolvedOperands[0], resolvedOperands[1])} = reg[${resolvedOperands[2]}]`;
           break;
         case this.OP.LOAD_UPVALUE:
-        case this.OP.STORE_UPVALUE:
-          comment += `  upvalue[${operand}]`;
+          comment += `  reg[${dst}] = upvalue[${resolvedOperands[1]}]`;
           break;
-        case this.OP.LOAD_GLOBAL:
-        case this.OP.STORE_GLOBAL:
-          comment += `  "${constants[operand]}"`;
+        case this.OP.STORE_UPVALUE:
+          comment += `  upvalue[${resolvedOperands[0]}] = reg[${resolvedOperands[1]}]`;
+          break;
+        case this.OP.MOVE:
+          comment += `  reg[${dst}] = reg[${resolvedOperands[1]}]`;
+          break;
+        case this.OP.MAKE_CLOSURE:
+          comment += `  reg[${dst}] PC=${resolvedOperands[1]} (params=${resolvedOperands[2]} regs=${resolvedOperands[3]} upvalues=${resolvedOperands[4]})`;
           break;
         case this.OP.CALL:
+          comment += `  reg[${dst}] = call(reg[${resolvedOperands[1]}], ${resolvedOperands[2]} args)`;
+          break;
         case this.OP.CALL_METHOD:
-          comment += `  (${operand} args)`;
-          break;
-        case this.OP.BUILD_ARRAY:
-          comment += `  (${operand} elements)`;
-          break;
-        case this.OP.BUILD_OBJECT:
-          comment += `  (${operand} pairs)`;
+          comment += `  reg[${dst}] = method(recv=reg[${resolvedOperands[1]}], fn=reg[${resolvedOperands[2]}], ${resolvedOperands[3]} args)`;
           break;
         case this.OP.NEW:
-          comment += `  (${operand} args)`;
+          comment += `  reg[${dst}] = new reg[${resolvedOperands[1]}](${resolvedOperands[2]} args)`;
+          break;
+        case this.OP.RETURN:
+          comment += `  reg[${resolvedOperands[0]}]`;
+          break;
+        case this.OP.BUILD_ARRAY:
+          comment += `  reg[${dst}] = [${resolvedOperands[2]} elems]`;
+          break;
+        case this.OP.BUILD_OBJECT:
+          comment += `  reg[${dst}] = {${resolvedOperands[1]} pairs}`;
           break;
         default:
           comment +=
             resolvedOperands.length === 1
-              ? `  ${operand}`
+              ? `  ${resolvedOperands[0]}`
               : `  [${resolvedOperands.join(", ")}]`;
       }
     }
 
-    comment = comment.padEnd(40) + sourceLocation;
+    comment = comment.padEnd(50) + sourceLocation;
 
     const values = [op, ...resolvedOperands];
     const instrText = `[${values.join(", ")}]`;
-    const text = `${(instrText + ",").padEnd(12)} ${comment}`;
+    const text = `${(instrText + ",").padEnd(20)} ${comment}`;
 
     return { text, values };
   }
 
-  // Serialize the CONSTANTS array
   _serializeConstants(constants: any[]) {
     const lines = ["var CONSTANTS = ["];
     constants.forEach((val, idx) => {
@@ -1925,8 +2248,6 @@ class Serializer {
     return lines.join("\n");
   }
 
-  // Filter out any remaining null-opcode pseudo-instructions.
-  // (defineLabel pseudo-ops are already stripped by resolveLabels.)
   _serializeBytecode(
     bytecode: b.Bytecode,
     compiler: Compiler,
@@ -1937,23 +2258,23 @@ class Serializer {
 
       const specializedOpInfo = compiler.SPECIALIZED_OPS[instr[0]];
       if (specializedOpInfo) {
-        const resolvedValue = (instr[1] as any)?.resolvedValue ?? instr[1];
-        const originalName = compiler.OP_NAME[specializedOpInfo.originalOp];
+        const operands = instr.slice(1);
 
-        compiler.OP_NAME[instr[0]] = `${originalName}_${resolvedValue}`;
-        specializedOpInfo.resolvedOperand = instr[1];
+        const resolvedValues = operands.map(
+          (o) => (o as any)?.resolvedValue ?? o,
+        );
+        const originalName = compiler.OP_NAME[specializedOpInfo.originalOp];
+        compiler.OP_NAME[instr[0]] =
+          `${originalName}_${resolvedValues.join("_")}`;
+        specializedOpInfo.resolvedOperands = operands;
       }
 
       serialized.push(instr);
     }
-
-    return {
-      bytecode: serialized,
-    };
+    return { bytecode: serialized };
   }
 
   _encodeBytecode(flat: number[]) {
-    // Encode as little-endian Uint16Array -> base64.
     const buf = new Uint8Array(flat.length * 2);
     flat.forEach((w, i) => {
       buf[i * 2] = w & 0xff;
@@ -1964,6 +2285,7 @@ class Serializer {
 
   serialize(bytecode: b.Bytecode, constants: any[], compiler: Compiler) {
     const mainStartPc = compiler.mainStartPc;
+    const mainRegCount = compiler.mainRegCount;
     let sections = [];
 
     var textForm = [];
@@ -1981,23 +2303,20 @@ class Serializer {
     const flat = bytecodeResult.bytecode.flatMap((instr) => {
       let filtered = instr.filter((x) => (x as any)?.placeholder !== true);
       let resolved = filtered.map((x) => (x as any)?.resolvedValue ?? x);
-
       return resolved as number[];
     });
 
     if (this.options.encodeBytecode) {
       sections.push(`var BYTECODE = "${this._encodeBytecode(flat)}";`);
     } else {
-      // Flatten each [op, ...operands] instruction into individual u16 slots.
-
       sections.push(`var BYTECODE = [${flat.join(",")}]`);
     }
 
-    // MAIN_START_PC
     sections.push(`var MAIN_START_PC = ${mainStartPc};`);
+    sections.push(`var MAIN_REG_COUNT = ${mainRegCount};`);
     sections.push(`var ENCODE_BYTECODE = ${!!this.options.encodeBytecode};`);
     sections.push(`var TIMING_CHECKS = ${!!this.options.timingChecks};`);
-    // Opcodes
+
     const object = t.objectExpression(
       Object.entries(this.OP).map(([name, value]) =>
         t.objectProperty(t.identifier(name), t.numericLiteral(value)),
@@ -2005,12 +2324,9 @@ class Serializer {
     );
     sections.push(`var OP = ${generate(object).code};`);
 
-    // Constants must be defined before the bytecode
     initBody.push(this._serializeConstants(constants));
 
     sections = [...initBody, ...sections];
-
-    // VM runtime
     sections.push(VM_RUNTIME);
 
     return sections.join("\n\n");
@@ -2024,11 +2340,10 @@ export async function compileAndSerialize(
   const compiler = new Compiler(options);
   let bytecode = compiler.compile(sourceCode);
 
-  // User transform passes (operate on unresolved IR with label/constant refs)
-  // macroOpcodes must run after selfModifying (so PATCH-stub bodies are in place)
   const passes = [];
 
-  // Due to current implementation, specialized must run BEFORE macroOpcodes
+  passes.push(concealConstants);
+
   if (options.specializedOpcodes) {
     passes.push(specializedOpcodes);
   }
@@ -2041,29 +2356,40 @@ export async function compileAndSerialize(
     passes.push(selfModifying);
   }
 
+  if (options.aliasedOpcodes) {
+    passes.push(aliasedOpcodes);
+  }
+
   for (const pass of passes) {
     const passResult = pass(bytecode, compiler);
     bytecode = passResult.bytecode;
   }
 
-  // Assembler phases: resolve IR operands to plain integers before printing
-  const { bytecode: labelResolved } = resolveLabels(bytecode, compiler);
-  let { bytecode: finalBytecode, constants } = resolveConstants(labelResolved);
+  // Resolve label references to flat bytecode indices.
+  const labelsResult = resolveLabels(bytecode, compiler);
+  bytecode = labelsResult.bytecode;
 
-  const output = compiler.serializer.serialize(
-    finalBytecode,
-    constants,
+  // Set mainStartPc from the first function descriptor (or 0 for top-level start).
+  compiler.mainStartPc = compiler.mainFn.startPc;
+
+  // Resolve constant references to pool indices (+ conceal key operand).
+  const constResult = resolveConstants(bytecode, compiler);
+  bytecode = constResult.bytecode;
+  compiler.constants = constResult.constants;
+
+  // Build and obfuscate the runtime.
+  const runtimeSource = compiler.serializer.serialize(
+    bytecode,
+    constResult.constants,
     compiler,
   );
 
-  const finalOutput = await obfuscateRuntime(
-    output,
-    finalBytecode,
+  const code = await obfuscateRuntime(
+    runtimeSource,
+    bytecode,
     options,
     compiler,
   );
 
-  return {
-    code: finalOutput,
-  };
+  return { code };
 }

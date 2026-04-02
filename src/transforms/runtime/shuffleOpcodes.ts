@@ -1,7 +1,7 @@
 import * as t from "@babel/types";
 import traverseImport from "@babel/traverse";
 import { ok } from "assert";
-import { shuffle } from "../utils/random-utils.ts";
+import { shuffle } from "../../utils/random-utils.ts";
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
 
