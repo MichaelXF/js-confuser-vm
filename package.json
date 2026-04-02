@@ -1,6 +1,6 @@
 {
   "name": "js-confuser-vm",
-  "version": "0.0.8",
+  "version": "0.0.9",
   "main": "dist/index.js",
   "scripts": {
     "build": "babel src --out-dir dist --extensions \".ts,.js\"",
@@ -43,6 +43,14 @@
     "glob": "^13.0.6",
     "jest": "^30.2.0"
   },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/MichaelXF/js-confuser-vm"
+  },
+  "bugs": {
+    "url": "https://github.com/MichaelXF/js-confuser-vm/issues"
+  },
+  "homepage": "https://js-confuser.com/vm",
   "engines": {
     "node": ">=18.0.0"
   }
