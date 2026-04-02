@@ -2,6 +2,7 @@ import * as t from "@babel/types";
 import traverseImport from "@babel/traverse";
 import { ok } from "assert";
 import { Compiler } from "../../compiler.ts";
+import generate from "@babel/generator";
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
 
@@ -23,6 +24,43 @@ function extractCaseBody(switchCase: t.SwitchCase): t.Statement[] {
   return stmts.filter((s) => !t.isBreakStatement(s) && !t.isEmptyStatement(s));
 }
 
+export function getOpcodeToCaseMap(
+  switchStatement: t.SwitchStatement,
+  compiler: Compiler,
+): Map<number, t.SwitchCase> {
+  // Build a map  opName → SwitchCase  from the existing OP.xxx case tests.
+  const opcodeToCaseMap = new Map<number, t.SwitchCase>();
+  for (const sc of (switchStatement as t.SwitchStatement).cases) {
+    const test = sc.test;
+    if (!test) continue;
+
+    let opcode;
+    let opName;
+    if (
+      t.isMemberExpression(test) &&
+      t.isIdentifier(test.object, { name: "OP" }) &&
+      t.isIdentifier(test.property)
+    ) {
+      opName = test.property.name;
+      opcode = +Object.keys(compiler.OP_NAME).find(
+        (key) => compiler.OP_NAME[key] == opName,
+      );
+    } else if (t.isNumericLiteral(test)) {
+      opcode = test.value;
+    }
+
+    ok(
+      typeof opcode === "number" && !Number.isNaN(opcode),
+      `Failed to parse ${opcode} from ${opName}`,
+    );
+    if (opcode !== undefined) {
+      opcodeToCaseMap.set(opcode, sc);
+    }
+  }
+
+  return opcodeToCaseMap;
+}
+
 // Append a generated switch case for every entry in compiler.MACRO_OPS.
 // Each case inlines the constituent case bodies directly — no operand stack,
 // no substitution needed.  Because every opcode handler now reads its own
@@ -42,19 +80,7 @@ export function applyMacroOpcodes(ast: t.File, compiler: Compiler): void {
 
   ok(switchStatement, "Could not find @SWITCH statement for macro opcodes");
 
-  // Build a map  opName → SwitchCase  from the existing OP.xxx case tests.
-  const nameToCaseMap = new Map<string, t.SwitchCase>();
-  for (const sc of (switchStatement as t.SwitchStatement).cases) {
-    const test = sc.test;
-    if (
-      test &&
-      t.isMemberExpression(test) &&
-      t.isIdentifier(test.object, { name: "OP" }) &&
-      t.isIdentifier(test.property)
-    ) {
-      nameToCaseMap.set((test.property as t.Identifier).name, sc);
-    }
-  }
+  const opcodeToCaseMap = getOpcodeToCaseMap(switchStatement, compiler);
 
   for (const [macroOpStr, constituentOps] of Object.entries(
     compiler.MACRO_OPS,
@@ -66,21 +92,22 @@ export function applyMacroOpcodes(ast: t.File, compiler: Compiler): void {
     const constituentCases: t.SwitchCase[] = [];
     let allFound = true;
     for (const opVal of constituentOps) {
-      const opName = compiler.OP_NAME[opVal];
-      if (!opName) {
-        allFound = false;
-        break;
-      }
-      const found = nameToCaseMap.get(opName);
+      const found = opcodeToCaseMap.get(opVal);
       if (!found) {
         allFound = false;
         break;
       }
       constituentCases.push(found);
     }
-    if (!allFound) continue;
+    if (!allFound) {
+      throw new Error(
+        `Could not find all constituent ops for macro op ${macroOpCode}`,
+      );
+    }
 
     const opNames = constituentOps.map((v) => compiler.OP_NAME[v] ?? `OP_${v}`);
+    let newName = opNames.join(",");
+    compiler.OP_NAME[macroOpCode] = newName;
 
     // ── Build the macro case body ──────────────────────────────────────────
     // Clone and inline each sub-instruction's case body directly.

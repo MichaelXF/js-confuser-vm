@@ -1,11 +1,11 @@
+import * as t from "@babel/types";
+import * as b from "./types.ts";
 import { parse } from "@babel/parser";
 import traverseImport from "@babel/traverse";
 import { generate } from "@babel/generator";
-
-import { readFileSync } from "fs";
 import { join } from "path";
+import { readFileSync } from "fs";
 import { stripTypeScriptTypes } from "module";
-import * as t from "@babel/types";
 import { ok } from "assert";
 import { obfuscateRuntime } from "./build-runtime.ts";
 import { DEFAULT_OPTIONS, type Options } from "./options.ts";
@@ -13,7 +13,7 @@ import { resolveLabels } from "./transforms/bytecode/resolveLabels.ts";
 import { resolveConstants } from "./transforms/bytecode/resolveContants.ts";
 import { selfModifying } from "./transforms/bytecode/selfModifying.ts";
 import { macroOpcodes } from "./transforms/bytecode/macroOpcodes.ts";
-import * as b from "./types.ts";
+import { microOpcodes } from "./transforms/bytecode/microOpcodes.ts";
 import { specializedOpcodes } from "./transforms/bytecode/specializedOpcodes.ts";
 import { aliasedOpcodes } from "./transforms/bytecode/aliasedOpcodes.ts";
 import { getRandomInt } from "./utils/random-utils.ts";
@@ -264,10 +264,21 @@ export class Compiler {
     {
       originalOp: number;
       operands: b.InstrOperand[];
-      resolvedOperands?: b.InstrOperand[];
     }
   >;
   ALIASED_OPS: Record<number, { originalOp: number; order: number[] }>;
+  MICRO_OPS: Record<
+    number,
+    { originalOp: number; stmtIndex: number; irOperandCount: number }
+  >;
+
+  /** Internal variable slot registry.
+   *  globally: shared name→index pool (written on first sight; reused by non-random mode or by 50% chance in random mode).
+   *  opcodes:  per-opcode source-of-truth — all assignment lookups are read/written here. */
+  _internals: {
+    globally: Map<string, number>;
+    opcodes: Map<number, Map<string, number>>;
+  };
 
   OP_NAME: Record<number, string>;
   JUMP_OPS: Set<number>;
@@ -293,8 +304,10 @@ export class Compiler {
 
     this.serializer = new Serializer(this);
     this.MACRO_OPS = {};
+    this.MICRO_OPS = {};
     this.SPECIALIZED_OPS = {};
     this.ALIASED_OPS = {};
+    this._internals = { globally: new Map(), opcodes: new Map() };
 
     this.OP = { ...OP_ORIGINAL };
 
@@ -455,14 +468,6 @@ export class Compiler {
   }
 
   compileAST(ast: t.File) {
-    traverse(ast, {
-      FunctionDeclaration: (path) => {
-        if (path.parent.type !== "Program") return;
-        this._compileFunctionDecl(path.node);
-        path.skip();
-      },
-    });
-
     this._compileMain(ast.program.body);
     return this.bytecode;
   }
@@ -1291,14 +1296,10 @@ export class Compiler {
 
       case "TryStatement": {
         if (node.finalizer) {
-          throw new Error(
-            "try..finally is not supported. Use a helper function instead",
-          );
+          throw new Error("try..finally is not supported");
         }
         if (!node.handler) {
-          throw new Error(
-            "try without catch is not supported (requires finally).",
-          );
+          throw new Error("try without catch is not supported");
         }
 
         const catchLabel = this._makeLabel("catch");
@@ -1538,6 +1539,45 @@ export class Compiler {
         return reg_result;
       }
 
+      case "TemplateLiteral": {
+        const n = node as t.TemplateLiteral;
+        // Fold: quasi[0] + expr[0] + quasi[1] + ... + quasi[last]
+        let acc = ctx.allocReg();
+        this.emit(
+          bc,
+          [
+            this.OP.LOAD_CONST,
+            acc,
+            b.constantOperand(n.quasis[0].value.cooked ?? ""),
+          ],
+          node,
+        );
+        for (let i = 0; i < n.expressions.length; i++) {
+          const exprReg = this._compileExpr(
+            n.expressions[i] as t.Expression,
+            scope,
+            bc,
+          );
+          const t1 = ctx.allocReg();
+          this.emit(bc, [this.OP.ADD, t1, acc, exprReg], node);
+          acc = t1;
+          const quasiReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [
+              this.OP.LOAD_CONST,
+              quasiReg,
+              b.constantOperand(n.quasis[i + 1].value.cooked ?? ""),
+            ],
+            node,
+          );
+          const t2 = ctx.allocReg();
+          this.emit(bc, [this.OP.ADD, t2, acc, quasiReg], node);
+          acc = t2;
+        }
+        return acc;
+      }
+
       case "BinaryExpression": {
         const n = node as t.BinaryExpression;
         const lhsReg = this._compileExpr(n.left as t.Expression, scope, bc);
@@ -1579,15 +1619,68 @@ export class Compiler {
 
       case "UpdateExpression": {
         const n = node as t.UpdateExpression;
+        const bumpOp = n.operator === "++" ? this.OP.ADD : this.OP.SUB;
+
+        // Shared: compute curReg +/- 1 into newReg, return [postfixResult, newReg]
+        const applyBump = (curReg: number): [number, number] => {
+          const postfixReg = n.prefix
+            ? -1
+            : (() => {
+                const r = ctx.allocReg();
+                this.emit(bc, [this.OP.MOVE, r, curReg], node as t.Node);
+                return r;
+              })();
+          const oneReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.LOAD_CONST, oneReg, b.constantOperand(1)],
+            node as t.Node,
+          );
+          const newReg = ctx.allocReg();
+          this.emit(bc, [bumpOp, newReg, curReg, oneReg], node as t.Node);
+          return [postfixReg, newReg];
+        };
+
+        if (n.argument.type === "MemberExpression") {
+          const mem = n.argument as t.MemberExpression;
+          const objReg = this._compileExpr(mem.object, scope, bc);
+          let keyReg: number;
+          if (mem.computed) {
+            keyReg = this._compileExpr(mem.property as t.Expression, scope, bc);
+          } else {
+            keyReg = ctx.allocReg();
+            this.emit(
+              bc,
+              [
+                this.OP.LOAD_CONST,
+                keyReg,
+                b.constantOperand((mem.property as t.Identifier).name),
+              ],
+              node as t.Node,
+            );
+          }
+          const curReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.GET_PROP, curReg, objReg, keyReg],
+            node as t.Node,
+          );
+          const [postfixReg, newReg] = applyBump(curReg);
+          this.emit(
+            bc,
+            [this.OP.SET_PROP, objReg, keyReg, newReg],
+            node as t.Node,
+          );
+          return n.prefix ? newReg : postfixReg;
+        }
+
         ok(
           n.argument.type === "Identifier",
-          "UpdateExpression requires identifier",
+          "UpdateExpression requires identifier or member expression",
         );
         const name = (n.argument as t.Identifier).name;
         const res = this._resolve(name, this._currentCtx);
-        const bumpOp = n.operator === "++" ? this.OP.ADD : this.OP.SUB;
 
-        // Load current value into a register (locals are already in place)
         let curReg: number;
         if (res.kind === "local") {
           curReg = res.slot;
@@ -1607,27 +1700,8 @@ export class Compiler {
           );
         }
 
-        // For postfix we need to preserve the *old* value as the result
-        let resultReg: number;
-        if (!n.prefix) {
-          resultReg = ctx.allocReg();
-          this.emit(bc, [this.OP.MOVE, resultReg, curReg], node as t.Node);
-        } else {
-          resultReg = -1; // placeholder – will become newReg below
-        }
+        const [postfixReg, newReg] = applyBump(curReg);
 
-        const oneReg = ctx.allocReg();
-        this.emit(
-          bc,
-          [this.OP.LOAD_CONST, oneReg, b.constantOperand(1)],
-          node as t.Node,
-        );
-
-        // Compute new value (always into a fresh register)
-        const newReg = ctx.allocReg();
-        this.emit(bc, [bumpOp, newReg, curReg, oneReg], node as t.Node);
-
-        // Write the new value back (local = MOVE, others = STORE_xxx)
         if (res.kind === "local") {
           this.emit(bc, [this.OP.MOVE, res.slot, newReg], node as t.Node);
         } else if (res.kind === "upvalue") {
@@ -1644,12 +1718,7 @@ export class Compiler {
           );
         }
 
-        // Prefix returns the *new* value (we already have it in newReg – no reload needed)
-        if (n.prefix) {
-          resultReg = newReg;
-        }
-
-        return resultReg;
+        return n.prefix ? newReg : postfixReg;
       }
 
       case "AssignmentExpression": {
@@ -2138,12 +2207,11 @@ class Serializer {
     return out;
   }
 
-  _serializeInstr(
-    instr: b.Instruction,
-    constants: any[],
-  ): { text: string; values: number[] } {
+  _serializeInstr(instr: b.Instruction): { text: string; values: number[] } {
     const op = instr[0] as number;
     const operands = instr.slice(1) as number[];
+
+    const constants = this.compiler.constants;
 
     const resolvedOperands = operands
       .filter((operand) => (operand as any)?.placeholder !== true)
@@ -2155,7 +2223,11 @@ class Serializer {
     }
     ok(op >= 0 && op <= 0xffff, `Opcode overflow (max 0xFFFF u16): ${op}`);
 
-    const name = this.OP_NAME[op] || `OP_${op}`;
+    let name = this.OP_NAME[op];
+    if (!name || name.includes("{")) {
+      name = `OP_${op}`;
+    }
+
     let comment = name;
 
     function formatLoc(loc: t.Node["loc"]["start"]) {
@@ -2205,10 +2277,10 @@ class Serializer {
           comment += `  reg[${dst}] PC=${resolvedOperands[1]} (params=${resolvedOperands[2]} regs=${resolvedOperands[3]} upvalues=${resolvedOperands[4]})`;
           break;
         case this.OP.CALL:
-          comment += `  reg[${dst}] = call(reg[${resolvedOperands[1]}], ${resolvedOperands[2]} args)`;
+          comment += `  reg[${dst}] = reg[${resolvedOperands[1]}](${resolvedOperands[2]} args)`;
           break;
         case this.OP.CALL_METHOD:
-          comment += `  reg[${dst}] = method(recv=reg[${resolvedOperands[1]}], fn=reg[${resolvedOperands[2]}], ${resolvedOperands[3]} args)`;
+          comment += `  reg[${dst}] = reg[${resolvedOperands[2]}](recv=reg[${resolvedOperands[1]}], ${resolvedOperands[3]} args)`;
           break;
         case this.OP.NEW:
           comment += `  reg[${dst}] = new reg[${resolvedOperands[1]}](${resolvedOperands[2]} args)`;
@@ -2222,6 +2294,13 @@ class Serializer {
         case this.OP.BUILD_OBJECT:
           comment += `  reg[${dst}] = {${resolvedOperands[1]} pairs}`;
           break;
+        case this.OP.GET_PROP:
+          comment += `  reg[${dst}] = reg[${resolvedOperands[1]}][reg[${resolvedOperands[2]}]]`;
+          break;
+        case this.OP.SET_PROP:
+          comment += `  reg[${resolvedOperands[0]}][reg[${resolvedOperands[1]}]] = reg[${resolvedOperands[2]}]`;
+          break;
+
         default:
           comment +=
             resolvedOperands.length === 1
@@ -2266,7 +2345,6 @@ class Serializer {
         const originalName = compiler.OP_NAME[specializedOpInfo.originalOp];
         compiler.OP_NAME[instr[0]] =
           `${originalName}_${resolvedValues.join("_")}`;
-        specializedOpInfo.resolvedOperands = operands;
       }
 
       serialized.push(instr);
@@ -2288,17 +2366,8 @@ class Serializer {
     const mainRegCount = compiler.mainRegCount;
     let sections = [];
 
-    var textForm = [];
     var initBody = [];
-
     var bytecodeResult = this._serializeBytecode(bytecode, compiler);
-
-    for (const instr of bytecodeResult.bytecode) {
-      const serialized = this._serializeInstr(instr, constants);
-      textForm.push(serialized.text);
-    }
-
-    initBody.push(textForm.map((line) => `// ${line}`).join("\n"));
 
     const flat = bytecodeResult.bytecode.flatMap((instr) => {
       let filtered = instr.filter((x) => (x as any)?.placeholder !== true);
@@ -2348,6 +2417,10 @@ export async function compileAndSerialize(
     passes.push(specializedOpcodes);
   }
 
+  if (options.microOpcodes) {
+    passes.push(microOpcodes);
+  }
+
   if (options.macroOpcodes) {
     passes.push(macroOpcodes);
   }
@@ -2384,11 +2457,25 @@ export async function compileAndSerialize(
     compiler,
   );
 
+  // This part was purposefully pulled out Serializer as OP_NAME's get resolved during obfuscateRuntime
+  // So for the most useful comments, it's ran absolutely last
+  // Tests also rely on correct comments so it's required
+  const generateBytecodeComment = () => {
+    var lines = [];
+    for (const instr of bytecode) {
+      const serialized = compiler.serializer._serializeInstr(instr);
+      lines.push("// " + serialized.text);
+    }
+
+    return lines.join("\n");
+  };
+
   const code = await obfuscateRuntime(
     runtimeSource,
     bytecode,
     options,
     compiler,
+    generateBytecodeComment,
   );
 
   return { code };

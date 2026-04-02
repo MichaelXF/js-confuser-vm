@@ -8,7 +8,7 @@
 // each operand as a separate u16 slot in the bytecode array.
 export type InstrOperand =
   | number
-  | Op<{ type: "number"; value: number }>
+  | Op<{ type: "number"; value?: number }>
   | Op<{ type: "label"; label: string; offset?: number }>
   | Op<{ type: "defineLabel"; label: string }>
   | Op<{ type: "constant"; value: any }>;

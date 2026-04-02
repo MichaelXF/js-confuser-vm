@@ -2,7 +2,7 @@ import * as t from "@babel/types";
 import traverseImport from "@babel/traverse";
 import { ok } from "assert";
 import { Compiler } from "../../compiler.ts";
-import type * as b from "../../types.ts";
+import { getOpcodeToCaseMap } from "./macroOpcodes.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -33,6 +33,14 @@ function inlineFixedOperands(
   // Wrap the statements in a temporary BlockStatement so traverse has a root.
   // The replacement mutates the original statement objects in place.
   var replaced = 0;
+  function consumeOperand() {
+    const resolvedValue = resolvedValues[replaced++];
+    ok(
+      typeof resolvedValue === "number",
+      `Expected a numeric operand value, got ${resolvedValue}`,
+    );
+    return t.numericLiteral(resolvedValue);
+  }
 
   traverse(t.blockStatement(bodyStmts), {
     noScope: true,
@@ -49,14 +57,11 @@ function inlineFixedOperands(
       };
 
       if (isMethodCall("_operand")) {
-        path.replaceWith(t.numericLiteral(resolvedValues[replaced++]));
+        path.replaceWith(consumeOperand());
       }
 
       if (isMethodCall("_constant")) {
-        path.node.arguments = [
-          t.numericLiteral(resolvedValues[replaced++]),
-          t.numericLiteral(resolvedValues[replaced++]),
-        ];
+        path.node.arguments = [consumeOperand(), consumeOperand()];
       }
     },
   });
@@ -72,11 +77,7 @@ function inlineFixedOperands(
 // replaced by the constant integer that was captured at compile time.
 // Must be called AFTER applyMacroOpcodes (so the original cases exist) but
 // BEFORE applyShuffleOpcodes so the new specialized cases also get shuffled.
-export function applySpecializedOpcodes(
-  ast: t.File,
-  bytecode: b.Bytecode,
-  compiler: Compiler,
-): void {
+export function applySpecializedOpcodes(ast: t.File, compiler: Compiler): void {
   let switchStatement: t.SwitchStatement | null = null;
   traverse(ast, {
     SwitchStatement(path) {
@@ -93,18 +94,7 @@ export function applySpecializedOpcodes(
   );
 
   // Build a map  opName → SwitchCase  from the existing OP.xxx case tests.
-  const nameToCaseMap = new Map<string, t.SwitchCase>();
-  for (const sc of (switchStatement as t.SwitchStatement).cases) {
-    const test = sc.test;
-    if (
-      test &&
-      t.isMemberExpression(test) &&
-      t.isIdentifier(test.object, { name: "OP" }) &&
-      t.isIdentifier(test.property)
-    ) {
-      nameToCaseMap.set((test.property as t.Identifier).name, sc);
-    }
-  }
+  const opcodeToCaseMap = getOpcodeToCaseMap(switchStatement, compiler);
 
   if (!compiler.SPECIALIZED_OPS) return;
 
@@ -112,29 +102,34 @@ export function applySpecializedOpcodes(
     const specialOpCode = Number(specialOpStr);
     const { originalOp, operands } = info;
 
-    const newName = compiler.OP_NAME[specialOpCode];
+    let newName = compiler.OP_NAME[specialOpCode];
     const originalName = compiler.OP_NAME[originalOp];
-    if (!originalName) continue;
+    const originalCase = opcodeToCaseMap.get(originalOp);
 
-    const originalCase = nameToCaseMap.get(originalName);
-    if (!originalCase) continue;
+    ok(
+      originalCase,
+      `Could not find original case for opcode ${originalName} (${originalOp})`,
+    );
 
     // Clone the original handler body
     const bodyStmts: t.Statement[] = extractCaseBody(originalCase).map(
       (s) => t.cloneNode(s, true) as t.Statement,
     );
 
-    const placedOperands = info.resolvedOperands;
+    const placedOperands = info.operands;
     ok(placedOperands, `Could not find operand for original opcode ${newName}`);
 
     const resolvedValues = placedOperands.map((placedOperand) => {
       return (placedOperand as any)?.resolvedValue ?? placedOperand;
     });
 
-    ok(
-      !resolvedValues.find((v) => typeof v !== "number"),
-      "Expected a numeric operand value",
-    );
+    if (resolvedValues.find((v) => typeof v !== "number")) {
+      console.error(info);
+      throw new Error("Expected all resolved operand values to be numbers");
+    }
+
+    newName = `${originalName}_${resolvedValues.join("_")}`;
+    compiler.OP_NAME[specialOpCode] = newName;
 
     // Replace this._operand() with the baked-in constant
     inlineFixedOperands(bodyStmts, resolvedValues);

@@ -1,8 +1,10 @@
 import { generate } from "@babel/generator";
-import { parse, type ParseResult } from "@babel/parser";
+import { parse } from "@babel/parser";
 import type * as t from "@babel/types";
 import type { Options } from "./options.ts";
 import { applyMacroOpcodes } from "./transforms/runtime/macroOpcodes.ts";
+import { applyMicroOpcodes } from "./transforms/runtime/microOpcodes.ts";
+import { applyInteralVariablesToRuntime } from "./transforms/runtime/internalVariables.ts";
 import { applyShuffleOpcodes } from "./transforms/runtime/shuffleOpcodes.ts";
 import { applyMinify } from "./transforms/runtime/minify.ts";
 import { Compiler } from "./compiler.ts";
@@ -14,7 +16,8 @@ export async function obfuscateRuntime(
   runtime: string,
   bytecode: b.Bytecode,
   options: Options,
-  compiler?: Compiler,
+  compiler: Compiler,
+  generateBytecodeComment,
 ) {
   let ast: t.File;
   try {
@@ -25,7 +28,16 @@ export async function obfuscateRuntime(
 
   // Specialized opcode cases must be applied BEFORE shuffleOpcodes
   if (options.specializedOpcodes) {
-    applySpecializedOpcodes(ast, bytecode, compiler);
+    applySpecializedOpcodes(ast, compiler);
+  }
+
+  if (options.microOpcodes) {
+    applyInteralVariablesToRuntime(ast, compiler);
+  }
+
+  // Micro opcode cases must be applied BEFORE shuffleOpcodes
+  if (options.microOpcodes && Object.keys(compiler.MICRO_OPS).length > 0) {
+    applyMicroOpcodes(ast, compiler);
   }
 
   // Macro opcode cases must be applied BEFORE shuffleOpcodes
@@ -49,6 +61,9 @@ export async function obfuscateRuntime(
   } catch (error) {
     throw new Error("VM-Runtime final generation failed", { cause: error });
   }
+
+  // Add comment here for more accurate opcode names
+  generated = generateBytecodeComment() + "\n" + generated;
 
   // Minify code?
   if (options.minify) {

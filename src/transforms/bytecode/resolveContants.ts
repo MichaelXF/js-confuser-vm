@@ -19,8 +19,7 @@ function concealString(s: string, key: number): string {
   return Buffer.from(bytes).toString("base64");
 }
 
-// Resolve all {type:"constant", value} operands to a PAIR of integer operands:
-//   [constPoolIndex, concealKey]
+// Resolve all {type:"constant", value} (index) and {type:"constant", value, key: true} (key) operands
 //
 // constPoolIndex — index into the constants array (as before).
 // concealKey     — XOR key used to conceal this constant.
@@ -43,8 +42,6 @@ export function resolveConstants(
   const keyMap = new Map<number, number>(); // pool index → conceal key
 
   function intern(operand: b.InstrOperand): [b.InstrOperand, number] {
-    const operandAsObject =
-      typeof operand === "object" && operand ? operand : {};
     const value = (operand as any).value;
 
     let idx = constantsMap.get(value);
@@ -79,13 +76,11 @@ export function resolveConstants(
     }
 
     const idxOperand: any = {
-      ...(operandAsObject as object),
       type: "number",
       resolvedValue: idx,
     };
 
     const keyOperand: any = {
-      ...(operandAsObject as object),
       type: "number",
       resolvedValue: key,
     };
@@ -108,19 +103,17 @@ export function resolveConstants(
 
     if (hasConstant) {
       // 1-to-2 expansion: each {type:"constant"} becomes [constIdx, concealKey].
-      const newOperands: b.InstrOperand[] = [];
-      for (const operand of operands) {
+      const newOperands: b.InstrOperand[] = operands.map((operand) => {
         if ((operand as any)?.type === "constant") {
           const [idxOperand, key] = intern(operand);
-
           const newOperand = (operand as any)?.key ? key : idxOperand;
 
-          newOperands.push(newOperand);
-          // newOperands.push(key); // plain number — serialized as a regular u16 slot
+          return Object.assign(operand, newOperand);
         } else {
-          newOperands.push(operand);
+          return operand;
         }
-      }
+      });
+
       const newInstr = [op, ...newOperands] as b.Instruction;
       (newInstr as any)[SOURCE_NODE_SYM] = (instr as any)[SOURCE_NODE_SYM];
       resolved.push(newInstr);

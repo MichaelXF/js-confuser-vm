@@ -1,6 +1,7 @@
 import type { Bytecode, Instruction } from "../../types.ts";
 import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
 import { nextFreeSlot, U16_MAX } from "../../utils/op-utils.ts";
+import { ok } from "node:assert";
 
 // Opcodes that must not appear in a non-terminal position inside a macro window.
 // Jump ops: modifying frame._pc mid-execution causes the macro handler to
@@ -21,8 +22,7 @@ import { nextFreeSlot, U16_MAX } from "../../utils/op-utils.ts";
 // Algorithm:
 //   1. Count every eligible window of length 2–5 by its op-code signature.
 //   2. Keep sequences that appear >= 2 times; sort by frequency then length.
-//   3. Assign unused opcode values (0–255, not already claimed by compiler.OP)
-//      to the most-frequent candidates and store in compiler.MACRO_OPS.
+//   3. Use nextFreeSlot() to assign a new opcode to each of the best candidates
 //   4. Re-scan bytecode, replacing each matched sequence with a single
 //      multi-operand instruction:
 //        [macroOpCode, operands_of_instr_0..., operands_of_instr_1..., ...]
@@ -38,42 +38,38 @@ export function macroOpcodes(
     originalOpToName.set(opVal, name);
   }
 
+  // Names are used instead of codes as specialized opcodes may generate based off these and it should not be considered eligible still
+  const alwaysExcluded = [
+    "PATCH",
+    "TRY_SETUP",
+    "TRY_END",
+    "DEBUGGER",
+    "MAKE_CLOSURE",
+  ];
+
+  const nonTerminalExcluded = ["RETURN", "CALL", "CALL_METHOD", "NEW", "THROW"];
+
   function isEligible(
     op: number | null,
     compiler: Compiler,
     isLast: boolean = false,
   ): boolean {
     if (op === null) return false;
-    const { OP, JUMP_OPS } = compiler;
+    const { OP, JUMP_OPS, OP_NAME } = compiler;
     // Infrastructure and variable-length ops are never eligible.
-    const alwaysExcluded = new Set([
-      OP.PATCH,
-      OP.TRY_SETUP,
-      OP.TRY_END,
-      OP.DEBUGGER,
-      OP.MAKE_CLOSURE, // variable-length operands — cannot generate a static handler
-    ]);
-    if (alwaysExcluded.has(op)) return false;
+    const opName = OP_NAME[op];
+    ok(opName, `Unknown opcode ${op} (not in OP_NAME)`);
+    if (alwaysExcluded.find((name) => opName.includes(name))) return false;
+
     // Jump and frame-changing ops are only eligible as the terminal instruction.
     if (!isLast) {
       if (JUMP_OPS.has(op)) return false;
-      const nonTerminalExcluded = new Set([
-        OP.RETURN,
-        OP.CALL,
-        OP.CALL_METHOD,
-        OP.NEW,
-        OP.THROW,
-      ]);
-      if (nonTerminalExcluded.has(op)) return false;
-    }
-    return originalOpToName.has(op); // Only original Ops are eligible (specialized disallowed)
-  }
 
-  // Collect every opcode value already in use so we can find free slots.
-  const usedOpcodes = new Set<number>(
-    Object.values(compiler.OP).filter((v) => v !== undefined) as number[],
-  );
-  if (usedOpcodes.size > U16_MAX) return { bytecode: bc };
+      if (nonTerminalExcluded.find((name) => opName.includes(name)))
+        return false;
+    }
+    return OP_NAME[op] !== undefined;
+  }
 
   // ── Step 1: count window frequencies ──────────────────────────────────────
   const freqMap = new Map<string, { ops: number[]; count: number }>();
@@ -85,7 +81,8 @@ export function macroOpcodes(
       const ops: number[] = [];
       let valid = true;
       for (let j = 0; j < len; j++) {
-        const op = bc[i + j][0];
+        const instr = bc[i + j];
+        const op = instr[0];
         const isLast = j === len - 1;
         if (!isEligible(op, compiler, isLast)) {
           valid = false;
@@ -116,7 +113,7 @@ export function macroOpcodes(
 
   // ── Step 3: assign free opcode slots to the best candidates ───────────────
   for (let i = 0; i < candidates.length; i++) {
-    const macroOp = nextFreeSlot(usedOpcodes);
+    const macroOp = nextFreeSlot(compiler);
     if (macroOp === -1) break;
     const ops = candidates[i].ops;
     compiler.MACRO_OPS[macroOp] = ops;
@@ -169,7 +166,9 @@ export function macroOpcodes(
       // Each instruction contributes instr.slice(1) — zero or more operands.
       const allOperands: any[] = [];
       for (let j = 0; j < len; j++) {
-        allOperands.push(...bc[i + j].slice(1));
+        var instr = bc[i + j];
+        var operands = instr.slice(1);
+        allOperands.push(...operands);
       }
 
       const newInstr: Instruction = [macroOpCode, ...allOperands];

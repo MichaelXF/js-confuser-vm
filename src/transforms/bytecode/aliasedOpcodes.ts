@@ -46,15 +46,6 @@ export function aliasedOpcodes(
     baseOpValueToName.set(val as number, name);
   }
 
-  // Collect all currently used opcode slots (base + any dynamically assigned)
-  const usedOpcodes = new Set<number>(
-    Object.keys(compiler.OP_NAME)
-      .map((k) => parseInt(k, 10))
-      .filter((v) => !isNaN(v)),
-  );
-
-  if (usedOpcodes.size > U16_MAX) return { bytecode: bc };
-
   // ── Step 1: count frequency and determine arity for each eligible base opcode ─
   // We scan the actual post-transform bytecode so frequency reflects what's
   // really left (specialized/macro ops already consumed their share).
@@ -92,7 +83,7 @@ export function aliasedOpcodes(
   const aliasedOps: Compiler["ALIASED_OPS"] = {};
 
   for (const [originalOp, stats] of candidates) {
-    const aliasOp = nextFreeSlot(usedOpcodes);
+    const aliasOp = nextFreeSlot(compiler);
     if (aliasOp === -1) break;
 
     const arity = stats.arity!;
@@ -116,8 +107,7 @@ export function aliasedOpcodes(
     aliasMap.set(originalOp, aliasOp);
     aliasedOps[aliasOp] = { originalOp, order };
 
-    const originalName =
-      compiler.OP_NAME[originalOp] ?? `OP_${originalOp}`;
+    const originalName = compiler.OP_NAME[originalOp] ?? `OP_${originalOp}`;
     compiler.OP_NAME[aliasOp] = `ALIAS_${originalName}_${order.join("_")}`;
   }
 

@@ -5,6 +5,17 @@ import {
   nextFreeSlot,
   U16_MAX,
 } from "../../utils/op-utils.ts";
+import * as t from "@babel/types";
+import * as b from "../../types.ts";
+
+export const nSizedOps = [
+  "MAKE_CLOSURE",
+  "BUILD_ARRAY",
+  "BUILD_OBJECT",
+  "CALL",
+  "CALL_METHOD",
+  "NEW",
+];
 
 // Creates specialized opcodes for the most frequent (OPCODE + single_integer_operand) pairs.
 // Example: [OP.LOAD_CONST, 1] becomes [SPECIALIZED_LOAD_CONST_1].
@@ -15,23 +26,7 @@ export function specializedOpcodes(
   bc: Bytecode,
   compiler: Compiler,
 ): { bytecode: Bytecode } {
-  const disallowedOps = new Set([
-    compiler.OP.MAKE_CLOSURE,
-    compiler.OP.BUILD_ARRAY,
-    compiler.OP.BUILD_OBJECT,
-    compiler.OP.CALL,
-    compiler.OP.CALL_METHOD,
-    compiler.OP.NEW,
-  ]);
-
-  // ── Collect used opcodes exactly as specified ─────────────────────────────
-  const usedOpcodes = new Set<number>(
-    Object.keys(compiler.OP_NAME)
-      .map((k) => parseInt(k, 10))
-      .filter((v) => !isNaN(v)) as number[],
-  );
-
-  if (usedOpcodes.size > U16_MAX) return { bytecode: bc };
+  const disallowedOps = new Set(nSizedOps.map((name) => compiler.OP[name]));
 
   // ── Step 1: count frequency of eligible (op, operand) pairs ───────────────
   const freqMap = new Map<
@@ -52,7 +47,22 @@ export function specializedOpcodes(
     const operandCount = getInstructionSize(instr) - 1;
     if (operandCount < 1 || operandCount > 6) continue;
 
-    const operands = instr.slice(1);
+    // Convert numbers into operand objects so they can be modified elsewhere and preserved
+    const oldOperands = instr.slice(1);
+    const operands = oldOperands.map((operand) => {
+      if (typeof operand === "number") {
+        return {
+          type: "number",
+          value: operand,
+          resolvedValue: operand,
+        } as InstrOperand;
+      }
+      return operand;
+    });
+
+    instr.length = 1;
+    instr.push(...operands);
+
     const operandsKey = JSON.stringify(operands);
 
     const key = `${op},${operandsKey}`;
@@ -60,7 +70,12 @@ export function specializedOpcodes(
     if (entry) {
       entry.occurences++;
     } else {
-      freqMap.set(key, { op, operands, operandsKey, occurences: 1 });
+      freqMap.set(key, {
+        op,
+        operands,
+        operandsKey,
+        occurences: 1,
+      });
     }
   }
 
@@ -76,7 +91,7 @@ export function specializedOpcodes(
   const specializedOps: Compiler["SPECIALIZED_OPS"] = {};
 
   for (let i = 0; i < candidates.length; i++) {
-    const specialOp = nextFreeSlot(usedOpcodes);
+    const specialOp = nextFreeSlot(compiler);
     if (specialOp === -1) break;
     const { op: originalOp, operands, operandsKey } = candidates[i];
 
@@ -118,21 +133,16 @@ export function specializedOpcodes(
     }
 
     const newOperands = operands.map((operand) => {
-      const operandAsObject =
+      const operandAsObject: any =
         typeof operand === "object" && operand
           ? operand
           : {
               type: "number",
-              value: operand,
               resolvedValue: operand,
             };
 
-      const newOperand = {
-        ...operandAsObject,
-        placeholder: true,
-      } as any as InstrOperand;
-
-      return newOperand;
+      operandAsObject.placeholder = true;
+      return operandAsObject;
     });
 
     const newInstr: Instruction = [specialOpCode, ...newOperands];

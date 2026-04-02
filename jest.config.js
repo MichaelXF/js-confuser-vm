@@ -6,6 +6,7 @@ const OPTIONS_MATRIX = [
   { displayName: "selfModifying", VM_OPTIONS: { selfModifying: true } },
   { displayName: "timingChecks", VM_OPTIONS: { timingChecks: true } },
   { displayName: "macroOpcodes", VM_OPTIONS: { macroOpcodes: true } },
+  { displayName: "microOpcodes", VM_OPTIONS: { microOpcodes: true } },
   {
     displayName: "specializedOpcodes",
     VM_OPTIONS: { specializedOpcodes: true },
@@ -27,6 +28,7 @@ const OPTIONS_MATRIX = [
       selfModifying: true,
       timingChecks: true,
       macroOpcodes: true,
+      microOpcodes: true,
       specializedOpcodes: true,
       aliasedOpcodes: true,
       concealConstants: true,

@@ -82,6 +82,7 @@ function VM(bytecode, mainStartPc, mainRegCount, constants, globals) {
     startPc: mainStartPc, // <- where main begins
   };
   this._currentFrame = new Frame(new Closure(mainFn), null, null, undefined, 0);
+  this._internals = {};
 }
 
 // Consume the next slot from the flat bytecode stream and advance the PC.
@@ -820,7 +821,10 @@ for (var k of Object.getOwnPropertyNames(globalThis)) {
 // If a window object is in scope (browser or test harness), capture it
 // explicitly so VM code can read/write window.TEST_OUTPUT etc.
 if (typeof window !== "undefined") {
-  globals["window"] = window;
+  globals.window = window;
+  for (var k of Object.getOwnPropertyNames(window)) {
+    globals[k] = window[k];
+  }
 }
 
 // Transfer common primitives

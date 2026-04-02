@@ -76,14 +76,15 @@ export function resolveLabels(
         if (pc === undefined)
           throw new Error(`Undefined label: ${(operand as any).label}`);
 
-        var operandAsObject =
-          typeof operand === "object" && operand ? operand : {};
-
         const newOperand = {
-          ...operandAsObject, // Preverse original operand properties
           type: "number",
           resolvedValue: pc + ((operand as any).offset ?? 0),
         };
+
+        // Mutate original object so that references are also updated
+        if (typeof operand === "object" && operand !== null) {
+          return Object.assign(operand, newOperand);
+        }
 
         return newOperand;
       }
