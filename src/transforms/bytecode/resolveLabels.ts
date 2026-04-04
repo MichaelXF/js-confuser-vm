@@ -35,6 +35,7 @@ export function resolveLabels(
   for (const instr of bc) {
     const op = instr[0];
     const operand = instr[1];
+
     if (
       op === null &&
       operand !== null &&
@@ -42,11 +43,14 @@ export function resolveLabels(
       (operand as any).type === "defineLabel"
     ) {
       labelToPc.set((operand as any).label, realPc);
-    } else {
-      // Each instruction occupies 1 slot for the opcode + 1 per operand.
-      // IMPORTANT: 'placeholder' operands are not counted
-      realPc += instr.filter((x) => (x as any)?.placeholder !== true).length;
+      continue;
     }
+
+    if (op === null) continue; // "null" opcodes are never emitted
+
+    // Each instruction occupies 1 slot for the opcode + 1 per operand.
+    // IMPORTANT: 'placeholder' operands are not counted
+    realPc += instr.filter((x) => (x as any)?.placeholder !== true).length;
   }
 
   // Pass 2 – build the resolved instruction list.
@@ -55,44 +59,44 @@ export function resolveLabels(
   for (const instr of bc) {
     const [op, ...operands] = instr;
 
-    // Strip defineLabel pseudo-ops.
-    if (
-      op === null &&
-      typeof operands[0] === "object" &&
-      (operands[0] as any)?.type === "defineLabel"
-    ) {
-      continue;
-    }
-
-    // Replace label-ref operands with their resolved flat PC (any position).
+    // Replace label-ref and encodedLabel operands with resolved flat PCs.
+    // encodedLabel applies an encoding to the PC before emission so that raw
+    // jump targets are hidden; the dispatcher block reverses it at runtime.
+    // To change the encoding scheme, update both here and in jumpDispatcher.ts.
     const newOperands = operands.map((operand) => {
       if (
-        operand !== undefined &&
-        operand !== null &&
-        typeof operand === "object" &&
-        (operand as any).type === "label"
-      ) {
+        operand === undefined ||
+        operand === null ||
+        typeof operand !== "object"
+      )
+        return operand;
+
+      const type = (operand as any).type;
+
+      if (type === "label") {
         const pc = labelToPc.get((operand as any).label);
         if (pc === undefined)
           throw new Error(`Undefined label: ${(operand as any).label}`);
 
-        const newOperand = {
-          type: "number",
-          resolvedValue: pc + ((operand as any).offset ?? 0),
-        };
-
-        // Mutate original object so that references are also updated
-        if (typeof operand === "object" && operand !== null) {
-          return Object.assign(operand, newOperand);
+        let resolvedValue = pc + ((operand as any).offset ?? 0);
+        if ((operand as any).transform) {
+          resolvedValue = (operand as any).transform(resolvedValue);
         }
 
-        return newOperand;
+        const newOperand = {
+          type: "number",
+          resolvedValue: resolvedValue,
+        };
+        return Object.assign(operand, newOperand);
       }
+
       return operand;
     });
 
     const newInstr = [op, ...newOperands];
     (newInstr as any)[SOURCE_NODE_SYM] = (instr as any)[SOURCE_NODE_SYM];
+
+    // Pseudo-op "defineLabel"s are kept within this bytecode as the Serializer is responsible for dropping it, and its useful information for comment generation
     resolved.push(newInstr);
   }
 

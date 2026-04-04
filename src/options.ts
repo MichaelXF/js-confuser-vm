@@ -11,6 +11,7 @@ export interface Options {
   aliasedOpcodes?: boolean; // create duplicate opcodes for commonly used opcodes?
   timingChecks?: boolean; // add timing checks to detect debuggers?
   concealConstants?: boolean; // conceal strings and integers in the constant pool?
+  dispatcher?: boolean; // route simple jumps through a per-function central dispatcher block?
   minify?: boolean; // pass final output through Google Closure Compiler? (Renames VM class properties)
 }
 

@@ -40,6 +40,8 @@ export function nextFreeSlot(compiler: Compiler): number {
 }
 
 export function getInstructionSize(instr: b.Instruction): number {
+  if (instr[0] === null) return 0;
+
   const size = instr.filter((op) => (op as any)?.placeholder !== true).length;
 
   return size;
