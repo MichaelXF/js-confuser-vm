@@ -20,6 +20,10 @@ const OPTIONS_MATRIX = [
     VM_OPTIONS: { concealConstants: true },
   },
   {
+    displayName: "dispatcher",
+    VM_OPTIONS: { dispatcher: true },
+  },
+  {
     displayName: "all",
     VM_OPTIONS: {
       randomizeOpcodes: true,
@@ -32,6 +36,7 @@ const OPTIONS_MATRIX = [
       specializedOpcodes: true,
       aliasedOpcodes: true,
       concealConstants: true,
+      dispatcher: true,
     },
   },
 ];

@@ -12,7 +12,7 @@ test("Variant #1: Specialized Opcodes", async () => {
 
   // Ensure "Correct Value" became "LOAD_GLOBAL_0"
   var bytecodeCommentSection = output.split("var CONSTANTS")[0];
-  expect(bytecodeCommentSection).toContain(" LOAD_GLOBAL_1_0_0 ");
+  expect(bytecodeCommentSection).toMatch(/ LOAD_GLOBAL_\d_0_0 /);
 
   var result = await evalCode(output);
   expect(result).toEqual("Correct Value");
