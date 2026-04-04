@@ -183,7 +183,7 @@ var CONSTANTS = [/* 0 */"DaQApB6kAqQdpB+kEaQ=", /* 1 */"TCFOIUUh", /* 2 */"kKK8o
 
 #### `dispatcher` (true/false)
 
-- Creates a middleman block to process jumps.
+Creates a middleman block to process jumps.
 
 ```js
 // Input Code
