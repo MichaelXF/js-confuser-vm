@@ -1,12 +1,6 @@
 import type { Bytecode, InstrOperand, Instruction } from "../../types.ts";
 import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
-import {
-  getInstructionSize,
-  nextFreeSlot,
-  U16_MAX,
-} from "../../utils/op-utils.ts";
-import * as t from "@babel/types";
-import * as b from "../../types.ts";
+import { getInstructionSize, nextFreeSlot } from "../../utils/op-utils.ts";
 
 export const nSizedOps = [
   "MAKE_CLOSURE",
@@ -19,9 +13,11 @@ export const nSizedOps = [
 
 // Creates specialized opcodes for the most frequent (OPCODE + single_integer_operand) pairs.
 // Example: [OP.LOAD_CONST, 1] becomes [SPECIALIZED_LOAD_CONST_1].
-// Only instructions with *exactly one numeric operand* are considered.
+// Only instructions that are fixed-sized are considered.
 // MAKE_CLOSURE and other N-sized instructions cannot be specialized
-// Runs after selfModifying but before resolveLabels (operands stay plain numbers).
+// Operands are converted into objects and marked as 'placeholder' - other passes can mutate and the reference stays intact
+// We need a reference throughout the pipeline so that final AST generation can place the actual value
+// The 'placeholder' flag drops the operand from the final bytecode - any size calculation must not count these
 export function specializedOpcodes(
   bc: Bytecode,
   compiler: Compiler,

@@ -1,6 +1,6 @@
 import type { Bytecode, InstrOperand, Instruction } from "../../types.ts";
 import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
-import { nextFreeSlot, U16_MAX } from "../../utils/op-utils.ts";
+import { nextFreeSlot } from "../../utils/op-utils.ts";
 import { shuffle } from "../../utils/random-utils.ts";
 
 // Opcodes that must not be aliased.

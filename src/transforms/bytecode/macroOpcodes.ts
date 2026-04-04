@@ -1,7 +1,7 @@
 import type { Bytecode, Instruction } from "../../types.ts";
 import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
-import { nextFreeSlot, U16_MAX } from "../../utils/op-utils.ts";
-import { ok } from "node:assert";
+import { nextFreeSlot } from "../../utils/op-utils.ts";
+import { ok } from "assert";
 
 // Opcodes that must not appear in a non-terminal position inside a macro window.
 // Jump ops: modifying frame._pc mid-execution causes the macro handler to
