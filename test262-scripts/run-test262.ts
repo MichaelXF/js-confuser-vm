@@ -17,6 +17,7 @@ interface TestResult {
   id: string;
   passed: boolean;
   error?: string;
+  errorMessage?: string;
 }
 
 const files = await glob(`${TEST_DIR}/**/*.js`);
@@ -205,7 +206,8 @@ running = false;
 const results: TestResult[] = allResults.flat();
 
 let passed = 0;
-let errors = {};
+let errorTypes = {};
+let errorMessages = {};
 
 for (const r of results) {
   if (r.passed) {
@@ -215,12 +217,17 @@ for (const r of results) {
 
   let errorKey = r.id;
   if (errorKey) {
-    if (!errors[errorKey]) errors[errorKey] = 0;
-    errors[errorKey]++;
+    if (!errorTypes[errorKey]) errorTypes[errorKey] = 0;
+    errorTypes[errorKey]++;
+  }
+
+  if (r.errorMessage) {
+    if (!errorMessages[r.errorMessage]) errorMessages[r.errorMessage] = 0;
+    errorMessages[r.errorMessage]++;
   }
 }
 
-if (Object.keys(errors).length > 0) {
+if (Object.keys(errorTypes).length > 0) {
   console.log("Failures:");
   for (const r of results) {
     if (r.error?.includes("TryStatement")) continue;
@@ -231,9 +238,23 @@ if (Object.keys(errors).length > 0) {
   }
 }
 
+function printObjectSorted(obj: Record<string, number>) {
+  const sorted = Object.entries(obj).sort((a, b) => b[1] - a[1]);
+  const maxShow = 15;
+  for (const [key, count] of sorted.slice(0, maxShow)) {
+    console.log(`  ${key}: ${count}`);
+  }
+  if (sorted.length > maxShow) {
+    console.log(`  ... and ${sorted.length - maxShow} more`);
+  }
+}
+
 console.log("\n=== Test262 ES5 Results ===");
 console.log(`Passed:  ${passed}`);
-console.log(`Errors:  ${JSON.stringify(errors, null, 2)}`);
+console.log(`Errors Types:`);
+printObjectSorted(errorTypes);
+console.log(`Error Messages:`);
+printObjectSorted(errorMessages);
 console.log(`Total:   ${results.length}`);
 console.log(
   "Percentage: " + ((passed / results.length) * 100).toFixed(2) + "%",

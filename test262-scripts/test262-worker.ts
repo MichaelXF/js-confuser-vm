@@ -10,6 +10,7 @@ interface TestResult {
   id: string;
   passed: boolean;
   error?: string;
+  errorMessage?: string;
 }
 
 const { TEST_DIR, files } = workerData as {
@@ -87,7 +88,8 @@ async function processFile(file: string): Promise<TestResult[]> {
         file: relFile,
         id: "compile-error",
         passed: false,
-        error: `virtualize() threw: ${e.message}`,
+        error: `JsConfuserVM threw: ${e.message}`,
+        errorMessage: e.message,
       },
     ];
   }
@@ -131,6 +133,7 @@ async function processFile(file: string): Promise<TestResult[]> {
         id: "runtime-error",
         passed: false,
         error: `Runtime threw: ${e.message}`,
+        errorMessage: e.message,
       },
     ];
   }
