@@ -1,4 +1,104 @@
-## `0.0.7` Micro Opcodes
+## `0.1.0` Dispatcher, Virtual Registers, and more
+
+- Added new option `dispatcher` which creates a middleman block to process jumps.
+
+```js
+// Input Code
+if (true) {
+  console.log("Hello world!");
+}
+
+// Before
+// fn_0_0:
+// [0, 0, 0, 0],        LOAD_CONST  reg[0] = true                         1:4-1:8
+// [40, 0, 29],         JUMP_IF_FALSE  [0, if_else_1]                     1:0-3:1
+// [2, 0, 1, 0],        LOAD_GLOBAL  reg[0] = console                     2:2-2:9
+// [0, 1, 2, 0],        LOAD_CONST  reg[1] = "log"                        2:2-2:29
+// [8, 2, 0, 1],        GET_PROP  reg[2] = reg[0][reg[1]]                 2:2-2:29
+// [0, 1, 3, 0],        LOAD_CONST  reg[1] = "Hello world!"               2:14-2:28
+// [43, 3, 0, 2, 1, 1], CALL_METHOD  reg[3] = reg[2](recv=reg[0], 1 args) 2:2-2:29
+// if_else_1:
+// [0, 0, 4, 0],        LOAD_CONST  reg[0] = undefined                    
+// [45, 0],             RETURN  reg[0]              
+
+// What this looks like decompiled:
+// fn_0_0:
+r0 = true
+if (!r0) goto if_else_1
+  r0 = console
+  r1 = "log"
+  r2 = r0[r1]          // console.log
+  r1 = "Hello world!"
+  r3 = r2.call(r0, r1) // console.log("Hello world!")
+// if_else_1:
+  r0 = undefined
+  return r0            
+
+// After
+// fn_0_0:
+// [47, 2, 57, 2, 5, 0], MAKE_CLOSURE  reg[2] PC=fn_2_3 (params=2 regs=5 upvalues=0)
+// [0, 3, 0, 0],        LOAD_CONST  reg[3] = true                         1:4-1:8
+// [41, 3, 21],         JUMP_IF_TRUE  [3, if_else_1_skip_5]               
+// [1, 0, 43020],       LOAD_INT  reg[0] = if_else_1                      
+// [1, 1, 40151],       LOAD_INT  reg[1] = 40151                          
+// [39, 49],            JUMP  dispatcher_4                                
+// if_else_1_skip_5:
+// [2, 3, 1, 0],        LOAD_GLOBAL  reg[3] = console                     2:2-2:9
+// [0, 4, 2, 0],        LOAD_CONST  reg[4] = "log"                        2:2-2:29
+// [8, 5, 3, 4],        GET_PROP  reg[5] = reg[3][reg[4]]                 2:2-2:29
+// [0, 4, 3, 0],        LOAD_CONST  reg[4] = "Hello world!"               2:14-2:28
+// [43, 6, 3, 5, 1, 4], CALL_METHOD  reg[6] = reg[5](recv=reg[3], 1 args) 2:2-2:29
+// if_else_1:
+// [0, 3, 4, 0],        LOAD_CONST  reg[3] = undefined                    
+// [45, 3],             RETURN  reg[3]                                    
+// dispatcher_4:
+// [42, 0, 2, 2, 0, 1], CALL  reg[0] = reg[2](reg[0], reg[1])             
+// [58, 0],             JUMP_REG  PC = reg[0]                             
+// fn_2_3:              
+// [18, 2, 0, 1],       BXOR  [2, 0, 1]              
+// [0, 3, 5, 0],        LOAD_CONST  reg[3] = 52048                        
+// [11, 4, 2, 3],       ADD  [4, 2, 3]                                    
+// [0, 2, 6, 0],        LOAD_CONST  reg[2] = 65535                        
+// [16, 3, 4, 2],       BAND  [3, 4, 2]                                   
+// [45, 3],             RETURN  reg[3]                                    
+
+// What this looks like decompiled:
+// fn_0_0:
+r2 = MakeClosure(fn_2_3, params=2)
+r3 = true
+if (r3) goto if_else_1_skip
+  r0 = 43020
+  r1 = 40151
+  goto dispatcher
+// if_else_1_skip:
+  r3 = console
+  r4 = "log"
+  r5 = r3[r4]          // console.log
+  r4 = "Hello world!"
+  r6 = r5.call(r3, r4) // console.log("Hello world!")
+// if_else_1:
+  r3 = undefined
+  return r3
+
+// dispatcher:
+  r0 = r2(r0, r1)      // decode(encodedPC, siteKey)
+  goto *r0             // indirect jump
+
+// fn_2_3:
+function decode(x, k) {
+  return ((x ^ k) + 52048) & 65535; 
+}
+```
+
+- Improved registers:
+- - Now flattened into a single array with base/stack pointer mechanics
+- - Improved compiler to support virtual registers, allowing passes to introduce scope-specific registers, with a final pass responsible for allocation and freeing 
+
+- Added a template system to insert synthetic JavaScript as native bytecode, similar to [JS-Confuser's template system](https://github.com/MichaelXF/js-confuser/blob/b6ef304f77b7fc27cb9cc8d7d841e50a4200d7bc/docs/Template.md)
+
+
+
+## `0.0.9` Micro Opcodes
 
 - Added new option `microOpcodes` which breaks opcodes into multiple sub-opcodes.
 
@@ -34,7 +134,7 @@ case OP.LOAD_CONST:
 // [59, 2, 0],          MICRO_LOAD_CONST_1  [2, 0]                        
 // [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = reg[3](recv=reg[1], 1 args) 1:0-1:27
 
-// What the opcodes "MICRO_LOAD_CONST_0" (58) and "MICRO_LOAD_CONST_1" (59) looks like:
+// What the opcodes "MICRO_LOAD_CONST_0" (58) and "MICRO_LOAD_CONST_1" (59) look like:
 case 58:
     // MICRO_LOAD_CONST_0
     this._internals[0] = this._operand();

@@ -5,13 +5,13 @@ export interface Options {
   shuffleOpcodes?: boolean; // shuffle order of opcode handlers in the runtime?
   encodeBytecode?: boolean; // encode bytecode? when off, comments for instructions are added
   selfModifying?: boolean; // do self-modifying bytecode for function bodies?
+  dispatcher?: boolean; // create middleman blocks to process jumps?
   macroOpcodes?: boolean; // create combined opcodes for repeated instruction sequences?
   microOpcodes?: boolean; // break opcodes into sub-opcodes?
   specializedOpcodes?: boolean; // create specialized opcodes for commonly used opcode+operand pairs?
   aliasedOpcodes?: boolean; // create duplicate opcodes for commonly used opcodes?
   timingChecks?: boolean; // add timing checks to detect debuggers?
   concealConstants?: boolean; // conceal strings and integers in the constant pool?
-  dispatcher?: boolean; // route simple jumps through a per-function central dispatcher block?
   minify?: boolean; // pass final output through Google Closure Compiler? (Renames VM class properties)
 }
 
