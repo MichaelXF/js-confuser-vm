@@ -24,6 +24,14 @@ const OPTIONS_MATRIX = [
     VM_OPTIONS: { dispatcher: true },
   },
   {
+    displayName: "controlFlowFlattening",
+    VM_OPTIONS: { controlFlowFlattening: true },
+  },
+  {
+    displayName: "stringConcealing",
+    VM_OPTIONS: { stringConcealing: true },
+  },
+  {
     displayName: "all",
     VM_OPTIONS: {
       randomizeOpcodes: true,
@@ -37,6 +45,7 @@ const OPTIONS_MATRIX = [
       aliasedOpcodes: true,
       concealConstants: true,
       dispatcher: true,
+      stringConcealing: true,
     },
   },
 ];

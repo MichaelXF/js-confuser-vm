@@ -21,7 +21,6 @@ export function nextFreeSlot(compiler: Compiler): number {
     while (attempts++ < 512) {
       const candidate = getRandomInt(0, U16_MAX);
       if (!usedOpcodes.has(candidate)) {
-        usedOpcodes.add(candidate);
         return candidate;
       }
     }
@@ -32,7 +31,6 @@ export function nextFreeSlot(compiler: Compiler): number {
   for (let i = 0; i <= U16_MAX; i++) {
     const v = (start + i) & U16_MAX;
     if (!usedOpcodes.has(v)) {
-      usedOpcodes.add(v);
       return v;
     }
   }

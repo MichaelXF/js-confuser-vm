@@ -47,7 +47,7 @@
 
 import { Compiler } from "./compiler.ts";
 import { DEFAULT_OPTIONS } from "./options.ts";
-import type { Bytecode, Instruction } from "./types.ts";
+import type { Bytecode, Instruction, RegisterOperand } from "./types.ts";
 
 export class Template {
   private readonly _source: string;
@@ -137,5 +137,129 @@ export class Template {
     }
 
     return { functions: innerDescs, bytecode: innerBytecode };
+  }
+
+  // ── Inline compilation ───────────────────────────────────────────────────
+  /**
+   * Compile the template and return the **main scope** bytecode, with all
+   * register operands remapped to belong to `targetFnId`.  This allows
+   * bytecode transforms to express high-level JS control flow (while-loops,
+   * if-chains, variable declarations) via Template and splice the result
+   * directly into an existing function's instruction stream.
+   *
+   * The implicit trailing RETURN added by _compileFunctionDecl is stripped —
+   * inline code should flow into the surrounding bytecode, not return.
+   *
+   * @param variables       Substitution map for {name} placeholders.
+   * @param parentCompiler  The Compiler whose OP table, label counter, and
+   *                        fnDescriptors are shared.
+   * @param targetFnId      The function whose register file the template's
+   *                        registers should be remapped into.
+   * @param maxId           Live map of max register id per fnId — updated
+   *                        in-place as new registers are allocated.
+   *
+   * @returns
+   *   bytecode   — main-scope IR (no entry defineLabel, no trailing RETURN),
+   *                ready to splice into the target function's instruction stream.
+   *   registers  — mapping of JS variable names → remapped RegisterOperands,
+   *                so the caller can reference template-declared variables
+   *                (e.g. the `state` variable in CFF).
+   *   functions  — inner function descriptors (same as compile()).
+   *   innerBytecode — inner function bytecode blocks (same as compile()).
+   */
+  compileInline(
+    variables: Record<string, string | number>,
+    parentCompiler: Compiler,
+    targetFnId: number,
+    maxId: Map<number, number>,
+  ): {
+    bytecode: Bytecode;
+    registers: Map<string, RegisterOperand>;
+    functions: any[];
+    innerBytecode: Bytecode;
+  } {
+    const code = this._interpolate(variables);
+
+    const child = new Compiler({ ...DEFAULT_OPTIONS, randomizeOpcodes: false });
+    child.OP = { ...parentCompiler.OP };
+    child.OP_NAME = { ...parentCompiler.OP_NAME };
+    child.JUMP_OPS = new Set(parentCompiler.JUMP_OPS);
+    child._makeLabel = parentCompiler._makeLabel.bind(parentCompiler);
+
+    const startIdx = parentCompiler.fnDescriptors.length;
+    child.fnDescriptors = parentCompiler.fnDescriptors;
+
+    child.compile(code);
+
+    const mainDesc = parentCompiler.fnDescriptors[startIdx] as any;
+    const mainFnId: number = mainDesc._fnIdx;
+    const mainBc = mainDesc.bytecode as Bytecode;
+
+    // ── Remap registers from the template's main fnId → targetFnId ────────
+    // Build a mapping: old register id → new RegisterOperand in targetFnId.
+    const regRemap = new Map<number, RegisterOperand>();
+    const remapReg = (id: number): RegisterOperand => {
+      if (!regRemap.has(id)) {
+        const next = (maxId.get(targetFnId) ?? -1) + 1;
+        maxId.set(targetFnId, next);
+        regRemap.set(id, { type: "register", id: next, fnId: targetFnId });
+      }
+      return regRemap.get(id)!;
+    };
+
+    for (const instr of mainBc) {
+      for (let j = 1; j < instr.length; j++) {
+        const op = instr[j] as any;
+        if (op && typeof op === "object" && op.type === "register" && op.fnId === mainFnId) {
+          const mapped = remapReg(op.id);
+          op.id = mapped.id;
+          op.fnId = mapped.fnId;
+        }
+      }
+    }
+
+    // ── Build variable name → remapped register mapping ───────────────────
+    const registers = new Map<string, RegisterOperand>();
+    const locals: Map<string, RegisterOperand> = mainDesc.ctx.scope._locals;
+    for (const [name, reg] of locals) {
+      const mapped = regRemap.get(reg.id);
+      if (mapped) registers.set(name, mapped);
+    }
+
+    // ── Strip entry defineLabel and trailing implicit RETURN ───────────────
+    let bytecode = mainBc.filter((instr) => {
+      const op0 = instr[1] as any;
+      return !(
+        instr[0] === null &&
+        op0?.type === "defineLabel" &&
+        op0.label === mainDesc.entryLabel
+      );
+    });
+
+    // Remove trailing LOAD_CONST undefined + RETURN (implicit return added
+    // by _compileFunctionDecl).
+    const OP = parentCompiler.OP;
+    if (
+      bytecode.length >= 2 &&
+      bytecode[bytecode.length - 1][0] === OP.RETURN &&
+      bytecode[bytecode.length - 2][0] === OP.LOAD_CONST
+    ) {
+      bytecode = bytecode.slice(0, -2);
+    }
+
+    // ── Inner function bytecode (same as compile()) ───────────────────────
+    const innerDescs = parentCompiler.fnDescriptors.slice(startIdx + 1);
+    const innerBytecode: Bytecode = [];
+    for (const desc of innerDescs) {
+      innerBytecode.push([
+        null,
+        { type: "defineLabel", label: desc.entryLabel },
+      ] as Instruction);
+      for (const instr of (desc as any).bytecode as Bytecode) {
+        innerBytecode.push(instr);
+      }
+    }
+
+    return { bytecode, registers, functions: innerDescs, innerBytecode };
   }
 }

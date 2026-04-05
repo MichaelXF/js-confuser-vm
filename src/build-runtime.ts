@@ -10,6 +10,7 @@ import { applyMinify } from "./transforms/runtime/minify.ts";
 import { Compiler } from "./compiler.ts";
 import { applySpecializedOpcodes } from "./transforms/runtime/specializedOpcodes.ts";
 import { applyAliasedOpcodes } from "./transforms/runtime/aliasedOpcodes.ts";
+import { applyHandlerTable } from "./transforms/runtime/handlerTable.ts";
 import type * as b from "./types.ts";
 
 export async function obfuscateRuntime(
@@ -31,12 +32,10 @@ export async function obfuscateRuntime(
     applySpecializedOpcodes(ast, compiler);
   }
 
-  if (options.microOpcodes) {
-    applyInteralVariablesToRuntime(ast, compiler);
-  }
-
   // Micro opcode cases must be applied BEFORE shuffleOpcodes
   if (options.microOpcodes && Object.keys(compiler.MICRO_OPS).length > 0) {
+    // applyInteralVariablesToRuntime(ast, compiler);
+
     applyMicroOpcodes(ast, compiler);
   }
 
@@ -54,6 +53,8 @@ export async function obfuscateRuntime(
   if (options.shuffleOpcodes) {
     applyShuffleOpcodes(ast);
   }
+
+  // applyHandlerTable(ast);
 
   let generated: string;
   try {

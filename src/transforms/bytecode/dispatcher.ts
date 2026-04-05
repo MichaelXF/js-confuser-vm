@@ -78,8 +78,6 @@
 // Runs BEFORE resolveRegisters (so injected RegisterOperands are picked up by
 // liveness analysis) and BEFORE resolveLabels (so label operands with transforms
 // are resolved as part of the normal label-resolution pass).
-//
-// Enabled by options.dispatcher = true.
 
 import type {
   Bytecode,
@@ -99,15 +97,9 @@ function ref(r: RegisterOperand): RegisterOperand {
   return b.registerOperand(r.id, r.fnId);
 }
 
-// Monotonically increasing counter that makes every encoded label operand
-// JSON.stringify-distinguishable.  specializedOpcodes keys candidates by
-// JSON.stringify(operands), which drops the transform function.  Without this
-// counter, two LOAD_INT instructions for the same label but different siteKeys
-// would serialize identically and be coalesced into one specialized opcode
-// sharing a single operand object — causing both sites to decode with the
-// first site's key rather than their own.
+// VERY IMPORTANT: All "encoded" label operands include a unique "_id" property that survives JSON.stringify.
+// This allows Specialized Opcodes and other passes to correct distinguish them as the "transform" function WILL NOT be preserved
 let _encodedLabelId = 0;
-
 function encodedLabelOperand(
   label: string,
   siteKey: number,

@@ -212,6 +212,7 @@ VM.prototype.run = function () {
     try {
       var regs = this._regs;
       var base = frame._base;
+
       /* @SWITCH */
       switch (op) {
         case OP.LOAD_CONST: {
@@ -839,7 +840,7 @@ VM.prototype.run = function () {
 
         case OP.JUMP_REG: {
           // Indirect jump: target PC is read from a register rather than a
-          // bytecode immediate. Used by the jumpDispatcher pass so that static
+          // bytecode immediate. Used by Dispatcher pass so that static
           // analysis cannot determine the jump destination without tracking the
           // register value (which contains an encoded PC resolved at runtime).
           frame._pc = regs[base + this._operand()];
@@ -891,6 +892,14 @@ VM.prototype.run = function () {
   }
 };
 
+VM.prototype.init = function () {
+  var _this = this;
+
+  {
+    /* @INIT */
+  }
+};
+
 // Boot
 var globals: any = {}; // global object for globals
 
@@ -920,4 +929,5 @@ var vm = new VM(
   CONSTANTS,
   globals,
 );
+vm.init();
 vm.run();

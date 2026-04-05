@@ -21,6 +21,8 @@ import { getRandomInt } from "./utils/random-utils.ts";
 import { U16_MAX } from "./utils/op-utils.ts";
 import { concealConstants } from "./transforms/bytecode/concealConstants.ts";
 import { dispatcher } from "./transforms/bytecode/dispatcher.ts";
+import { controlFlowFlattening } from "./transforms/bytecode/controlFlowFlattening.ts";
+import { stringConcealing } from "./transforms/bytecode/stringConcealing.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -143,7 +145,7 @@ export const OP_ORIGINAL = {
   DEBUGGER: 57,
 
   // ── Indirect jump (register-addressed) ───────────────────────────────────
-  // Used by the jumpDispatcher pass. The target PC is read from a register
+  // Used by Dispatcher pass. The target PC is read from a register
   // rather than encoded as a bytecode immediate, so static analysis cannot
   // determine the destination without tracking register values at runtime.
   JUMP_REG: 58, // src — frame._pc = regs[src]
@@ -1443,6 +1445,20 @@ export class Compiler {
       return dst;
     }
 
+    // _VM_JUMP_("labelName") — emits JUMP with a label operand.
+    // Used by bytecode transforms (e.g. CFF) via Template to express jumps
+    // to labels that exist in the parent compiler's bytecode stream.
+    if (
+      node.type === "CallExpression" &&
+      node.callee.type === "Identifier" &&
+      node.callee.name === "_VM_JUMP_"
+    ) {
+      const label = (node.arguments[0] as t.StringLiteral).value;
+      bc.push([this.OP.JUMP!, { type: "label", label }]);
+      // Return a dummy register — caller (ExpressionStatement) discards it.
+      return ctx.allocReg();
+    }
+
     switch ((node as any).type) {
       case "NumericLiteral":
       case "StringLiteral":
@@ -2501,9 +2517,21 @@ export async function compileAndSerialize(
   const compiler = new Compiler(options);
   let bytecode = compiler.compile(sourceCode);
 
-  // jumpDispatcher must run before resolveRegisters so that the new rDisp/rKey
-  // RegisterOperand objects it injects are visible to the liveness analysis.
-  // It must also run before resolveLabels since it emits encodedLabel IR operands.
+  if (options.stringConcealing) {
+    const stringConcealingResult = stringConcealing(bytecode, compiler);
+    bytecode = stringConcealingResult.bytecode;
+  }
+
+  // CFF and Dispatcher both run before resolveRegisters (so injected
+  // RegisterOperands are visible to liveness analysis) and before
+  // resolveLabels (so label operands are resolved normally).
+  // CFF runs first: it flattens control flow into while-switch.
+  // Dispatcher can then encode the jumps CFF introduces.
+  if (options.controlFlowFlattening) {
+    const cffResult = controlFlowFlattening(bytecode, compiler);
+    bytecode = cffResult.bytecode;
+  }
+
   if (options.dispatcher) {
     const dispatcherResult = dispatcher(bytecode, compiler);
     bytecode = dispatcherResult.bytecode;
