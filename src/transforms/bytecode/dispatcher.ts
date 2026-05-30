@@ -90,12 +90,15 @@ import { Compiler } from "../../compiler.ts";
 import { getRandomInt } from "../../utils/random-utils.ts";
 import { U16_MAX } from "../../utils/op-utils.ts";
 import { Template } from "../../template.ts";
-
+import {
+  ref,
+  buildMaxIdMap,
+  allocReg,
+  extractLabel,
+  forEachFunction,
+} from "../../utils/pass-utils.ts";
 // VERY IMPORTANT: All object operands should be unique objects for the entire compilation process.
 // This ensures that other passes that may reference/modify operands (e.g. specializedOpcodes) don't accidentally break behavior by mutating cloned objects.
-function ref(r: RegisterOperand): RegisterOperand {
-  return b.registerOperand(r.id, r.fnId);
-}
 
 // VERY IMPORTANT: All "encoded" label operands include a unique "_id" property that survives JSON.stringify.
 // This allows Specialized Opcodes and other passes to correct distinguish them as the "transform" function WILL NOT be preserved
@@ -121,39 +124,6 @@ function encodedLabelOperand(
 // The & 0xFFFF mask keeps both sides in [0, 65535], preventing negative LOAD_INT operands.
 function applyEncoding(pc: number, siteKey: number, fnSalt: number): number {
   return ((pc - fnSalt) & U16_MAX) ^ siteKey;
-}
-
-// ── Register allocation helpers ───────────────────────────────────────────────
-// At pass time FnContext objects are gone; we allocate new virtual registers by
-// scanning the bytecode for the highest existing id per fnId and incrementing.
-function buildMaxIdMap(bc: Bytecode): Map<number, number> {
-  const maxId = new Map<number, number>();
-  for (const instr of bc) {
-    for (let j = 1; j < instr.length; j++) {
-      const op = instr[j] as any;
-      if (op && op.type === "register") {
-        const cur = maxId.get(op.fnId) ?? -1;
-        if (op.id > cur) maxId.set(op.fnId, op.id);
-      }
-    }
-  }
-  return maxId;
-}
-
-// Allocate a new virtual register for fnId, updating maxId in-place.
-function allocReg(fnId: number, maxId: Map<number, number>): RegisterOperand {
-  const next = (maxId.get(fnId) ?? -1) + 1;
-  maxId.set(fnId, next);
-  return b.registerOperand(next, fnId);
-}
-
-// ── Label operand extraction ──────────────────────────────────────────────────
-// Returns the label string if the operand is a { type:"label" } object,
-// otherwise returns null.  Used to identify routable jump targets.
-function extractLabel(op: InstrOperand | undefined): string | null {
-  if (op && typeof op === "object" && (op as any).type === "label")
-    return (op as any).label as string;
-  return null;
 }
 
 // buildDispatcherBlock: emits the dispatcher label + call + indirect jump.
@@ -193,7 +163,7 @@ function processFunctionBlock(
   compiler: Compiler,
   maxId: Map<number, number>,
   labelCounter: () => string,
-): { instrs: Bytecode; templateBytecode: Bytecode } {
+): { instrs: Bytecode; tail: Bytecode } {
   const OP = compiler.OP;
 
   // Only transform functions that actually contain simple jumps.
@@ -201,15 +171,13 @@ function processFunctionBlock(
     const op = instr[0];
     return op === OP.JUMP || op === OP.JUMP_IF_FALSE || op === OP.JUMP_IF_TRUE;
   });
-  if (!hasRoutableJump) return { instrs, templateBytecode: [] };
+  if (!hasRoutableJump) return { instrs, tail: [] };
 
   // Per-function salt baked into this function's decode Template.
   // Never stored as an operand — lives only inside the decode closure body.
   const fnSalt = getRandomInt(1, U16_MAX);
 
   // Compile a unique decode closure for this function.
-  // The fnSalt literal is inlined into the source so each function's closure
-  // body is structurally distinct; no single signature covers all functions.
   const tmpl = new Template(
     `function decode(x, k) { return ((x ^ k) + ${fnSalt}) & ${U16_MAX}; }`,
   ).compile({}, compiler);
@@ -303,7 +271,7 @@ function processFunctionBlock(
     ...buildDispatcherBlock(compiler, rDisp, rKey, rClosure, dispatcherLabel),
   );
 
-  return { instrs: out, templateBytecode: tmpl.bytecode };
+  return { instrs: out, tail: tmpl.bytecode };
 }
 
 // ── Pass entry point ──────────────────────────────────────────────────────────
@@ -311,80 +279,13 @@ export function dispatcher(
   bc: Bytecode,
   compiler: Compiler,
 ): { bytecode: Bytecode } {
-  // Pre-compute max virtual register id per function across the whole bytecode.
   const maxId = buildMaxIdMap(bc);
-
-  // Label factory that delegates to the compiler's own counter so labels
-  // produced here never collide with compiler-generated or pass-generated ones.
+  // Label factory delegates to the compiler's counter so labels never collide.
   const labelCounter = () => compiler._makeLabel("dispatcher");
-
-  // Build a set of entry labels so we can detect function boundaries.
-  const entryLabels = new Set(compiler.fnDescriptors.map((d) => d.entryLabel));
-  // Build a map from entry label → fnId.
-  const entryLabelToFnId = new Map(
-    compiler.fnDescriptors.map((d) => [d.entryLabel!, d._fnIdx!]),
+  // forEachFunction collects each function's tail (decode closure bytecode) and
+  // appends them all after the last function body, so every MAKE_CLOSURE can
+  // reference its entryLabel regardless of where it appears in the bytecode.
+  return forEachFunction(bc, compiler, (fnInstrs, fnId) =>
+    processFunctionBlock(fnInstrs, fnId, compiler, maxId, labelCounter),
   );
-
-  const result: Bytecode = [];
-  // Collect each function's decode Template bytecode; appended at the end so
-  // all MAKE_CLOSURE instructions can reference their entryLabels regardless
-  // of where in the bytecode the function appears.
-  const decodeBytecodes: Bytecode[] = [];
-  let i = 0;
-
-  while (i < bc.length) {
-    const instr = bc[i];
-    const [op, operand0] = instr;
-    const isEntryLabel =
-      op === null &&
-      (operand0 as any)?.type === "defineLabel" &&
-      entryLabels.has((operand0 as any).label);
-
-    if (!isEntryLabel) {
-      result.push(instr);
-      i++;
-      continue;
-    }
-
-    // Found a function entry label.  Collect all instructions belonging to
-    // this function (until the next entry label or end of bytecode).
-    const entryLabel = (operand0 as any).label as string;
-    const fnId = entryLabelToFnId.get(entryLabel)!;
-    i++; // step past the defineLabel itself
-
-    const fnInstrs: Bytecode = [];
-    while (i < bc.length) {
-      const next = bc[i];
-      const [nextOp, nextOp0] = next;
-      if (
-        nextOp === null &&
-        (nextOp0 as any)?.type === "defineLabel" &&
-        entryLabels.has((nextOp0 as any).label)
-      )
-        break; // next function starts here
-      fnInstrs.push(next);
-      i++;
-    }
-
-    // Emit the entry defineLabel, then the (potentially transformed) body.
-    result.push(instr); // the defineLabel
-    const { instrs: processed, templateBytecode } = processFunctionBlock(
-      fnInstrs,
-      fnId,
-      compiler,
-      maxId,
-      labelCounter,
-    );
-    result.push(...processed);
-    if (templateBytecode.length > 0) decodeBytecodes.push(templateBytecode);
-  }
-
-  // Append all per-function decode closure bodies at the end of the bytecode.
-  // Each block defines the entryLabel that the corresponding MAKE_CLOSURE
-  // instruction references.
-  for (const tb of decodeBytecodes) {
-    result.push(...tb);
-  }
-
-  return { bytecode: result };
 }

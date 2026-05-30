@@ -1,14 +1,21 @@
-## `0.1.1` Control Flow Flattening, String Concealing
+## `0.1.1` Control Flow Flattening, String Concealing, and more
 
 - Added new option `controlFlowFlattening` which hinders program comprehension by creating convoluted switch statements.
 - Added new option `stringConcealing` which involves encoding strings to conceal plain-text values.
-- Planned: Added new option `semanticOpcodes` which creates semantically-equivalent opcode variants 
 
 - Added new API method `JSConfuserVM.disassemble(sourceCode)` which returns a partial JS representation
 - - This only works if the parameter `sourceCode` contains the original bytecode comment
 - - This shouldn't be used with any options enabled, as the disassembler only supports default patterns
 
-Planned: Handler table over switch-case
+- Added new option `classObfuscation` which obfuscates the VM runtime classes:
+- - Shuffles the order of declarations and methods
+- - Planned: Shuffle the order of constructor and method parameters
+- - Planned: Alias variables, and other function related obfuscations
+
+- Added new option `verbose` which `console.log`'s useful info for debugging purposes.
+
+- Removed option `microOpcodes` - this option introduced stratch registers which left runtime values exposed, and were easily tracable by deobfuscators. The cons outweighed the pros and since it conflicts with the other obfuscations already present, it was removed.
+
 Planned: Zero out the callee's register window on return (one fill(undefined) or length)
 
 ## `0.1.0` Dispatcher, Virtual Registers, and more

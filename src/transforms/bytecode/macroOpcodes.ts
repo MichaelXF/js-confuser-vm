@@ -1,5 +1,5 @@
 import type { Bytecode, Instruction } from "../../types.ts";
-import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
+import { Compiler, OP_ORIGINAL, SOURCE_NODE_SYM } from "../../compiler.ts";
 import { nextFreeSlot } from "../../utils/op-utils.ts";
 import { ok } from "assert";
 
@@ -68,7 +68,7 @@ export function macroOpcodes(
       if (nonTerminalExcluded.find((name) => opName.includes(name)))
         return false;
     }
-    return OP_NAME[op] !== undefined;
+    return OP_NAME[op] !== undefined && OP_ORIGINAL[opName] !== undefined;
   }
 
   // ── Step 1: count window frequencies ──────────────────────────────────────

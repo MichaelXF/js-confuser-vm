@@ -15,6 +15,11 @@ export type RegisterOperand = Op<{
   fnId: number;
   kind?: string;
   scopeId?: string | number;
+  // If true, resolveRegisters always assigns this register to the "local::"
+  // pool (no slot reuse).  Set by passes that emit registers whose live ranges
+  // span CFF dispatch-loop back-edges — regions the linear-scan liveness
+  // analysis cannot reason about.
+  pinned?: boolean;
 }>;
 
 // A placeholder for a function's concrete regCount, emitted in MAKE_CLOSURE.

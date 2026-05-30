@@ -38,7 +38,12 @@ export function resolveRegisters(
   function registerPoolKey(op: {
     kind?: string;
     scopeId?: string | number;
+    pinned?: boolean;
   }): string {
+    // Pinned registers must never share a slot with anything else.
+    // Passes set this on registers whose live range crosses a CFF back-edge
+    // that the linear-scan liveness analysis cannot see.
+    if (op.pinned) return "local::";
     return `${op.kind ?? "local"}::${op.scopeId ?? ""}`;
   }
 

@@ -27,6 +27,8 @@ function extractCaseBody(switchCase: t.SwitchCase): t.Statement[] {
 // *exactly one* numeric operand, every `_operand()` call inside the original
 // handler is replaced by the constant value that was baked into the opcode.
 function inlineFixedOperands(
+  newName: string, // for debugging
+  info: any,
   bodyStmts: t.Statement[],
   resolvedValues: number[],
 ): void {
@@ -66,10 +68,12 @@ function inlineFixedOperands(
     },
   });
 
-  ok(
-    replaced === resolvedValues.length,
-    `Expected to replace ${resolvedValues.length} operands, but replaced ${replaced}`,
-  );
+  if (replaced !== resolvedValues.length) {
+    console.error(resolvedValues, info);
+    throw new Error(
+      `Specialized Opcode Inline Error: Given ${resolvedValues.length} operands to replace, but only found ${replaced} for ${newName}`,
+    );
+  }
 }
 
 // Append a generated switch case for every entry in compiler.SPECIALIZED_OPS.
@@ -119,12 +123,13 @@ export function applySpecializedOpcodes(ast: t.File, compiler: Compiler): void {
     const placedOperands = info.operands;
     ok(placedOperands, `Could not find operand for original opcode ${newName}`);
 
-    const resolvedValues = placedOperands.map((placedOperand) => {
-      return (placedOperand as any)?.resolvedValue ?? placedOperand;
-    });
+    const resolvedValues = placedOperands
+      // .filter((x) => !(x as any)?.placeholder)
+      .map((placedOperand) => {
+        return (placedOperand as any)?.resolvedValue ?? placedOperand;
+      });
 
     if (resolvedValues.find((v) => typeof v !== "number")) {
-      console.error(info);
       throw new Error("Expected all resolved operand values to be numbers");
     }
 
@@ -132,7 +137,7 @@ export function applySpecializedOpcodes(ast: t.File, compiler: Compiler): void {
     compiler.OP_NAME[specialOpCode] = newName;
 
     // Replace this._operand() with the baked-in constant
-    inlineFixedOperands(bodyStmts, resolvedValues);
+    inlineFixedOperands(newName, info, bodyStmts, resolvedValues);
 
     // Add a leading comment so the generated source stays readable
     if (bodyStmts.length > 0) {

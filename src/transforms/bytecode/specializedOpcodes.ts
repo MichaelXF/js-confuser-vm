@@ -35,6 +35,8 @@ export function specializedOpcodes(
     }
   >();
 
+  const instrToOperandKey = new WeakMap<Instruction, string>();
+
   for (const instr of bc) {
     const op = instr[0];
     if (op === null || disallowedOps.has(op)) continue;
@@ -45,21 +47,26 @@ export function specializedOpcodes(
 
     // Convert numbers into operand objects so they can be modified elsewhere and preserved
     const oldOperands = instr.slice(1);
-    const operands = oldOperands.map((operand) => {
+
+    let operands = [];
+
+    for (const operand of oldOperands) {
       if (typeof operand === "number") {
-        return {
+        operands.push({
           type: "number",
           value: operand,
           resolvedValue: operand,
-        } as InstrOperand;
+        } as InstrOperand);
+      } else {
+        operands.push(operand as InstrOperand);
       }
-      return operand;
-    });
+    }
 
     instr.length = 1;
     instr.push(...operands);
 
     const operandsKey = JSON.stringify(operands);
+    instrToOperandKey.set(instr, operandsKey);
 
     const key = `${op},${operandsKey}`;
     const entry = freqMap.get(key);
@@ -78,7 +85,8 @@ export function specializedOpcodes(
   // ── Step 2: keep combinations that appear >= 2 times, sort by frequency ───
   const candidates = Array.from(freqMap.values())
     .filter((e) => e.occurences >= 1)
-    .sort((a, b) => b.occurences - a.occurences);
+    .sort((a, b) => b.occurences - a.occurences)
+    .slice(0, 1000);
 
   if (candidates.length === 0) return { bytecode: bc };
 
@@ -86,10 +94,10 @@ export function specializedOpcodes(
   const sigToSpecial = new Map<string, number>();
   const specializedOps: Compiler["SPECIALIZED_OPS"] = {};
 
-  for (let i = 0; i < candidates.length; i++) {
+  for (const candidate of candidates) {
     const specialOp = nextFreeSlot(compiler);
     if (specialOp === -1) break;
-    const { op: originalOp, operands, operandsKey } = candidates[i];
+    const { op: originalOp, operands, operandsKey } = candidate;
 
     const key = `${originalOp},${operandsKey}`;
     sigToSpecial.set(key, specialOp);
@@ -98,8 +106,7 @@ export function specializedOpcodes(
 
     // Register a human-readable name for disassembly / debugging
     const originalName = compiler.OP_NAME[originalOp] ?? `OP_${originalOp}`;
-    compiler.OP_NAME[specialOp] =
-      `${originalName}_${JSON.stringify(operandsKey)}`;
+    compiler.OP_NAME[specialOp] = `${originalName}_${operandsKey}`;
   }
 
   // Store mapping so the interpreter knows how to dispatch the specialized op
@@ -117,7 +124,11 @@ export function specializedOpcodes(
     }
 
     const operands = instr.slice(1);
-    const operandsKey = JSON.stringify(operands);
+    const operandsKey = instrToOperandKey.get(instr);
+    if (!operandsKey) {
+      result.push(instr);
+      continue;
+    }
 
     const key = `${op},${operandsKey}`;
 

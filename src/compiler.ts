@@ -14,7 +14,6 @@ import { resolveRegisters } from "./transforms/bytecode/resolveRegisters.ts";
 import { resolveConstants } from "./transforms/bytecode/resolveContants.ts";
 import { selfModifying } from "./transforms/bytecode/selfModifying.ts";
 import { macroOpcodes } from "./transforms/bytecode/macroOpcodes.ts";
-import { microOpcodes } from "./transforms/bytecode/microOpcodes.ts";
 import { specializedOpcodes } from "./transforms/bytecode/specializedOpcodes.ts";
 import { aliasedOpcodes } from "./transforms/bytecode/aliasedOpcodes.ts";
 import { getRandomInt } from "./utils/random-utils.ts";
@@ -322,18 +321,16 @@ export class Compiler {
     { originalOp: number; stmtIndex: number; irOperandCount: number }
   >;
 
-  /** Internal variable slot registry.
-   *  globally: shared name→index pool (written on first sight; reused by non-random mode or by 50% chance in random mode).
-   *  opcodes:  per-opcode source-of-truth — all assignment lookups are read/written here. */
-  _internals: {
-    globally: Map<string, number>;
-    opcodes: Map<number, Map<string, number>>;
-  };
-
   OP_NAME: Record<number, string>;
   JUMP_OPS: Set<number>;
 
   constants: any[];
+
+  log(...messages: any[]) {
+    if (this.options.verbose) {
+      console.log(...messages);
+    }
+  }
 
   _cloneRegisterOperand<T extends b.InstrOperand>(operand: T): T {
     if (!operand || typeof operand !== "object") return operand;
@@ -367,7 +364,6 @@ export class Compiler {
     this.MICRO_OPS = {};
     this.SPECIALIZED_OPS = {};
     this.ALIASED_OPS = {};
-    this._internals = { globally: new Map(), opcodes: new Map() };
 
     this.OP = { ...OP_ORIGINAL };
 
@@ -2451,9 +2447,16 @@ class Serializer {
       // Validate no opcode or operand exceeds u16 limit
       for (const o of resolvedValues) {
         ok(typeof o === "number", "Unresolved operand: " + JSON.stringify(o));
-        ok(o >= 0 && o <= 0xffff, `Operand overflow (max 0xFFFF u16): ${o}`);
+
+        ok(
+          o >= 0 && o <= 0xffffffff,
+          `Operand overflow (max 0xFFFFFFFF u32): ${o}`,
+        );
       }
-      ok(op >= 0 && op <= 0xffff, `Opcode overflow (max 0xFFFF u16): ${op}`);
+      ok(
+        op >= 0 && op <= 0xffffffff,
+        `Opcode overflow (max 0xFFFFFFFF u32): ${op}`,
+      );
 
       serialized.push(instr);
     }
@@ -2461,10 +2464,12 @@ class Serializer {
   }
 
   _encodeBytecode(flat: number[]) {
-    const buf = new Uint8Array(flat.length * 2);
+    const buf = new Uint8Array(flat.length * 4);
     flat.forEach((w, i) => {
-      buf[i * 2] = w & 0xff;
-      buf[i * 2 + 1] = (w >>> 8) & 0xff;
+      buf[i * 4] = w & 0xff;
+      buf[i * 4 + 1] = (w >>> 8) & 0xff;
+      buf[i * 4 + 2] = (w >>> 16) & 0xff;
+      buf[i * 4 + 3] = (w >>> 24) & 0xff;
     });
     return Buffer.from(buf).toString("base64");
   }
@@ -2522,11 +2527,7 @@ export async function compileAndSerialize(
     bytecode = stringConcealingResult.bytecode;
   }
 
-  // CFF and Dispatcher both run before resolveRegisters (so injected
-  // RegisterOperands are visible to liveness analysis) and before
-  // resolveLabels (so label operands are resolved normally).
-  // CFF runs first: it flattens control flow into while-switch.
-  // Dispatcher can then encode the jumps CFF introduces.
+  // CFF and Dispatcher both run before resolveRegisters and resolveLabels
   if (options.controlFlowFlattening) {
     const cffResult = controlFlowFlattening(bytecode, compiler);
     bytecode = cffResult.bytecode;
@@ -2537,29 +2538,63 @@ export async function compileAndSerialize(
     bytecode = dispatcherResult.bytecode;
   }
 
-  const passes = [];
+  const passes: {
+    pass: (
+      bytecode: b.Bytecode,
+      compiler: Compiler,
+    ) => { bytecode: b.Bytecode; constants?: any[] };
+    name: string;
+  }[] = [];
 
-  passes.push(concealConstants);
+  passes.push({
+    pass: concealConstants,
+    name: "concealConstants",
+  });
 
   if (options.specializedOpcodes) {
-    passes.push(specializedOpcodes);
-  }
-
-  if (options.microOpcodes) {
-    passes.push(microOpcodes);
+    passes.push({
+      pass: specializedOpcodes,
+      name: "specializedOpcodes",
+    });
   }
 
   if (options.macroOpcodes) {
-    passes.push(macroOpcodes);
+    passes.push({
+      pass: macroOpcodes,
+      name: "macroOpcodes",
+    });
   }
 
   if (options.aliasedOpcodes) {
-    passes.push(aliasedOpcodes);
+    passes.push({
+      pass: aliasedOpcodes,
+      name: "aliasedOpcodes",
+    });
+  }
+
+  const timings = {};
+
+  function runAndTime(pass, name) {
+    const startedAt = performance.now();
+
+    compiler.log(`Running bytecode pass ${name}...`);
+
+    const passResult = pass(bytecode, compiler);
+    bytecode = passResult.bytecode;
+
+    const endedAt = performance.now();
+    const elaspedMs = endedAt - startedAt;
+    timings[name] = elaspedMs;
+
+    compiler.log(
+      `Bytecode pass ${name} completed in ${Math.floor(elaspedMs)}ms`,
+    );
+
+    return passResult;
   }
 
   for (const pass of passes) {
-    const passResult = pass(bytecode, compiler);
-    bytecode = passResult.bytecode;
+    runAndTime(pass.pass, pass.name);
   }
 
   // Resolve virtual registers to concrete slot indices and set regCount per fn.
@@ -2567,25 +2602,25 @@ export async function compileAndSerialize(
   // of the bytecode while leaving RETURN in place, splitting a function's code
   // into two non-contiguous regions. Linear-scan liveness then sees incorrect
   // firstUse/lastUse for registers that span the gap, causing slot collisions.
-  const regsResult = resolveRegisters(bytecode, compiler);
+  const regsResult = runAndTime(resolveRegisters, "resolveRegisters");
   bytecode = regsResult.bytecode;
 
   // selfModifying runs after register resolution so concrete slot indices are
   // already in place; only label operands remain unresolved at this stage.
   if (options.selfModifying) {
-    const smResult = selfModifying(bytecode, compiler);
+    const smResult = runAndTime(selfModifying, "selfModifying");
     bytecode = smResult.bytecode;
   }
 
   // Resolve label references to flat bytecode indices.
-  const labelsResult = resolveLabels(bytecode, compiler);
+  const labelsResult = runAndTime(resolveLabels, "resolveLabels");
   bytecode = labelsResult.bytecode;
 
   // Set mainStartPc from the first function descriptor (or 0 for top-level start).
   compiler.mainStartPc = compiler.mainFn.startPc;
 
   // Resolve constant references to pool indices (+ conceal key operand).
-  const constResult = resolveConstants(bytecode, compiler);
+  const constResult = runAndTime(resolveConstants, "resolveConstants");
   bytecode = constResult.bytecode;
   compiler.constants = constResult.constants;
 
@@ -2595,6 +2630,10 @@ export async function compileAndSerialize(
     constResult.constants,
     compiler,
   );
+
+  // for (const key of Object.keys(timings)) {
+  //   console.log(`  ${key}: ${timings[key]}ms`);
+  // }
 
   // This part was purposefully pulled out Serializer as OP_NAME's get resolved during obfuscateRuntime
   // So for the most useful comments, it's ran absolutely last

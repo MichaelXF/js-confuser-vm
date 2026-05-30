@@ -1,5 +1,5 @@
 import type { Bytecode, InstrOperand, Instruction } from "../../types.ts";
-import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
+import { Compiler, OP_ORIGINAL, SOURCE_NODE_SYM } from "../../compiler.ts";
 import { nextFreeSlot } from "../../utils/op-utils.ts";
 import { shuffle } from "../../utils/random-utils.ts";
 
@@ -57,6 +57,9 @@ export function aliasedOpcodes(
 
     const arity = instr.length - 1;
     if (arity < 1) continue; // 0-operand opcodes have nothing to permute
+
+    const opName = compiler.OP_NAME[op];
+    if (!OP_ORIGINAL[opName]) continue; // only consider original ops, not already-specialized ones
 
     const existing = opStats.get(op);
     if (!existing) {

@@ -50,39 +50,17 @@ import type {
   Bytecode,
   Instruction,
   RegisterOperand,
-  InstrOperand,
 } from "../../types.ts";
-import * as b from "../../types.ts";
 import { Compiler } from "../../compiler.ts";
 import { getRandomInt } from "../../utils/random-utils.ts";
 import { U16_MAX } from "../../utils/op-utils.ts";
 import { Template } from "../../template.ts";
-
-// ── Helpers (shared pattern with dispatcher.ts) ──────────────────────────────
-
-function ref(r: RegisterOperand): RegisterOperand {
-  return b.registerOperand(r.id, r.fnId);
-}
-
-function buildMaxIdMap(bc: Bytecode): Map<number, number> {
-  const maxId = new Map<number, number>();
-  for (const instr of bc) {
-    for (let j = 1; j < instr.length; j++) {
-      const op = instr[j] as any;
-      if (op && op.type === "register") {
-        const cur = maxId.get(op.fnId) ?? -1;
-        if (op.id > cur) maxId.set(op.fnId, op.id);
-      }
-    }
-  }
-  return maxId;
-}
-
-function extractLabel(op: InstrOperand | undefined): string | null {
-  if (op && typeof op === "object" && (op as any).type === "label")
-    return (op as any).label as string;
-  return null;
-}
+import {
+  ref,
+  buildMaxIdMap,
+  forEachFunction,
+  extractLabel,
+} from "../../utils/pass-utils.ts";
 
 // ── Basic block splitting ────────────────────────────────────────────────────
 
@@ -240,7 +218,8 @@ function promoteMultiBlockRegisters(blocks: BasicBlock[]): void {
 
   if (multiBlockRegs.size === 0) return;
 
-  // Second pass: promote all operand instances of multi-block registers
+  // Second pass: pin all operand instances of multi-block registers so that
+  // resolveRegisters assigns them to the "local::" pool (no slot reuse).
   for (const block of blocks) {
     const allInstrs = block.terminator
       ? [...block.body, block.terminator!]
@@ -252,7 +231,7 @@ function promoteMultiBlockRegisters(blocks: BasicBlock[]): void {
         if (op && typeof op === "object" && op.type === "register") {
           const key = `${op.fnId}:${op.id}`;
           if (multiBlockRegs.has(key)) {
-            delete op.kind; // "local::" pool — no slot reuse
+            op.pinned = true;
           }
         }
       }
@@ -294,17 +273,17 @@ function buildDispatchTemplate(
   const tmpl = new Template(source);
   const result = tmpl.compileInline({}, compiler, fnId, maxId);
 
-  // Mark ALL dispatch-loop registers as "local" pool so resolveRegisters
-  // never reuses their slots for function-body temps.  The dispatch loop
-  // is re-entered on every state transition (backward JUMP to while_top),
-  // but the linear-scan liveness in resolveRegisters doesn't track loops,
-  // so it would incorrectly think dispatch temps die after one pass and
-  // overlap their slots with body registers that are live across blocks.
+  // Pin ALL dispatch-loop registers so resolveRegisters assigns them to the
+  // "local::" pool (no slot reuse).  The dispatch loop is re-entered on every
+  // state transition (backward JUMP to while_top), but the linear-scan liveness
+  // in resolveRegisters doesn't track loops and would incorrectly treat dispatch
+  // temps as dead after one pass, allowing their slots to be reused by body
+  // registers that are live across blocks.
   for (const instr of result.bytecode) {
     for (let j = 1; j < instr.length; j++) {
       const op = instr[j] as any;
       if (op && typeof op === "object" && op.type === "register") {
-        delete op.kind; // removes "temp" → defaults to "local::" pool
+        op.pinned = true;
       }
     }
   }
@@ -363,7 +342,7 @@ function processFunctionBlock(
   fnId: number,
   compiler: Compiler,
   maxId: Map<number, number>,
-): { instrs: Bytecode; templateBytecode: Bytecode } {
+): { instrs: Bytecode; tail: Bytecode } {
   const OP = compiler.OP;
 
   // Only transform functions that contain simple jumps
@@ -371,11 +350,11 @@ function processFunctionBlock(
     const op = instr[0];
     return op === OP.JUMP || op === OP.JUMP_IF_FALSE || op === OP.JUMP_IF_TRUE;
   });
-  if (!hasRoutableJump) return { instrs, templateBytecode: [] };
+  if (!hasRoutableJump) return { instrs, tail: [] };
 
   // ── 1. Split into basic blocks ──────────────────────────────────────────
   const blocks = splitBasicBlocks(instrs, compiler);
-  if (blocks.length < 2) return { instrs, templateBytecode: [] };
+  if (blocks.length < 2) return { instrs, tail: [] };
 
   // ── 1b. Promote cross-block registers to "local" pool ──────────────────
   // resolveRegisters does a linear-scan liveness analysis that doesn't
@@ -572,7 +551,7 @@ function processFunctionBlock(
     }
   }
 
-  return { instrs: out, templateBytecode: dispatch.innerBytecode };
+  return { instrs: out, tail: dispatch.innerBytecode };
 }
 
 // ── Pass entry point ──────────────────────────────────────────────────────────
@@ -581,62 +560,7 @@ export function controlFlowFlattening(
   compiler: Compiler,
 ): { bytecode: Bytecode } {
   const maxId = buildMaxIdMap(bc);
-
-  const entryLabels = new Set(compiler.fnDescriptors.map((d) => d.entryLabel));
-  const entryLabelToFnId = new Map(
-    compiler.fnDescriptors.map((d) => [d.entryLabel!, d._fnIdx!]),
+  return forEachFunction(bc, compiler, (fnInstrs, fnId) =>
+    processFunctionBlock(fnInstrs, fnId, compiler, maxId),
   );
-
-  const result: Bytecode = [];
-  const templateBytecodes: Bytecode[] = [];
-  let i = 0;
-
-  while (i < bc.length) {
-    const instr = bc[i];
-    const [op, operand0] = instr;
-    const isEntryLabel =
-      op === null &&
-      (operand0 as any)?.type === "defineLabel" &&
-      entryLabels.has((operand0 as any).label);
-
-    if (!isEntryLabel) {
-      result.push(instr);
-      i++;
-      continue;
-    }
-
-    const entryLabel = (operand0 as any).label as string;
-    const fnId = entryLabelToFnId.get(entryLabel)!;
-    i++;
-
-    const fnInstrs: Bytecode = [];
-    while (i < bc.length) {
-      const next = bc[i];
-      const [nextOp, nextOp0] = next;
-      if (
-        nextOp === null &&
-        (nextOp0 as any)?.type === "defineLabel" &&
-        entryLabels.has((nextOp0 as any).label)
-      )
-        break;
-      fnInstrs.push(next);
-      i++;
-    }
-
-    result.push(instr); // the defineLabel
-    const { instrs: processed, templateBytecode } = processFunctionBlock(
-      fnInstrs,
-      fnId,
-      compiler,
-      maxId,
-    );
-    result.push(...processed);
-    if (templateBytecode.length > 0) templateBytecodes.push(templateBytecode);
-  }
-
-  for (const tb of templateBytecodes) {
-    result.push(...tb);
-  }
-
-  return { bytecode: result };
 }

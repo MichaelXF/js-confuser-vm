@@ -29,32 +29,7 @@ import { Compiler } from "../../compiler.ts";
 import { Template } from "../../template.ts";
 import type { Bytecode, RegisterOperand } from "../../types.ts";
 import * as b from "../../types.ts";
-
-// ── Helpers (shared pattern with dispatcher.ts / controlFlowFlattening.ts) ──
-
-function ref(r: RegisterOperand): RegisterOperand {
-  return b.registerOperand(r.id, r.fnId);
-}
-
-function buildMaxIdMap(bc: Bytecode): Map<number, number> {
-  const maxId = new Map<number, number>();
-  for (const instr of bc) {
-    for (let j = 1; j < instr.length; j++) {
-      const op = instr[j] as any;
-      if (op && op.type === "register") {
-        const cur = maxId.get(op.fnId) ?? -1;
-        if (op.id > cur) maxId.set(op.fnId, op.id);
-      }
-    }
-  }
-  return maxId;
-}
-
-function allocReg(fnId: number, maxId: Map<number, number>): RegisterOperand {
-  const next = (maxId.get(fnId) ?? -1) + 1;
-  maxId.set(fnId, next);
-  return b.registerOperand(next, fnId);
-}
+import { ref, buildMaxIdMap, allocReg, forEachFunction } from "../../utils/pass-utils.ts";
 
 // ── Per-function transformation ──────────────────────────────────────────────
 
@@ -141,63 +116,14 @@ export function stringConcealing(
   `).compile({}, compiler);
   const decodeDesc = decodeTemplate.functions[0];
 
-  // Build function boundary detection (same pattern as dispatcher.ts).
-  const entryLabels = new Set(compiler.fnDescriptors.map((d) => d.entryLabel));
-  const entryLabelToFnId = new Map(
-    compiler.fnDescriptors.map((d) => [d.entryLabel!, d._fnIdx!]),
+  const { bytecode } = forEachFunction(bc, compiler, (fnInstrs, fnId) =>
+    processFunctionBlock(fnInstrs, fnId, compiler, maxId, decodeDesc),
   );
 
-  const result: Bytecode = [];
-  let i = 0;
-
-  while (i < bc.length) {
-    const instr = bc[i];
-    const [op, operand0] = instr;
-    const isEntryLabel =
-      op === null &&
-      (operand0 as any)?.type === "defineLabel" &&
-      entryLabels.has((operand0 as any).label);
-
-    if (!isEntryLabel) {
-      result.push(instr);
-      i++;
-      continue;
-    }
-
-    // Found a function entry label. Collect all instructions belonging to
-    // this function (until the next entry label or end of bytecode).
-    const entryLabel = (operand0 as any).label as string;
-    const fnId = entryLabelToFnId.get(entryLabel)!;
-    i++; // step past the defineLabel itself
-
-    const fnInstrs: Bytecode = [];
-    while (i < bc.length) {
-      const next = bc[i];
-      const [nextOp, nextOp0] = next;
-      if (
-        nextOp === null &&
-        (nextOp0 as any)?.type === "defineLabel" &&
-        entryLabels.has((nextOp0 as any).label)
-      )
-        break;
-      fnInstrs.push(next);
-      i++;
-    }
-
-    // Emit the entry defineLabel, then the (potentially transformed) body.
-    result.push(instr);
-    const { instrs: processed } = processFunctionBlock(
-      fnInstrs,
-      fnId,
-      compiler,
-      maxId,
-      decodeDesc,
-    );
-    result.push(...processed);
-  }
-
   // Append the decode function's bytecode at the end (defines its entryLabel).
-  result.push(...decodeTemplate.bytecode);
+  // This is a single shared closure, not per-function, so it lives outside
+  // forEachFunction's tail mechanism.
+  bytecode.push(...decodeTemplate.bytecode);
 
-  return { bytecode: result };
+  return { bytecode };
 }

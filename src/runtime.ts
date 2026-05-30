@@ -17,9 +17,15 @@ function decodeBytecode(s) {
       : Uint8Array.from(atob(s), function (c) {
           return c.charCodeAt(0);
         });
-  // Each slot is a u16 stored as 2 little-endian bytes.
-  var r = new Uint16Array(b.length / 2);
-  for (var i = 0; i < r.length; i++) r[i] = b[i * 2] | (b[i * 2 + 1] << 8);
+  // Each slot is a u32 stored as 4 little-endian bytes.
+  var r = new Uint32Array(b.length / 4);
+  for (var i = 0; i < r.length; i++)
+    r[i] =
+      (b[i * 4] |
+        (b[i * 4 + 1] << 8) |
+        (b[i * 4 + 2] << 16) |
+        (b[i * 4 + 3] << 24)) >>>
+      0;
   return r;
 }
 
@@ -100,7 +106,6 @@ function VM(bytecode, mainStartPc, mainRegCount, constants, globals) {
     0,
     0,
   );
-  this._internals = {};
 }
 
 // Consume the next slot from the flat bytecode stream and advance the PC.
@@ -258,8 +263,7 @@ VM.prototype.run = function () {
         }
 
         case OP.STORE_GLOBAL: {
-          // nameIdx and key are consumed inline so the concealConstants runtime
-          // transform can rewrite this._constant() consistently.
+          // globals[globalName] = regs[src]
           this.globals[this._constant()] = regs[base + this._operand()];
           break;
         }
@@ -284,13 +288,14 @@ VM.prototype.run = function () {
           var obj = regs[base + this._operand()];
           var key = regs[base + this._operand()];
           var val = regs[base + this._operand()];
-          // Reflect.set performs [[Set]] without throwing on failure,
-          // correctly simulating sloppy-mode assignment from a strict-mode host.
+          // Reflect.set performs [[Set]] without throwing on failure (non-strict mode behavior)
           Reflect.set(obj, key, val);
           break;
         }
 
         case OP.DELETE_PROP: {
+          // regs[dst] = delete regs[obj][regs[key]]
+          // The delete operator returns true if successful which is most cases
           var dst = this._operand();
           var obj = regs[base + this._operand()];
           var key = regs[base + this._operand()];
@@ -298,7 +303,7 @@ VM.prototype.run = function () {
           break;
         }
 
-        // ── Arithmetic  (dst, src1, src2) ────────────────────────────────────
+        // Arithmetic  (dst, src1, src2)
         case OP.ADD: {
           var dst = this._operand();
           var a = regs[base + this._operand()];
@@ -366,7 +371,7 @@ VM.prototype.run = function () {
           break;
         }
 
-        // ── Comparison  (dst, src1, src2) ─────────────────────────────────────
+        // Comparison  (dst, src1, src2)
         case OP.LT: {
           var dst = this._operand();
           var a = regs[base + this._operand()];
@@ -422,13 +427,14 @@ VM.prototype.run = function () {
           break;
         }
         case OP.INSTANCEOF: {
+          // regs[dst] = regs[obj] instanceof regs[ctor]
           var dst = this._operand();
           var obj = regs[base + this._operand()];
           var ctor = regs[base + this._operand()];
           if (typeof ctor === "function") {
             regs[base + dst] = obj instanceof ctor;
           } else {
-            // VM Closure - walk prototype chain for identity with ctor.prototype.
+            // TODO: Why is this needed?
             var proto = ctor.prototype;
             var target = Object.getPrototypeOf(obj);
             var result = false;
@@ -444,7 +450,7 @@ VM.prototype.run = function () {
           break;
         }
 
-        // ── Unary  (dst, src) ─────────────────────────────────────────────────
+        // Unary  (dst, src)
         case OP.UNARY_NEG: {
           var dst = this._operand();
           regs[base + dst] = -regs[base + this._operand()];
@@ -472,12 +478,13 @@ VM.prototype.run = function () {
         }
         case OP.VOID: {
           var dst = this._operand();
-          this._operand(); // consume src — evaluated for side-effects by compiler
+          this._operand(); // consumes argument (intended)
           regs[base + dst] = undefined;
           break;
         }
         case OP.TYPEOF_SAFE: {
-          // dst, nameConstIdx — safe typeof for potentially-undeclared globals.
+          // regs[dst] = typeof window[name]
+          // Never throws ReferenceError, instead returns undefined for undeclared variables
           var dst = this._operand();
           var name = this._constant();
           var val = Object.prototype.hasOwnProperty.call(this.globals, name)
@@ -487,7 +494,7 @@ VM.prototype.run = function () {
           break;
         }
 
-        // ── Control flow ──────────────────────────────────────────────────────
+        // Control flow
         case OP.JUMP:
           frame._pc = this._operand();
           break;
@@ -507,7 +514,7 @@ VM.prototype.run = function () {
           break;
         }
 
-        // ── Calls ─────────────────────────────────────────────────────────────
+        // Calls
         case OP.CALL: {
           // dst, calleeReg, argc, [argReg...]
           var dst = this._operand();
@@ -618,7 +625,7 @@ VM.prototype.run = function () {
 
           if (this._frameStack.length === 0) return retVal; // main script returning
 
-          // new-call rule: primitive return -> discard, use the constructed object instead
+          // NewExpression: When invoking from the 'new' keyword, the newly constructed object is returned instead (if the original function doesn't return an object)
           if (frame._newObj !== null) {
             if (typeof retVal !== "object" || retVal === null)
               retVal = frame._newObj;
@@ -633,7 +640,7 @@ VM.prototype.run = function () {
         case OP.THROW:
           throw regs[base + this._operand()];
 
-        // ── Closures ──────────────────────────────────────────────────────────
+        // Closures
         case OP.MAKE_CLOSURE: {
           // dst, startPc, paramCount, regCount, uvCount, [isLocal, idx, ...]
           var dst = this._operand();
@@ -704,7 +711,7 @@ VM.prototype.run = function () {
           break;
         }
 
-        // ── Collections ───────────────────────────────────────────────────────
+        // Collections
         case OP.BUILD_ARRAY: {
           // dst, count, [elemReg...]
           var dst = this._operand();
@@ -730,7 +737,7 @@ VM.prototype.run = function () {
           break;
         }
 
-        // ── Property definitions (getters / setters) ──────────────────────────
+        // Object methods (getters / setters)
         case OP.DEFINE_GETTER: {
           // obj, key, fn
           var obj = regs[base + this._operand()];
@@ -826,7 +833,7 @@ VM.prototype.run = function () {
           break;
         }
 
-        // ── Self-modifying bytecode ───────────────────────────────────────────
+        // Self-modifying bytecode
         case OP.PATCH: {
           // destPc, sliceStart, sliceEnd
           var destPc = this._operand();
@@ -839,10 +846,7 @@ VM.prototype.run = function () {
         }
 
         case OP.JUMP_REG: {
-          // Indirect jump: target PC is read from a register rather than a
-          // bytecode immediate. Used by Dispatcher pass so that static
-          // analysis cannot determine the jump destination without tracking the
-          // register value (which contains an encoded PC resolved at runtime).
+          // Indirect jump: allows VM to jump based on runtime values.
           frame._pc = regs[base + this._operand()];
           break;
         }
@@ -858,9 +862,8 @@ VM.prototype.run = function () {
           );
       }
     } catch (err) {
-      // Exception handler unwinding (CPython-style frame walk, Lua-style upvalue close).
-      // Walk from the current frame upward until we find a frame that has an open
-      // exception handler (TRY_SETUP without a matching TRY_END).
+      // Exception handler unwinding
+      // Walk from the current frame upward until we find a frame that has an open exception handler (TRY_SETUP without a matching TRY_END).
       // For every frame we abandon along the way, close its captured upvalues.
       var handledFrame = null;
       var searchFrame = this._currentFrame;
@@ -877,7 +880,7 @@ VM.prototype.run = function () {
         this._currentFrame = searchFrame;
       }
 
-      if (!handledFrame) throw err; // no handler anywhere — propagate to host
+      if (!handledFrame) throw err; // if there's no handler, propagate back to host
 
       var h = handledFrame._handlerStack.pop();
       // Discard any call-frames that were pushed inside the try body.
@@ -892,15 +895,7 @@ VM.prototype.run = function () {
   }
 };
 
-VM.prototype.init = function () {
-  var _this = this;
-
-  {
-    /* @INIT */
-  }
-};
-
-// Boot
+/* @BOOT */ // <- This comment can't be removed!
 var globals: any = {}; // global object for globals
 
 // Always pull built-ins from globalThis so eval() scoping can't shadow them
@@ -929,5 +924,4 @@ var vm = new VM(
   CONSTANTS,
   globals,
 );
-vm.init();
 vm.run();

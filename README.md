@@ -42,10 +42,10 @@ JsConfuserVM.obfuscate(`
   dispatcher: true, // create middleman blocks to process jumps?
   selfModifying: true, // do self-modifying bytecode for function bodies?
   macroOpcodes: true, // create combined opcodes for repeated instruction sequences?
-  microOpcodes: true, // break opcodes into sub-opcodes?
   specializedOpcodes: true, // create specialized opcodes for commonly used opcode+operand pairs?
   aliasedOpcodes: true, // create duplicate opcodes for commonly used opcodes?
   timingChecks: true, // add timing checks to detect debuggers?
+  classObfuscation: true, // obfuscate the VM runtime classes?
   minify: true // pass final output through Google Closure Compiler? (Renames VM class properties)
 }).then(result => {
   console.log(result.code)
@@ -340,53 +340,6 @@ case 5074:
   break;
 ```
 
-#### `microOpcodes` (true/false)
-
-Breaks opcodes into mulitple sub-opcodes.
-
-```js
-// Input Code
-console.log("Hello world!");
-
-// Before
-// [2, 1, 0, 0],        LOAD_GLOBAL  reg[1] = console                     1:0-1:7
-// [0, 2, 1, 0],        LOAD_CONST  reg[2] = "log"                        1:0-1:27
-// [8, 3, 1, 2],        GET_PROP  reg[3] = reg[1][reg[2]]                 1:0-1:27
-// [0, 4, 2, 0],        LOAD_CONST  reg[4] = "Hello world!"               1:12-1:26
-// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = reg[3](recv=reg[1], 1 args) 1:0-1:27
-
-// What the opcode "LOAD_CONST" looks like:
-case OP.LOAD_CONST:
-    var dst = this._operand();
-    frame.regs[dst] = this._constant();
-    break;
-
-// After
-// [60, 1],             MICRO_LOAD_GLOBAL_0  1                            1:0-1:7
-// [61, 0, 0],          MICRO_LOAD_GLOBAL_1  [0, 0]                       
-// [62],                MICRO_LOAD_GLOBAL_2                               
-// [63],                MICRO_LOAD_GLOBAL_3                               
-// [58, 2],             MICRO_LOAD_CONST_0  2                             1:0-1:27
-// [59, 1, 0],          MICRO_LOAD_CONST_1  [1, 0]                        
-// [64, 3],             MICRO_GET_PROP_0  3                               1:0-1:27
-// [65, 1],             MICRO_GET_PROP_1  1                               
-// [66, 2],             MICRO_GET_PROP_2  2                               
-// [67],                MICRO_GET_PROP_3                                  
-// [58, 4],             MICRO_LOAD_CONST_0  4                             1:12-1:26
-// [59, 2, 0],          MICRO_LOAD_CONST_1  [2, 0]                        
-// [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = reg[3](recv=reg[1], 1 args) 1:0-1:27
-
-// What the opcodes "MICRO_LOAD_CONST_0" (58) and "MICRO_LOAD_CONST_1" (59) look like:
-case 58:
-    // MICRO_LOAD_CONST_0
-    this._internals[0] = this._operand();
-    break;
-case 59:
-    // MICRO_LOAD_CONST_1
-    frame.regs[this._internals[0]] = this._constant();
-    break;
-```
-
 #### `specializedOpcodes` (true/false)
 
 Creates specialized opcodes for commonly used opcode+operand pairs.
@@ -519,6 +472,9 @@ console.log("Hello, world!");
 
 Detects the use of debuggers by checking for >1second pauses. May break code with slow sync tasks.
 
+### `classObfuscation` (true/false)
+
+Obfuscates the VM runtime classes by shuffling the order of declarations and methods.
 
 #### `minify` (true/false)
 

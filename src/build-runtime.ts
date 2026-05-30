@@ -3,14 +3,12 @@ import { parse } from "@babel/parser";
 import type * as t from "@babel/types";
 import type { Options } from "./options.ts";
 import { applyMacroOpcodes } from "./transforms/runtime/macroOpcodes.ts";
-import { applyMicroOpcodes } from "./transforms/runtime/microOpcodes.ts";
-import { applyInteralVariablesToRuntime } from "./transforms/runtime/internalVariables.ts";
 import { applyShuffleOpcodes } from "./transforms/runtime/shuffleOpcodes.ts";
 import { applyMinify } from "./transforms/runtime/minify.ts";
 import { Compiler } from "./compiler.ts";
 import { applySpecializedOpcodes } from "./transforms/runtime/specializedOpcodes.ts";
 import { applyAliasedOpcodes } from "./transforms/runtime/aliasedOpcodes.ts";
-import { applyHandlerTable } from "./transforms/runtime/handlerTable.ts";
+import { applyClassObfuscation } from "./transforms/runtime/classObfuscation.ts";
 import type * as b from "./types.ts";
 
 export async function obfuscateRuntime(
@@ -27,34 +25,47 @@ export async function obfuscateRuntime(
     throw new Error("VM-Runtime final parsing failed", { cause: error });
   }
 
-  // Specialized opcode cases must be applied BEFORE shuffleOpcodes
-  if (options.specializedOpcodes) {
-    applySpecializedOpcodes(ast, compiler);
+  const timings: { [name: string]: number } = {};
+  function runAndTime(pass: typeof applySpecializedOpcodes, name: string) {
+    const startedAt = performance.now();
+
+    compiler.log(`Running runtime pass ${name}...`);
+
+    pass(ast, compiler);
+
+    const endedAt = performance.now();
+    const elaspedMs = endedAt - startedAt;
+    timings[name] = elaspedMs;
+
+    compiler.log(
+      `Runtime pass ${name} completed in ${Math.floor(elaspedMs)}ms`,
+    );
   }
 
-  // Micro opcode cases must be applied BEFORE shuffleOpcodes
-  if (options.microOpcodes && Object.keys(compiler.MICRO_OPS).length > 0) {
-    // applyInteralVariablesToRuntime(ast, compiler);
-
-    applyMicroOpcodes(ast, compiler);
+  // Specialized opcode cases must be applied BEFORE shuffleOpcodes
+  if (options.specializedOpcodes) {
+    runAndTime(applySpecializedOpcodes, "applySpecializedOpcodes");
   }
 
   // Macro opcode cases must be applied BEFORE shuffleOpcodes
   if (options.macroOpcodes && Object.keys(compiler.MACRO_OPS).length > 0) {
-    applyMacroOpcodes(ast, compiler);
+    runAndTime(applyMacroOpcodes, "applyMacroOpcodes");
   }
 
   // Aliased opcode cases must be applied BEFORE shuffleOpcodes
   if (options.aliasedOpcodes) {
-    applyAliasedOpcodes(ast, compiler);
+    runAndTime(applyAliasedOpcodes, "applyAliasedOpcodes");
   }
 
   // Shuffle opcode handle order
   if (options.shuffleOpcodes) {
-    applyShuffleOpcodes(ast);
+    runAndTime(applyShuffleOpcodes, "applyShuffleOpcodes");
   }
 
-  // applyHandlerTable(ast);
+  // Shuffle top-level var declarations and prototype method definitions
+  if (options.classObfuscation) {
+    runAndTime(applyClassObfuscation, "applyClassObfuscation");
+  }
 
   let generated: string;
   try {
@@ -69,7 +80,11 @@ export async function obfuscateRuntime(
   // Minify code?
   if (options.minify) {
     try {
+      let startedAt = performance.now();
+      compiler.log("Running minify...");
       generated = await applyMinify(generated);
+      let elaspedMs = performance.now() - startedAt;
+      compiler.log(`Minify completed in ${Math.floor(elaspedMs)}`);
     } catch (error) {
       throw new Error("VM-Runtime final minification failed", { cause: error });
     }
