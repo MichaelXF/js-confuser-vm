@@ -14,7 +14,7 @@
 
 - Added new option `verbose` which `console.log`'s useful info for debugging purposes.
 
-- Removed option `microOpcodes` - this option introduced stratch registers which left runtime values exposed, and were easily tracable by deobfuscators. The cons outweighed the pros and since it conflicts with the other obfuscations already present, it was removed.
+- Removed option `microOpcodes` - this option introduced scratch registers which left runtime values exposed, and were easily traceable by deobfuscators. The cons outweighed the pros and since it conflicts with the other obfuscations already present, it was removed.
 
 Planned: Zero out the callee's register window on return (one fill(undefined) or length)
 
