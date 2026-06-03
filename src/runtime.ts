@@ -8,15 +8,18 @@ const TIMING_CHECKS = false;
 // The text above is not included in the compiled output - for type intellisense only
 // @START
 
+function base64ToBytes(s) {
+  return typeof Buffer !== "undefined"
+    ? Buffer.from(s, "base64")
+    : Uint8Array.from(atob(s), function (c) {
+        return c.charCodeAt(0);
+      });
+}
+
 function decodeBytecode(s) {
   if (!ENCODE_BYTECODE) return s;
 
-  var b =
-    typeof Buffer !== "undefined"
-      ? Buffer.from(s, "base64")
-      : Uint8Array.from(atob(s), function (c) {
-          return c.charCodeAt(0);
-        });
+  var b = base64ToBytes(s);
   // Each slot is a u32 stored as 4 little-endian bytes.
   var r = new Uint32Array(b.length / 4);
   for (var i = 0; i < r.length; i++)
@@ -143,12 +146,7 @@ VM.prototype._constant = function (idxIn, keyIn) {
   if (!key) return v;
   if (typeof v === "number") return v ^ key;
   // String: base64-decode to u16 LE byte pairs, then XOR each code with (key+i).
-  var b =
-    typeof Buffer !== "undefined"
-      ? Buffer.from(v, "base64")
-      : Uint8Array.from(atob(v), function (c) {
-          return c.charCodeAt(0);
-        });
+  var b = base64ToBytes(v);
   var out = "";
   for (var i = 0; i < b.length / 2; i++) {
     var code = b[i * 2] | (b[i * 2 + 1] << 8); // u16 LE
@@ -536,8 +534,14 @@ VM.prototype.run = function () {
               dst,
               newBase,
             );
-            for (var i = 0; i < args.length && i < closure.fn.regCount; i++) {
-              this._regs[newBase + i] = args[i];
+            if (closure.fn.hasRest) {
+              var restSlot = closure.fn.paramCount - 1;
+              for (var i = 0; i < restSlot; i++)
+                this._regs[newBase + i] = i < args.length ? args[i] : undefined;
+              this._regs[newBase + restSlot] = args.slice(restSlot);
+            } else {
+              for (var i = 0; i < args.length && i < closure.fn.regCount; i++)
+                this._regs[newBase + i] = args[i];
             }
             if (closure.fn.paramCount < closure.fn.regCount) {
               this._regs[newBase + closure.fn.paramCount] = args;
@@ -572,8 +576,14 @@ VM.prototype.run = function () {
               dst,
               newBase,
             );
-            for (var i = 0; i < args.length && i < closure.fn.regCount; i++) {
-              this._regs[newBase + i] = args[i];
+            if (closure.fn.hasRest) {
+              var restSlot = closure.fn.paramCount - 1;
+              for (var i = 0; i < restSlot; i++)
+                this._regs[newBase + i] = i < args.length ? args[i] : undefined;
+              this._regs[newBase + restSlot] = args.slice(restSlot);
+            } else {
+              for (var i = 0; i < args.length && i < closure.fn.regCount; i++)
+                this._regs[newBase + i] = args[i];
             }
             if (closure.fn.paramCount < closure.fn.regCount) {
               this._regs[newBase + closure.fn.paramCount] = args;
@@ -601,8 +611,14 @@ VM.prototype.run = function () {
             this._ensureRegisterWindow(newBase, closure.fn.regCount);
             this._regsTop = newBase + closure.fn.regCount;
             var f = new Frame(closure, frame._pc, frame, newObj, dst, newBase);
-            for (var i = 0; i < args.length && i < closure.fn.regCount; i++) {
-              this._regs[newBase + i] = args[i];
+            if (closure.fn.hasRest) {
+              var restSlot = closure.fn.paramCount - 1;
+              for (var i = 0; i < restSlot; i++)
+                this._regs[newBase + i] = i < args.length ? args[i] : undefined;
+              this._regs[newBase + restSlot] = args.slice(restSlot);
+            } else {
+              for (var i = 0; i < args.length && i < closure.fn.regCount; i++)
+                this._regs[newBase + i] = args[i];
             }
             if (closure.fn.paramCount < closure.fn.regCount) {
               this._regs[newBase + closure.fn.paramCount] = args;
@@ -642,12 +658,13 @@ VM.prototype.run = function () {
 
         // Closures
         case OP.MAKE_CLOSURE: {
-          // dst, startPc, paramCount, regCount, uvCount, [isLocal, idx, ...]
+          // dst, startPc, paramCount, regCount, uvCount, hasRest, [isLocal, idx, ...]
           var dst = this._operand();
           var startPc = this._operand();
           var paramCount = this._operand();
           var regCount = this._operand();
           var uvCount = this._operand();
+          var hasRest = this._operand(); // 1 if last param is a rest element
 
           var uvDescs = new Array(uvCount);
           for (var i = 0; i < uvCount; i++) {
@@ -661,6 +678,7 @@ VM.prototype.run = function () {
             regCount: regCount,
             startPc: startPc,
             upvalueDescriptors: uvDescs,
+            hasRest: hasRest,
           };
 
           var closure = new Closure(fn);
@@ -696,8 +714,14 @@ VM.prototype.run = function () {
                 0,
               );
               sub._currentFrame = f;
-              for (var i = 0; i < args.length && i < c.fn.regCount; i++) {
-                sub._regs[i] = args[i];
+              if (c.fn.hasRest) {
+                var restSlot = c.fn.paramCount - 1;
+                for (var i = 0; i < restSlot; i++)
+                  sub._regs[i] = i < args.length ? args[i] : undefined;
+                sub._regs[restSlot] = args.slice(restSlot);
+              } else {
+                for (var i = 0; i < args.length && i < c.fn.regCount; i++)
+                  sub._regs[i] = args[i];
               }
               if (c.fn.paramCount < c.fn.regCount) {
                 sub._regs[c.fn.paramCount] = args;

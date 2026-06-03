@@ -10,14 +10,15 @@ import { applySpecializedOpcodes } from "./transforms/runtime/specializedOpcodes
 import { applyAliasedOpcodes } from "./transforms/runtime/aliasedOpcodes.ts";
 import { applyClassObfuscation } from "./transforms/runtime/classObfuscation.ts";
 import type * as b from "./types.ts";
+import { getSwitchStatement } from "./utils/ast-utils.ts";
 
 export async function obfuscateRuntime(
   runtime: string,
   bytecode: b.Bytecode,
   options: Options,
   compiler: Compiler,
-  generateBytecodeComment,
-) {
+  generateBytecodeComment: () => string,
+): Promise<b.ObfuscationResult> {
   let ast: t.File;
   try {
     ast = parse(runtime, { sourceType: "unambiguous" });
@@ -34,11 +35,11 @@ export async function obfuscateRuntime(
     pass(ast, compiler);
 
     const endedAt = performance.now();
-    const elaspedMs = endedAt - startedAt;
-    timings[name] = elaspedMs;
+    const elapsedMs = endedAt - startedAt;
+    timings[name] = elapsedMs;
 
     compiler.log(
-      `Runtime pass ${name} completed in ${Math.floor(elaspedMs)}ms`,
+      `Runtime pass ${name} completed in ${Math.floor(elapsedMs)}ms`,
     );
   }
 
@@ -67,6 +68,8 @@ export async function obfuscateRuntime(
     runAndTime(applyClassObfuscation, "applyClassObfuscation");
   }
 
+  let handlerCount = getSwitchStatement(ast).cases.length;
+
   let generated: string;
   try {
     generated = generate(ast).code;
@@ -83,12 +86,15 @@ export async function obfuscateRuntime(
       let startedAt = performance.now();
       compiler.log("Running minify...");
       generated = await applyMinify(generated);
-      let elaspedMs = performance.now() - startedAt;
-      compiler.log(`Minify completed in ${Math.floor(elaspedMs)}`);
+      let elapsedMs = performance.now() - startedAt;
+      compiler.log(`Minify completed in ${Math.floor(elapsedMs)}`);
     } catch (error) {
       throw new Error("VM-Runtime final minification failed", { cause: error });
     }
   }
 
-  return generated;
+  return {
+    code: generated,
+    handlerCount: handlerCount,
+  };
 }
