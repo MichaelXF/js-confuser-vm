@@ -277,6 +277,8 @@ interface FnDescriptor {
   upvalues?: any[];
   _fnIdx?: number;
 
+  hasRest?: boolean;
+
   /**
    * Only populated AFTER resolveLabels
    */
@@ -550,13 +552,24 @@ export class Compiler {
     this._loopStack = [];
 
     // 1. Define parameters as virtual registers (occupy the first IDs in order).
+    let hasRest = false;
     for (const param of node.params) {
-      let identifier = param.type === "AssignmentPattern" ? param.left : param;
-      ok(
-        identifier.type === "Identifier",
-        "Only simple identifiers allowed as parameters",
-      );
-      ctx.scope.define((identifier as t.Identifier).name, ctx);
+      if (param.type === "RestElement") {
+        ok(
+          param.argument.type === "Identifier",
+          "Rest element must be a simple identifier",
+        );
+        hasRest = true;
+        ctx.scope.define((param.argument as t.Identifier).name, ctx);
+      } else {
+        let identifier =
+          param.type === "AssignmentPattern" ? param.left : param;
+        ok(
+          identifier.type === "Identifier",
+          "Only simple identifiers allowed as parameters",
+        );
+        ctx.scope.define((identifier as t.Identifier).name, ctx);
+      }
     }
 
     // 2. Reserve the `arguments` virtual register (immediately after params).
@@ -625,6 +638,7 @@ export class Compiler {
     desc.bytecode = ctx.bc as b.Bytecode;
     desc._fnIdx = fnIdx;
     desc.paramCount = node.params.length;
+    desc.hasRest = hasRest;
     // regCount is NOT set here — resolveRegisters() fills it after liveness analysis.
     desc.upvalues = ctx.upvalues.slice();
     desc.ctx = ctx;
@@ -652,6 +666,7 @@ export class Compiler {
         desc.paramCount,
         b.fnRegCountOperand(desc._fnIdx), // resolved by resolveRegisters()
         desc.upvalues.length,
+        desc.hasRest ? 1 : 0, // 1 = last param is a rest element
         ...uvOperands,
       ] as b.Instruction,
       node,
@@ -2518,7 +2533,7 @@ class Serializer {
 export async function compileAndSerialize(
   sourceCode: string,
   options: Options,
-) {
+): Promise<b.ObfuscationResult> {
   const compiler = new Compiler(options);
   let bytecode = compiler.compile(sourceCode);
 
@@ -2639,7 +2654,7 @@ export async function compileAndSerialize(
   // So for the most useful comments, it's ran absolutely last
   // Tests also rely on correct comments so it's required
   const generateBytecodeComment = () => {
-    var lines = [];
+    var lines: string[] = [];
     for (const instr of bytecode) {
       const comment = compiler.serializer._generateComment(instr);
       lines.push("// " + comment);
@@ -2648,7 +2663,7 @@ export async function compileAndSerialize(
     return lines.join("\n");
   };
 
-  const code = await obfuscateRuntime(
+  const obfuscationResult = await obfuscateRuntime(
     runtimeSource,
     bytecode,
     options,
@@ -2656,5 +2671,5 @@ export async function compileAndSerialize(
     generateBytecodeComment,
   );
 
-  return { code };
+  return obfuscationResult;
 }

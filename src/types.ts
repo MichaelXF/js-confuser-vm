@@ -1,5 +1,5 @@
 // Bytecode supports both real instructions and IR pseudo-instructions
-// Real instruction: [OP.ADD, 5]  or multi-operand: [OP.MAKE_CLOSURE, labelRef, 2, 3, 0]
+// Real instruction: [OP.ADD, 5]  or multi-operand: [OP.MAKE_CLOSURE, labelRef, 2, 3, 0, 0]
 // IR instruction: [null, { type: "defineLabel", label: "FN_ENTRY_1" }]
 
 // IR instructions are used to hold symbolic information during compilation
@@ -95,4 +95,9 @@ export function freeRegOperand(reg: RegisterOperand): FreeRegOperand {
   if (reg.kind !== undefined) op.kind = reg.kind;
   if (reg.scopeId !== undefined) op.scopeId = reg.scopeId;
   return op;
+}
+
+export interface ObfuscationResult {
+  code: string;
+  handlerCount: number;
 }

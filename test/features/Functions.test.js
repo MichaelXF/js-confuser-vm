@@ -191,3 +191,71 @@ test("Variant #16: arguments can be indexed and iterated", async () => {
 
   expect(await evalCode(code)).toBe(15);
 });
+
+// Rest parameters
+test("Variant #17: Rest-only parameter collects all arguments into an array", async () => {
+  const { code } = await obfuscate(`
+    function sum(...nums) {
+      var total = 0;
+      for (var i = 0; i < nums.length; i++) total += nums[i];
+      return total;
+    }
+    window.TEST_OUTPUT = sum(1, 2, 3, 4, 5);
+  `);
+
+  expect(await evalCode(code)).toBe(15);
+});
+
+test("Variant #18: Rest parameter with leading named params", async () => {
+  const { code } = await obfuscate(`
+    function buildMessage(prefix, ...words) {
+      return prefix + ": " + words.join(", ");
+    }
+    window.TEST_OUTPUT = buildMessage("Colors", "red", "green", "blue");
+  `);
+
+  expect(await evalCode(code)).toBe("Colors: red, green, blue");
+});
+
+test("Variant #19: Rest parameter receives empty array when no extra args are passed", async () => {
+  const { code } = await obfuscate(`
+    function first(a, ...rest) {
+      return [a, rest.length];
+    }
+    window.TEST_OUTPUT = first(42);
+  `);
+
+  expect(await evalCode(code)).toEqual([42, 0]);
+});
+
+test("Variant #20: Nested functions each with their own rest parameters", async () => {
+  const { code } = await obfuscate(`
+    function outer(...outerArgs) {
+      function inner(...innerArgs) {
+        return outerArgs.concat(innerArgs);
+      }
+      return inner;
+    }
+    var fn = outer(1, 2);
+    window.TEST_OUTPUT = fn(3, 4);
+  `);
+
+  expect(await evalCode(code)).toEqual([1, 2, 3, 4]);
+});
+
+test("Variant #21: Deeply nested rest functions all receive correct slices", async () => {
+  const { code } = await obfuscate(`
+    function a(...as) {
+      function b(...bs) {
+        function c(...cs) {
+          return [as, bs, cs];
+        }
+        return c;
+      }
+      return b;
+    }
+    window.TEST_OUTPUT = a(1)(2, 3)(4, 5, 6);
+  `);
+
+  expect(await evalCode(code)).toEqual([[1], [2, 3], [4, 5, 6]]);
+});

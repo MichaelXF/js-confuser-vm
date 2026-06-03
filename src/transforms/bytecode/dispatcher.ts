@@ -198,6 +198,7 @@ function processFunctionBlock(
     decodeDesc.paramCount, // 2 (x, k)
     b.fnRegCountOperand(decodeDesc._fnIdx), // resolved by resolveRegisters()
     0, // no upvalues
+    0, // hasRest = false
   ]);
 
   // ── Transform each instruction ────────────────────────────────────────────

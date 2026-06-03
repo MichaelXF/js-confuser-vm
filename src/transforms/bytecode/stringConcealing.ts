@@ -65,6 +65,7 @@ function processFunctionBlock(
     decodeDesc.paramCount, // 1 (encoded)
     b.fnRegCountOperand(decodeDesc._fnIdx),
     0, // no upvalues
+    0, // hasRest = false
   ]);
 
   // Transform each instruction.

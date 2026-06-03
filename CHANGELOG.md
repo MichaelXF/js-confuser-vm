@@ -16,6 +16,8 @@
 
 - Removed option `microOpcodes` - this option introduced scratch registers which left runtime values exposed, and were easily traceable by deobfuscators. The cons outweighed the pros and since it conflicts with the other obfuscations already present, it was removed.
 
+- Added support for rest parameters (ES6 feature)
+
 Planned: Zero out the callee's register window on return (one fill(undefined) or length)
 
 ## `0.1.0` Dispatcher, Virtual Registers, and more

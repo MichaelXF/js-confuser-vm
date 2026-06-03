@@ -116,6 +116,7 @@ A(new p(function(a){a=typeof Buffer!=="undefined"?Buffer.from(a,"base64"):Uint8A
 - [x] getter/setters
 - [x] debugger;
 - [x] template literals (**ES6**)
+- [x] rest parameters (**ES6**)
 
 ### Missing
 
@@ -132,7 +133,6 @@ A(new p(function(a){a=typeof Buffer!=="undefined"?Buffer.from(a,"base64"):Uint8A
 - [ ] dead handlers
 - [ ] dead bytecode insertion
 - [x] macro opcodes (Combine multiple opcodes into a "macro opcode")
-- [x] micro opcodes (Break opcodes into sub-opcodes)
 - [x] specialized opcodes (Create specific opcodes for opcode+operand pairs)
 - [x] aliased opcodes (Create duplicate opcodes, including variants with shuffled operand order)
 - [x] encoded bytecode array
