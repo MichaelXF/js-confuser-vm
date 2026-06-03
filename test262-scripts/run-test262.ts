@@ -122,6 +122,7 @@ function createChunk(chunk: Chunk, chunkIndex: number): Promise<void> {
               id: "timeout",
               passed: false,
               error: `Timed out after ${FILE_TIMEOUT_MS}ms`,
+              errorMessage: "Timed out",
             },
           ]);
           localDone++;
@@ -176,6 +177,7 @@ function createChunk(chunk: Chunk, chunkIndex: number): Promise<void> {
               id: "worker-crash",
               passed: false,
               error: err.message,
+              errorMessage: "Worker Crash: " + err.message,
             },
           ]);
         }
@@ -232,8 +234,8 @@ if (Object.keys(errorTypes).length > 0) {
   for (const r of results) {
     if (r.error?.includes("TryStatement")) continue;
     if (!r.passed) {
-      console.log(`  [${r.id}] ${r.file || ""}`);
-      if (r.error) console.log(`    → ${r.error}`);
+      console.log(`\t[${r.id}] ${r.file || ""}`);
+      if (r.error) console.log(`\t- ${r.error}`);
     }
   }
 }
@@ -249,6 +251,8 @@ function printObjectSorted(obj: Record<string, number>) {
   }
 }
 
+var filesWithoutResults = allResults.filter((x) => !x || x.length === 0).length;
+
 console.log("\n=== Test262 ES5 Results ===");
 console.log(`Passed:  ${passed}`);
 console.log(`Errors Types:`);
@@ -256,6 +260,7 @@ printObjectSorted(errorTypes);
 console.log(`Error Messages:`);
 printObjectSorted(errorMessages);
 console.log(`Total:   ${results.length}`);
+console.log(`Files without any results: ${filesWithoutResults}`);
 console.log(
   "Percentage: " + ((passed / results.length) * 100).toFixed(2) + "%",
 );

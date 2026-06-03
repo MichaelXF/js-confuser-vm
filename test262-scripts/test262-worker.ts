@@ -82,7 +82,8 @@ async function processFile(file: string): Promise<TestResult[]> {
   try {
     virtualizedCode = (await JsConfuserVM.obfuscate(testCode)).code;
   } catch (e: any) {
-    if (isNegative) return [{ file: relFile, id: "tc1", passed: true }];
+    if (isNegative)
+      return [{ file: relFile, id: "negative-compile", passed: true }];
     return [
       {
         file: relFile,
@@ -111,12 +112,13 @@ async function processFile(file: string): Promise<TestResult[]> {
         return [
           {
             file: relFile,
-            id: "tc1",
+            id: "expected-error",
             passed: false,
             error: "Expected error but none thrown",
           },
         ];
-      return [];
+      // If no test is registered, then file passed
+      return [{ file: relFile, id: "no-test", passed: true }];
     }
 
     return testResults.map((r) => ({
@@ -124,9 +126,11 @@ async function processFile(file: string): Promise<TestResult[]> {
       id: r.id,
       passed: r.passed,
       error: r.error?.message,
+      errorMessage: r.error?.message,
     }));
   } catch (e: any) {
-    if (isNegative) return [{ file: relFile, id: "tc1", passed: true }];
+    if (isNegative)
+      return [{ file: relFile, id: "negative-runtime", passed: true }];
     return [
       {
         file: relFile,

@@ -11,6 +11,7 @@ export async function obfuscate(source, overrideOptions) {
   return JsConfuserVM.obfuscate(source, options);
 }
 
+// eval()s in non-strict mode (This file is JavaScript, unlike JS-Confuser's version of this)
 export async function evalCode(code, windowProperties = {}) {
   var window = { TEST_OUTPUT: null, ...windowProperties };
   window.window = window;

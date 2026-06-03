@@ -36,6 +36,7 @@
     "@babel/core": "^7.29.0",
     "@babel/preset-env": "^7.29.0",
     "@babel/preset-typescript": "^7.28.5",
+    "@types/jest": "^30.0.0",
     "@types/node": "^25.3.0",
     "babel-plugin-module-resolver": "^5.0.2",
     "babel-plugin-replace-import-extension": "^1.1.5",
