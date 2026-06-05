@@ -99,5 +99,36 @@ export function freeRegOperand(reg: RegisterOperand): FreeRegOperand {
 
 export interface ObfuscationResult {
   code: string;
-  handlerCount: number;
+  profileData?: {
+    handlerCount: number;
+
+    /**
+     * How long the entire obfuscation process takes (ms)
+     */
+    obfuscationTime?: number;
+
+    /**
+     * How long @babel/parser takes (ms)
+     */
+    parseTime?: number;
+
+    /**
+     * How long @babel/generator takes (ms)
+     */
+    generateTime?: number;
+
+    /**
+     * How long the Compiler#compileAST takes (ms)
+     */
+    compileTime?: number;
+
+    transforms: {
+      [transformName: string]: {
+        fileSize?: number;
+        bytecodeSize?: number;
+        transformTime?: number;
+        handlerCount?: number;
+      };
+    };
+  };
 }

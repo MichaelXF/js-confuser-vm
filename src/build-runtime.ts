@@ -11,14 +11,15 @@ import { applyAliasedOpcodes } from "./transforms/runtime/aliasedOpcodes.ts";
 import { applyClassObfuscation } from "./transforms/runtime/classObfuscation.ts";
 import type * as b from "./types.ts";
 import { getSwitchStatement } from "./utils/ast-utils.ts";
+import { now } from "./utils/profile-utils.ts";
 
-export async function obfuscateRuntime(
+export async function buildRuntime(
   runtime: string,
   bytecode: b.Bytecode,
   options: Options,
   compiler: Compiler,
   generateBytecodeComment: () => string,
-): Promise<b.ObfuscationResult> {
+) {
   let ast: t.File;
   try {
     ast = parse(runtime, { sourceType: "unambiguous" });
@@ -26,17 +27,28 @@ export async function obfuscateRuntime(
     throw new Error("VM-Runtime final parsing failed", { cause: error });
   }
 
+  const switchStatement = getSwitchStatement(ast);
+  const getHandlerCount = () => {
+    return switchStatement.cases.length;
+  };
+
   const timings: { [name: string]: number } = {};
   function runAndTime(pass: typeof applySpecializedOpcodes, name: string) {
-    const startedAt = performance.now();
+    const startedAt = now();
 
     compiler.log(`Running runtime pass ${name}...`);
 
     pass(ast, compiler);
 
-    const endedAt = performance.now();
+    const endedAt = now();
     const elapsedMs = endedAt - startedAt;
     timings[name] = elapsedMs;
+
+    compiler.profileData.transforms[name] = {
+      fileSize: null, // TODO: Add option as doing 'generate(ast).code.length' is slow
+      transformTime: elapsedMs,
+      handlerCount: getHandlerCount(),
+    };
 
     compiler.log(
       `Runtime pass ${name} completed in ${Math.floor(elapsedMs)}ms`,
@@ -68,7 +80,7 @@ export async function obfuscateRuntime(
     runAndTime(applyClassObfuscation, "applyClassObfuscation");
   }
 
-  let handlerCount = getSwitchStatement(ast).cases.length;
+  compiler.profileData.handlerCount = getHandlerCount();
 
   let generated: string;
   try {
@@ -83,18 +95,19 @@ export async function obfuscateRuntime(
   // Minify code?
   if (options.minify) {
     try {
-      let startedAt = performance.now();
+      let startedAt = now();
       compiler.log("Running minify...");
       generated = await applyMinify(generated);
-      let elapsedMs = performance.now() - startedAt;
-      compiler.log(`Minify completed in ${Math.floor(elapsedMs)}`);
+      let elapsedMs = now() - startedAt;
+      compiler.log(`Minify completed in ${Math.floor(elapsedMs)}ms`);
+
+      compiler.profileData.transforms["minify"] = {
+        transformTime: elapsedMs,
+      };
     } catch (error) {
       throw new Error("VM-Runtime final minification failed", { cause: error });
     }
   }
 
-  return {
-    code: generated,
-    handlerCount: handlerCount,
-  };
+  return generated;
 }

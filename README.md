@@ -1,12 +1,12 @@
 # JS Confuser VM
 
-  [![NPM](https://img.shields.io/badge/NPM-%23000000.svg?style=for-the-badge&logo=npm&logoColor=white)](https://npmjs.com/package/js-confuser-vm) [![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/MichaelXF/js-confuser-vm) [![Netlify](https://img.shields.io/badge/netlify-%23000000.svg?style=for-the-badge&logo=netlify&logoColor=#00C7B7)](https://development--confuser.netlify.app/vm)
+  [![NPM](https://img.shields.io/badge/NPM-%23000000.svg?style=for-the-badge&logo=npm&logoColor=white)](https://npmjs.com/package/js-confuser-vm) [![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/MichaelXF/js-confuser-vm) [![Netlify](https://img.shields.io/badge/netlify-%23000000.svg?style=for-the-badge&logo=netlify&logoColor=#00C7B7)](https://js-confuser.com/vm)
 
 
 - **Requires Node v24.13.1 or higher**
 - ES5 support only. No complex features: async, generator, and even try..finally aren't supported.
 - Experimental. Expect issues.
-- [Try the web version.](https://development--confuser.netlify.app/vm)
+- [Try the web version.](https://js-confuser.com/vm)
 
 ### Installation
 
@@ -552,8 +552,8 @@ main().catch(console.error);
 
 ### WIP
 
-- 178 tests, 91.18% coverage
-- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 66.67%
+- 202 tests, 91.18% coverage
+- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 78.58%
 
 ### Made with AI
 

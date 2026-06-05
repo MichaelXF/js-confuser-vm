@@ -637,6 +637,11 @@ VM.prototype.run = function () {
         case OP.RETURN: {
           var retVal = regs[base + this._operand()];
           this._closeUpvaluesFor(frame); // must happen before frame is abandoned
+
+          // Zero out callee's register window to limit exposing runtime values
+          var hi = frame._base + frame.closure.fn.regCount;
+          for (var i = frame._base as number; i < hi; i++)
+            this._regs[i] = undefined;
           this._regsTop = frame._base;
 
           if (this._frameStack.length === 0) return retVal; // main script returning

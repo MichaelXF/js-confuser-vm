@@ -7,11 +7,11 @@ import { join } from "path";
 import { readFileSync } from "fs";
 import { stripTypeScriptTypes } from "module";
 import { ok } from "assert";
-import { obfuscateRuntime } from "./build-runtime.ts";
+import { buildRuntime } from "./build-runtime.ts";
 import { DEFAULT_OPTIONS, type Options } from "./options.ts";
 import { resolveLabels } from "./transforms/bytecode/resolveLabels.ts";
 import { resolveRegisters } from "./transforms/bytecode/resolveRegisters.ts";
-import { resolveConstants } from "./transforms/bytecode/resolveContants.ts";
+import { resolveConstants } from "./transforms/bytecode/resolveConstants.ts";
 import { selfModifying } from "./transforms/bytecode/selfModifying.ts";
 import { macroOpcodes } from "./transforms/bytecode/macroOpcodes.ts";
 import { specializedOpcodes } from "./transforms/bytecode/specializedOpcodes.ts";
@@ -22,18 +22,14 @@ import { concealConstants } from "./transforms/bytecode/concealConstants.ts";
 import { dispatcher } from "./transforms/bytecode/dispatcher.ts";
 import { controlFlowFlattening } from "./transforms/bytecode/controlFlowFlattening.ts";
 import { stringConcealing } from "./transforms/bytecode/stringConcealing.ts";
+import { now } from "./utils/profile-utils.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
 
 const readVMRuntimeFile = () => {
-  let code;
-  try {
-    code = readFileSync(join(import.meta.dirname, "./runtime.ts"), "utf-8");
-  } catch (e) {
-    code = readFileSync(join(import.meta.dirname, "./runtime.js"), "utf-8");
-  }
-
+  // During "npm run build", babel-plugin-inline-runtime.cjs replaces this function with the raw, type-stripped contents
+  let code = readFileSync(join(import.meta.dirname, "./runtime.ts"), "utf-8");
   return stripTypeScriptTypes?.(code) || code;
 };
 
@@ -153,7 +149,7 @@ export const OP_ORIGINAL = {
 // ── Scope ─────────────────────────────────────────────────────────────────────
 // Maps variable names to virtual RegisterOperands.
 // Locals are allocated at compile time via ctx._newReg(); zero name lookups at runtime.
-// resolveRegisters() assigns concrete slot indices before serialisation.
+// resolveRegisters() assigns concrete slot indices before serialization.
 class Scope {
   parent: Scope | null;
   _locals: Map<string, b.RegisterOperand>;
@@ -520,17 +516,31 @@ export class Compiler {
     }
   }
 
+  profileData?: Partial<b.ObfuscationResult["profileData"]> = {
+    transforms: {},
+  };
+
   // ── Entry point ───────────────────────────────────────────────────────────
   compile(source: string) {
+    let startedAt = now();
+
     const ast = parse(source, {
       sourceType: "script",
       allowReturnOutsideFunction: true,
     });
+
+    this.profileData.parseTime = now() - startedAt;
+
     return this.compileAST(ast);
   }
 
   compileAST(ast: t.File) {
+    let startedAt = now();
+
     this._compileMain(ast.program.body);
+
+    this.profileData.compileTime = now() - startedAt;
+
     return this.bytecode;
   }
 
@@ -2534,24 +2544,10 @@ export async function compileAndSerialize(
   sourceCode: string,
   options: Options,
 ): Promise<b.ObfuscationResult> {
+  let obfuscationStartedAt = now();
+
   const compiler = new Compiler(options);
   let bytecode = compiler.compile(sourceCode);
-
-  if (options.stringConcealing) {
-    const stringConcealingResult = stringConcealing(bytecode, compiler);
-    bytecode = stringConcealingResult.bytecode;
-  }
-
-  // CFF and Dispatcher both run before resolveRegisters and resolveLabels
-  if (options.controlFlowFlattening) {
-    const cffResult = controlFlowFlattening(bytecode, compiler);
-    bytecode = cffResult.bytecode;
-  }
-
-  if (options.dispatcher) {
-    const dispatcherResult = dispatcher(bytecode, compiler);
-    bytecode = dispatcherResult.bytecode;
-  }
 
   const passes: {
     pass: (
@@ -2560,6 +2556,28 @@ export async function compileAndSerialize(
     ) => { bytecode: b.Bytecode; constants?: any[] };
     name: string;
   }[] = [];
+
+  if (options.stringConcealing) {
+    passes.push({
+      pass: stringConcealing,
+      name: "stringConcealing",
+    });
+  }
+
+  // CFF and Dispatcher both run before resolveRegisters and resolveLabels
+  if (options.controlFlowFlattening) {
+    passes.push({
+      pass: controlFlowFlattening,
+      name: "controlFlowFlattening",
+    });
+  }
+
+  if (options.dispatcher) {
+    passes.push({
+      pass: dispatcher,
+      name: "dispatcher",
+    });
+  }
 
   passes.push({
     pass: concealConstants,
@@ -2590,19 +2608,24 @@ export async function compileAndSerialize(
   const timings = {};
 
   function runAndTime(pass, name) {
-    const startedAt = performance.now();
+    const startedAt = now();
 
     compiler.log(`Running bytecode pass ${name}...`);
 
     const passResult = pass(bytecode, compiler);
     bytecode = passResult.bytecode;
 
-    const endedAt = performance.now();
-    const elaspedMs = endedAt - startedAt;
-    timings[name] = elaspedMs;
+    const endedAt = now();
+    const elapsedMs = endedAt - startedAt;
+    timings[name] = elapsedMs;
+
+    compiler.profileData.transforms[name] = {
+      transformTime: elapsedMs,
+      bytecodeSize: bytecode.length,
+    };
 
     compiler.log(
-      `Bytecode pass ${name} completed in ${Math.floor(elaspedMs)}ms`,
+      `Bytecode pass ${name} completed in ${Math.floor(elapsedMs)}ms`,
     );
 
     return passResult;
@@ -2650,7 +2673,7 @@ export async function compileAndSerialize(
   //   console.log(`  ${key}: ${timings[key]}ms`);
   // }
 
-  // This part was purposefully pulled out Serializer as OP_NAME's get resolved during obfuscateRuntime
+  // This part was purposefully pulled out Serializer as OP_NAME's get resolved during buildRuntime
   // So for the most useful comments, it's ran absolutely last
   // Tests also rely on correct comments so it's required
   const generateBytecodeComment = () => {
@@ -2663,7 +2686,7 @@ export async function compileAndSerialize(
     return lines.join("\n");
   };
 
-  const obfuscationResult = await obfuscateRuntime(
+  const code = await buildRuntime(
     runtimeSource,
     bytecode,
     options,
@@ -2671,5 +2694,10 @@ export async function compileAndSerialize(
     generateBytecodeComment,
   );
 
-  return obfuscationResult;
+  compiler.profileData.obfuscationTime = now() - obfuscationStartedAt;
+
+  return {
+    code,
+    profileData: compiler.profileData as b.ObfuscationResult["profileData"],
+  };
 }

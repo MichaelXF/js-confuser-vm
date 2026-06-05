@@ -18,8 +18,6 @@
 
 - Added support for rest parameters (ES6 feature)
 
-Planned: Zero out the callee's register window on return (one fill(undefined) or length)
-
 ## `0.1.0` Dispatcher, Virtual Registers, and more
 
 - Added new option `dispatcher` which creates a middleman block to process jumps.
