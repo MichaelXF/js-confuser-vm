@@ -6,7 +6,7 @@
 ## `0.1.1` Control Flow Flattening, String Concealing, and more
 
 - Added new option `controlFlowFlattening` which flattens the control flow of your program into a convoluted state machine
-- Added new option `stringConcealing` which involves base64-encoding strings to conceal plain-text values.
+- Added new option `stringConcealing` which involves base64-encoding strings to conceal plain-text values
 
 - Added new API method `JSConfuserVM.disassemble(sourceCode)` which returns a partial JS representation
 - - This only works if the parameter `sourceCode` contains the original bytecode comment
@@ -15,7 +15,7 @@
 - Added new option `classObfuscation` which obfuscates the VM runtime classes:
 - - Shuffles the order of declarations and methods
 
-- Added new option `verbose` which `console.log`'s useful info for debugging purposes.
+- Added new option `verbose` which `console.log`'s useful info for debugging purposes
 
 - Removed option `microOpcodes` - this option introduced scratch registers which left runtime values exposed, and were easily traceable by deobfuscators. The cons outweighed the pros and since it conflicts with the other obfuscations already present, it was removed.
 

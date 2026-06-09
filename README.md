@@ -536,7 +536,7 @@ console.log("Hello, world!");
 
 Detects the use of debuggers by checking for >1second pauses. May break code with slow sync tasks.
 
-### `classObfuscation` (true/false)
+#### `classObfuscation` (true/false)
 
 Obfuscates the VM runtime classes by shuffling the order of declarations and methods.
 
