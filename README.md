@@ -181,6 +181,72 @@ var CONSTANTS = [/* 0 */"console", /* 1 */"log", /* 2 */"Hello world!", /* 3 */u
 var CONSTANTS = [/* 0 */"DaQApB6kAqQdpB+kEaQ=", /* 1 */"TCFOIUUh", /* 2 */"kKK8orait6Kzov2iqaKwopKijaKGosKi", /* 3 */undefined];
 ```
 
+#### `controlFlowFlattening` (true/false)
+
+Flattens the control flow of your program into a convoluted state machine.
+
+```js
+// Input Code
+var message;
+if (true) {
+  message = "Hello World";
+}
+
+// Before
+// fn_0_0:
+  r0 = undefined
+  r1 = true
+  if (!r1) goto: if_else_1
+  r1 = "Hello World"
+  r0 = r1
+// if_else_1:
+  r1 = undefined
+  return r1
+
+// After
+// fn_0_0:
+  r1 = 969
+  r2 = r1
+// while_top_5:
+  r3 = 4439
+  r4 = r2 !== r3
+  if (!r4) goto: while_exit_6
+  r5 = 969
+  r6 = r2 === r5
+  if (!r6) goto: if_else_7
+  goto: cff_block_2
+// if_else_7:
+  r7 = 1317
+  r8 = r2 === r7
+  if (!r8) goto: if_else_8
+  goto: cff_block_3
+// if_else_8:
+  r9 = 58894
+  r10 = r2 === r9
+  if (!r10) goto: if_else_9
+  goto: if_else_1
+// if_else_9:
+  goto: while_top_5
+// while_exit_6:
+// cff_block_3:
+  r11 = "Hello World"
+  r0 = r11
+  r2 = 58894
+  goto: while_top_5
+// if_else_1:
+  r11 = undefined
+  return r11
+// cff_block_2:
+  r0 = undefined
+  r11 = true
+  if (r11) goto: cff_skip_10
+  r2 = 58894
+  goto: while_top_5
+// cff_skip_10:
+  r2 = 1317
+  goto: while_top_5
+```
+
 #### `dispatcher` (true/false)
 
 Creates a middleman block to process jumps.
@@ -192,19 +258,6 @@ if (true) {
 }
 
 // Before
-// fn_0_0:
-// [0, 0, 0, 0],        LOAD_CONST  reg[0] = true                         1:4-1:8
-// [40, 0, 29],         JUMP_IF_FALSE  [0, if_else_1]                     1:0-3:1
-// [2, 0, 1, 0],        LOAD_GLOBAL  reg[0] = console                     2:2-2:9
-// [0, 1, 2, 0],        LOAD_CONST  reg[1] = "log"                        2:2-2:29
-// [8, 2, 0, 1],        GET_PROP  reg[2] = reg[0][reg[1]]                 2:2-2:29
-// [0, 1, 3, 0],        LOAD_CONST  reg[1] = "Hello world!"               2:14-2:28
-// [43, 3, 0, 2, 1, 1], CALL_METHOD  reg[3] = reg[2](recv=reg[0], 1 args) 2:2-2:29
-// if_else_1:
-// [0, 0, 4, 0],        LOAD_CONST  reg[0] = undefined                    
-// [45, 0],             RETURN  reg[0]              
-
-// What this looks like decompiled:
 // fn_0_0:
 r0 = true
 if (!r0) goto if_else_1
@@ -218,34 +271,6 @@ if (!r0) goto if_else_1
   return r0            
 
 // After
-// fn_0_0:
-// [47, 2, 57, 2, 5, 0], MAKE_CLOSURE  reg[2] PC=fn_2_3 (params=2 regs=5 upvalues=0)
-// [0, 3, 0, 0],        LOAD_CONST  reg[3] = true                         1:4-1:8
-// [41, 3, 21],         JUMP_IF_TRUE  [3, if_else_1_skip_5]               
-// [1, 0, 43020],       LOAD_INT  reg[0] = if_else_1                      
-// [1, 1, 40151],       LOAD_INT  reg[1] = 40151                          
-// [39, 49],            JUMP  dispatcher_4                                
-// if_else_1_skip_5:
-// [2, 3, 1, 0],        LOAD_GLOBAL  reg[3] = console                     2:2-2:9
-// [0, 4, 2, 0],        LOAD_CONST  reg[4] = "log"                        2:2-2:29
-// [8, 5, 3, 4],        GET_PROP  reg[5] = reg[3][reg[4]]                 2:2-2:29
-// [0, 4, 3, 0],        LOAD_CONST  reg[4] = "Hello world!"               2:14-2:28
-// [43, 6, 3, 5, 1, 4], CALL_METHOD  reg[6] = reg[5](recv=reg[3], 1 args) 2:2-2:29
-// if_else_1:
-// [0, 3, 4, 0],        LOAD_CONST  reg[3] = undefined                    
-// [45, 3],             RETURN  reg[3]                                    
-// dispatcher_4:
-// [42, 0, 2, 2, 0, 1], CALL  reg[0] = reg[2](reg[0], reg[1])             
-// [58, 0],             JUMP_REG  PC = reg[0]                             
-// fn_2_3:              
-// [18, 2, 0, 1],       BXOR  [2, 0, 1]              
-// [0, 3, 5, 0],        LOAD_CONST  reg[3] = 52048                        
-// [11, 4, 2, 3],       ADD  [4, 2, 3]                                    
-// [0, 2, 6, 0],        LOAD_CONST  reg[2] = 65535                        
-// [16, 3, 4, 2],       BAND  [3, 4, 2]                                   
-// [45, 3],             RETURN  reg[3]                                    
-
-// What this looks like decompiled:
 // fn_0_0:
 r2 = MakeClosure(fn_2_3, params=2)
 r3 = true

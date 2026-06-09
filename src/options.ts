@@ -6,7 +6,7 @@ export interface Options {
   encodeBytecode?: boolean; // encode bytecode? when off, comments for instructions are added
   selfModifying?: boolean; // do self-modifying bytecode for function bodies?
   dispatcher?: boolean; // create middleman blocks to process jumps?
-  controlFlowFlattening?: boolean; // flatten control flow into a while-switch state machine?
+  controlFlowFlattening?: boolean; // flatten the control flow of your program into a convoluted state machine?
   macroOpcodes?: boolean; // create combined opcodes for repeated instruction sequences?
   specializedOpcodes?: boolean; // create specialized opcodes for commonly used opcode+operand pairs?
   aliasedOpcodes?: boolean; // create duplicate opcodes for commonly used opcodes?
