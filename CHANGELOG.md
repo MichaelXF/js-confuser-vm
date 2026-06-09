@@ -6,7 +6,7 @@
 ## `0.1.1` Control Flow Flattening, String Concealing, and more
 
 - Added new option `controlFlowFlattening` which flattens the control flow of your program into a convoluted state machine
-- Added new option `stringConcealing` which involves encoding strings to conceal plain-text values.
+- Added new option `stringConcealing` which involves base64-encoding strings to conceal plain-text values.
 
 - Added new API method `JSConfuserVM.disassemble(sourceCode)` which returns a partial JS representation
 - - This only works if the parameter `sourceCode` contains the original bytecode comment

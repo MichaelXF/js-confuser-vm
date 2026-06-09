@@ -298,6 +298,45 @@ function decode(x, k) {
 }
 ```
 
+#### `stringConcealing` (true/false)
+
+Encodes strings to conceal plain-text values.
+
+```js
+// Input Code
+console.log("Hello world!");
+
+// Before
+// fn_0_0:
+  r0 = console
+  r1 = "log"
+  r2 = r0[r1]
+  r1 = "Hello world!"
+  r3 = r2.call(r0, r1)
+  r0 = undefined
+  return r0                       
+
+// After
+// fn_0_0:
+  r0 = MakeClosure(fn_2_2, params=1, regs=3)
+  r1 = console
+  r2 = "bG9n"
+  r2 = r0(r2)
+  r3 = r1[r2]
+  r2 = "SGVsbG8gd29ybGQh"
+  r2 = r0(r2)
+  r4 = r3.call(r1, r2)
+  r1 = undefined
+  return r1
+// fn_2_2:
+  r1 = atob
+  r2 = r1(r0)
+  return r2
+  r1 = undefined
+  return r1
+```
+
+
 #### `macroOpcodes` (true/false)
 
 Combines multiple opcodes commonly used from your bytecode.
