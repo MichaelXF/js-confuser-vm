@@ -544,6 +544,10 @@ Obfuscates the VM runtime classes by shuffling the order of declarations and met
 
 Minifies the final code with Google Closure Compiler. Renames the VM class properties.
 
+#### `verbose` (true/false)
+
+Prints obfuscator info useful for debugging purposes.
+
 ### No Try Finally
 
 While Try Catch is supported, Try..Finally is not. You can use Try..Finally by defining an outside helper function:
