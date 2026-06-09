@@ -55,17 +55,22 @@ function parseBlock(commentBlock: string): Line[] {
 // Extract a label name from an annotation string like "[4, while_exit_8]" or "while_top_7"
 // Also handles "PC=fn_1_1" for closures
 function extractLabel(annotation: string): string | null {
-  // Look for known label patterns in the annotation
-  const bracketMatch = annotation.match(
-    /\[\d+,\s*(\w+)\]|\bPC=(\w+)|\bgoto\s+(\w+)/,
-  );
-  if (bracketMatch)
-    return bracketMatch[1] || bracketMatch[2] || bracketMatch[3];
-  // Bare label at end of annotation
-  const bareMatch = annotation.match(
-    /\b((?:fn|while|if|cff|ternary|dispatcher|for|switch|case|default|try|catch|block|loop|break|continue)\w*)\s*$/,
-  );
-  if (bareMatch) return bareMatch[1];
+  // Strip trailing source location info like "3:4-7:5"
+  const stripped = annotation.replace(/\s+\d+:\d+-\d+:\d+\s*$/, "").trim();
+
+  const bracketMatch = stripped.match(/\[\d+,\s*(\w+)\]/);
+  if (bracketMatch) return bracketMatch[1];
+
+  const pcMatch = stripped.match(/\bPC=(\w+)/);
+  if (pcMatch) return pcMatch[1];
+
+  const gotoMatch = stripped.match(/\bgoto\s+(\w+)/);
+  if (gotoMatch) return gotoMatch[1];
+
+  // Bare label at end: last whitespace-separated token
+  const lastToken = stripped.split(/\s+/).pop();
+  if (lastToken && /^[a-zA-Z_]\w*$/.test(lastToken)) return lastToken;
+
   return null;
 }
 
