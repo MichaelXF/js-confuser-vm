@@ -3,6 +3,12 @@
 - - Planned: Shuffle the order of constructor and method parameters
 - - Planned: Alias variables, and other function related obfuscations
 
+## `0.1.2` Updates
+
+- Added support for `try..finally`
+- Added simple ES6 features: spread operator, object methods, and computed property keys
+- Added source locations to `JSConfuserVM.disassemble(sourceCode)`'s output
+
 ## `0.1.1` Control Flow Flattening, String Concealing, and more
 
 - Added new option `controlFlowFlattening` which flattens the control flow of your program into a convoluted state machine

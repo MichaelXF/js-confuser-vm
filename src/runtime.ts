@@ -5,6 +5,7 @@ const MAIN_REG_COUNT = 0;
 const CONSTANTS = [];
 const ENCODE_BYTECODE = false;
 const TIMING_CHECKS = false;
+const SENTINELS = { CALL_SPREAD: 0 };
 // The text above is not included in the compiled output - for type intellisense only
 // @START
 
@@ -32,10 +33,14 @@ function decodeBytecode(s) {
   return r;
 }
 
-// Closure symbol
-// Used to tag shell functions so the VM can fast-path back to the
+// Closure map
+// Maps shell functions -> inner Closure so the VM can fast-path back to the
 // inner Closure instead of going through a sub-VM on internal calls.
-var CLOSURE_SYM = Symbol(); // Nameless for obfuscation
+// A WeakMap (rather than an own symbol property) keeps the link off the
+// function object: escaped closures expose no own keys, and the map is
+// non-enumerable, so host/attacker code can't pivot from a leaked function
+// to VM internals. Module-scoped so it is shared across all VM/sub-VM instances.
+var CLOSURE_MAP = new WeakMap();
 
 // Upvalue — Lua/CPython style.
 // While the outer frame is alive: reads/writes go to vm._regs[_absSlot].
@@ -514,15 +519,21 @@ VM.prototype.run = function () {
 
         // Calls
         case OP.CALL: {
-          // dst, calleeReg, argc, [argReg...]
+          // dst, calleeReg, argc, [argReg...]  (argc=-1 means next operand is spread-args array reg)
           var dst = this._operand();
           var callee = regs[base + this._operand()];
           var argc = this._operand();
-          var args = new Array(argc);
-          for (var i = 0; i < argc; i++) args[i] = regs[base + this._operand()];
+          var args;
+          if (argc === SENTINELS.CALL_SPREAD) {
+            args = regs[base + this._operand()];
+          } else {
+            args = new Array(argc);
+            for (var i = 0; i < argc; i++)
+              args[i] = regs[base + this._operand()];
+          }
 
-          if (callee && callee[CLOSURE_SYM]) {
-            var closure = callee[CLOSURE_SYM];
+          var closure = callee && CLOSURE_MAP.get(callee);
+          if (closure) {
             var newBase = this._regsTop;
             this._ensureRegisterWindow(newBase, closure.fn.regCount);
             this._regsTop = newBase + closure.fn.regCount;
@@ -555,16 +566,22 @@ VM.prototype.run = function () {
         }
 
         case OP.CALL_METHOD: {
-          // dst, receiverReg, calleeReg, argc, [argReg...]
+          // dst, receiverReg, calleeReg, argc, [argReg...]  (argc=SENTINELS.CALL_SPREAD means spread-args array reg)
           var dst = this._operand();
           var receiver = regs[base + this._operand()];
           var callee = regs[base + this._operand()];
           var argc = this._operand();
-          var args = new Array(argc);
-          for (var i = 0; i < argc; i++) args[i] = regs[base + this._operand()];
+          var args;
+          if (argc === SENTINELS.CALL_SPREAD) {
+            args = regs[base + this._operand()];
+          } else {
+            args = new Array(argc);
+            for (var i = 0; i < argc; i++)
+              args[i] = regs[base + this._operand()];
+          }
 
-          if (callee && callee[CLOSURE_SYM]) {
-            var closure = callee[CLOSURE_SYM];
+          var closure = callee && CLOSURE_MAP.get(callee);
+          if (closure) {
             var newBase = this._regsTop;
             this._ensureRegisterWindow(newBase, closure.fn.regCount);
             this._regsTop = newBase + closure.fn.regCount;
@@ -597,15 +614,21 @@ VM.prototype.run = function () {
         }
 
         case OP.NEW: {
-          // dst, calleeReg, argc, [argReg...]
+          // dst, calleeReg, argc, [argReg...]  (argc=SENTINELS.CALL_SPREAD means spread-args array reg)
           var dst = this._operand();
           var callee = regs[base + this._operand()];
           var argc = this._operand();
-          var args = new Array(argc);
-          for (var i = 0; i < argc; i++) args[i] = regs[base + this._operand()];
+          var args;
+          if (argc === SENTINELS.CALL_SPREAD) {
+            args = regs[base + this._operand()];
+          } else {
+            args = new Array(argc);
+            for (var i = 0; i < argc; i++)
+              args[i] = regs[base + this._operand()];
+          }
 
-          if (callee && callee[CLOSURE_SYM]) {
-            var closure = callee[CLOSURE_SYM];
+          var closure = callee && CLOSURE_MAP.get(callee);
+          if (closure) {
             var newObj = Object.create(closure.prototype || null);
             var newBase = this._regsTop;
             this._ensureRegisterWindow(newBase, closure.fn.regCount);
@@ -698,7 +721,7 @@ VM.prototype.run = function () {
 
           // Wrap in a native callable shell so host code (array methods,
           // test assertions, setTimeout, etc.) can invoke VM closures.
-          // CLOSURE_SYM lets VM-internal CALL/NEW bypass the sub-VM entirely.
+          // CLOSURE_MAP lets VM-internal CALL/NEW bypass the sub-VM entirely.
           var self = this;
           var shell = (function (c) {
             return function () {
@@ -734,7 +757,7 @@ VM.prototype.run = function () {
               return sub.run();
             };
           })(closure);
-          shell[CLOSURE_SYM] = closure;
+          CLOSURE_MAP.set(shell, closure);
           shell.prototype = closure.prototype; // unified prototype for new/instanceof
           regs[base + dst] = shell;
           break;
@@ -857,8 +880,24 @@ VM.prototype.run = function () {
         }
 
         case OP.TRY_END: {
-          // Normal exit from a try block — disarm the exception handler.
+          // Normal exit from a try block — disarm the top handler record
+          // (works for both catch and finally regions; they share the stack).
           frame._handlerStack.pop();
+          break;
+        }
+
+        case OP.FINALLY_SETUP: {
+          // finallyPc, contReg, payloadReg, throwPad
+          // Arm a finalizer for the current region.  Unlike a catch record this
+          // carries no exceptionReg; instead the continuation register (contReg)
+          // receives the resume PC and payloadReg carries the in-flight value.
+          frame._handlerStack.push({
+            finallyPc: this._operand(),
+            contReg: this._operand(),
+            payloadReg: this._operand(),
+            throwPad: this._operand(),
+            frameStackDepth: this._frameStack.length,
+          });
           break;
         }
 
@@ -912,39 +951,36 @@ VM.prototype.run = function () {
       if (!handledFrame) throw err; // if there's no handler, propagate back to host
 
       var h = handledFrame._handlerStack.pop();
-      // Discard any call-frames that were pushed inside the try body.
+      // Discard any call-frames that were pushed inside the protected region.
       this._frameStack.length = h.frameStackDepth;
-      // Write the caught exception directly into the designated register.
-      this._regs[handledFrame._base + h.exceptionReg] = err;
-      // Jump to the catch block.
-      handledFrame._pc = h.handlerPc;
-      this._regsTop = handledFrame._base + handledFrame.closure.fn.regCount;
+      var hBase = handledFrame._base;
+      if (h.exceptionReg !== undefined) {
+        // catch region — deliver the exception to the catch binding and run it.
+        this._regs[hBase + h.exceptionReg] = err;
+        handledFrame._pc = h.handlerPc;
+      } else {
+        // finally region — run the finalizer with the exception pending, then
+        // resume at its throw pad (which re-raises and continues unwinding).
+        this._regs[hBase + h.contReg] = h.throwPad;
+        this._regs[hBase + h.payloadReg] = err;
+        handledFrame._pc = h.finallyPc;
+      }
+      this._regsTop = hBase + handledFrame.closure.fn.regCount;
       this._currentFrame = handledFrame;
     }
   }
 };
 
 /* @BOOT */ // <- This comment can't be removed!
-var globals: any = {}; // global object for globals
-
-// Always pull built-ins from globalThis so eval() scoping can't shadow them
-// with a local `window` variable (e.g. the test harness fake window).
-for (var k of Object.getOwnPropertyNames(globalThis)) {
-  globals[k] = globalThis[k];
-}
-// If a window object is in scope (browser or test harness), capture it
-// explicitly so VM code can read/write window.TEST_OUTPUT etc.
+var globals: any = globalThis;
 if (typeof window !== "undefined") {
   globals.window = window;
-  for (var k of Object.getOwnPropertyNames(window)) {
-    globals[k] = window[k];
-  }
+  globals.document = typeof document !== "undefined" ? document : undefined;
 }
-
-// Transfer common primitives
-globals.undefined = undefined;
-globals.Infinity = Infinity;
-globals.NaN = NaN;
+if (typeof module !== "undefined") {
+  globals.module = module;
+  globals.exports = typeof exports !== "undefined" ? exports : undefined;
+}
 
 var vm = new VM(
   decodeBytecode(BYTECODE),

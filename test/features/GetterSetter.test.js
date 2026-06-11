@@ -1,8 +1,7 @@
 import { obfuscate, evalCode } from "../test-utils";
 
-// ── Basic Getter ───────────────────────────────────────────────────
-
-test("Variant #1: Basic getter — returns a constant", async () => {
+// Basic Getter
+test("Variant #1: Basic getter: returns a constant", async () => {
   const { code } = await obfuscate(`
     var obj = {
       get value() { return 42; }
@@ -38,9 +37,8 @@ test("Variant #3: Getter computes a value from regular properties", async () => 
   expect(await evalCode(code)).toBe(20);
 });
 
-// ── Basic Setter ───────────────────────────────────────────────────
-
-test("Variant #4: Basic setter — stores a value via this", async () => {
+// Basic Setter
+test("Variant #4: Basic setter: stores a value via this", async () => {
   const { code } = await obfuscate(`
     var obj = {
       _x: 0,
@@ -53,7 +51,7 @@ test("Variant #4: Basic setter — stores a value via this", async () => {
   expect(await evalCode(code)).toBe(99);
 });
 
-test("Variant #5: Setter with conditional logic — clamps to range", async () => {
+test("Variant #5: Setter with conditional logic: clamps to range", async () => {
   const { code } = await obfuscate(`
     var obj = {
       _count: 0,
@@ -66,9 +64,8 @@ test("Variant #5: Setter with conditional logic — clamps to range", async () =
   expect(await evalCode(code)).toBe(0);
 });
 
-// ── Getter + Setter pair ───────────────────────────────────────────
-
-test("Variant #6: Getter and setter on the same property — roundtrip", async () => {
+// Getter + Setter pair
+test("Variant #6: Getter and setter on the same property: roundtrip", async () => {
   const { code } = await obfuscate(`
     var obj = {
       _val: 0,
@@ -97,7 +94,7 @@ test("Variant #7: Setter updates state, getter reflects the change", async () =>
   expect(await evalCode(code)).toBe("Jane Doe");
 });
 
-test("Variant #8: Getter + setter with validation — rejects invalid values", async () => {
+test("Variant #8: Getter + setter with validation: rejects invalid values", async () => {
   const { code } = await obfuscate(`
     var obj = {
       _age: 0,
@@ -116,8 +113,7 @@ test("Variant #8: Getter + setter with validation — rejects invalid values", a
   expect(await evalCode(code)).toBe(25);
 });
 
-// ── Multiple accessors ─────────────────────────────────────────────
-
+// Multiple accessors
 test("Variant #9: Multiple getters on the same object", async () => {
   const { code } = await obfuscate(`
     var obj = {
@@ -132,8 +128,7 @@ test("Variant #9: Multiple getters on the same object", async () => {
   expect(await evalCode(code)).toEqual([7, 12]);
 });
 
-// ── Enumerability ──────────────────────────────────────────────────
-
+// Enumerability
 test("Variant #10: Getter property is enumerable (appears in for..in)", async () => {
   const { code } = await obfuscate(`
     var obj = {
@@ -148,8 +143,7 @@ test("Variant #10: Getter property is enumerable (appears in for..in)", async ()
   expect(await evalCode(code)).toBe(true);
 });
 
-// ── Mixed object with accessors and data properties ────────────────
-
+// Mixed object with accessors and data properties
 test("Variant #11: Object with data properties and a getter", async () => {
   const { code } = await obfuscate(`
     var circle = {
@@ -164,8 +158,7 @@ test("Variant #11: Object with data properties and a getter", async () => {
   expect(await evalCode(code)).toEqual(["circle", 5, 30]);
 });
 
-// ── String key getters ─────────────────────────────────────────────
-
+// String key getters
 test("Variant #12: Getter with string literal key", async () => {
   const { code } = await obfuscate(`
     var obj = {
@@ -178,13 +171,96 @@ test("Variant #12: Getter with string literal key", async () => {
   expect(await evalCode(code)).toBe(99);
 });
 
-// ── Error cases ────────────────────────────────────────────────────
+// Method shorthand
+test("Variant #13: Method shorthand: returns a constant", async () => {
+  const { code } = await obfuscate(`
+    var obj = {
+      greet() { return "hello"; }
+    };
+    window.TEST_OUTPUT = obj.greet();
+  `);
+  expect(await evalCode(code)).toBe("hello");
+});
 
-test("Variant #13: Computed getter key throws a compile-time error", async () => {
-  await expect(
-    obfuscate(`
-      var key = "x";
-      var obj = { get [key]() { return 1; } };
-    `),
-  ).rejects.toThrow(/computed/i);
+test("Variant #14: Method shorthand reads from this", async () => {
+  const { code } = await obfuscate(`
+    var obj = {
+      name: "Alice",
+      greet() { return "Hi " + this.name; }
+    };
+    window.TEST_OUTPUT = obj.greet();
+  `);
+  expect(await evalCode(code)).toBe("Hi Alice");
+});
+
+test("Variant #15: Method shorthand with parameters", async () => {
+  const { code } = await obfuscate(`
+    var obj = {
+      add(a, b) { return a + b; }
+    };
+    window.TEST_OUTPUT = obj.add(3, 4);
+  `);
+  expect(await evalCode(code)).toBe(7);
+});
+
+test("Variant #16: Mixed data properties and method shorthands", async () => {
+  const { code } = await obfuscate(`
+    var counter = {
+      _count: 0,
+      increment() { this._count++; },
+      value() { return this._count; }
+    };
+    counter.increment();
+    counter.increment();
+    window.TEST_OUTPUT = counter.value();
+  `);
+  expect(await evalCode(code)).toBe(2);
+});
+
+// Computed keys
+
+test("Variant #17: Computed data property key", async () => {
+  const { code } = await obfuscate(`
+    var key = "answer";
+    var obj = { [key]: 42 };
+    window.TEST_OUTPUT = obj.answer;
+  `);
+  expect(await evalCode(code)).toBe(42);
+});
+
+test("Variant #18: Computed getter key", async () => {
+  const { code } = await obfuscate(`
+    var key = "x";
+    var obj = { _x: 99, get [key]() { return this._x; } };
+    window.TEST_OUTPUT = obj.x;
+  `);
+  expect(await evalCode(code)).toBe(99);
+});
+
+test("Variant #19: Computed setter key", async () => {
+  const { code } = await obfuscate(`
+    var key = "val";
+    var obj = { _val: 0, set [key](v) { this._val = v; } };
+    obj.val = 7;
+    window.TEST_OUTPUT = obj._val;
+  `);
+  expect(await evalCode(code)).toBe(7);
+});
+
+test("Variant #20: Computed method shorthand key", async () => {
+  const { code } = await obfuscate(`
+    var name = "run";
+    var obj = { [name]() { return "ran"; } };
+    window.TEST_OUTPUT = obj.run();
+  `);
+  expect(await evalCode(code)).toBe("ran");
+});
+
+test("Variant #21: Computed key is an expression", async () => {
+  const { code } = await obfuscate(`
+    var prefix = "my";
+    var obj = { [prefix + "Prop"]: 123 };
+    window.TEST_OUTPUT = obj.myProp;
+  `);
+  expect(await evalCode(code)).toBe(123);
 });

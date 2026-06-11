@@ -3,6 +3,7 @@ import * as b from "../types.ts";
 import { Compiler } from "../compiler.ts";
 
 export const U16_MAX = 0xffff; // bytecode operands are u16
+export const U32_MAX = 0xffffffff; // max sentinel / operand value
 
 /** Returns the next free opcode slot, or -1 when the space is exhausted. */
 export function nextFreeSlot(compiler: Compiler): number {

@@ -134,7 +134,8 @@ test("Variant #10: typeof on primitives and undeclared variable", async () => {
       typeof null,
       typeof undefined,
       typeof {},
-      typeof undeclaredVar
+      typeof undeclaredVar,
+      typeof (function(){})
     ];
   `);
 
@@ -145,7 +146,8 @@ test("Variant #10: typeof on primitives and undeclared variable", async () => {
     "object",
     "undefined",
     "object",
-    "undefined", // TYPEOF_SAFE — no throw for undeclared globals
+    "undefined", // TYPEOF_SAFE should not throw even for undeclared globals
+    "function",
   ]);
 });
 

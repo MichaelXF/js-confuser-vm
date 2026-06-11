@@ -3,6 +3,7 @@ import { glob } from "glob";
 import { fileURLToPath } from "url";
 import { Worker } from "worker_threads";
 import * as os from "os";
+import { writeFile } from "fs/promises";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -264,4 +265,14 @@ console.log(`Files without any results: ${filesWithoutResults}`);
 console.log(
   "Percentage: " + ((passed / results.length) * 100).toFixed(2) + "%",
 );
+
+await writeFile(
+  "output.json",
+  JSON.stringify({
+    errorTypes,
+    errorMessages,
+  }),
+  "utf-8",
+);
+
 process.exit(0);

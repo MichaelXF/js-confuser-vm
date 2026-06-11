@@ -1,9 +1,8 @@
 import JsConfuserVM from "../src";
 
 /**
- *
  * @param {string} source
- * @param {Parameters<import('../src/index.ts')["default"]["obfuscate"]>[1]} overrideOptions
+ * @param {import('../src/options.ts').Options} overrideOptions
  * @returns
  */
 export async function obfuscate(source, overrideOptions) {
@@ -15,7 +14,7 @@ export async function obfuscate(source, overrideOptions) {
 export async function evalCode(code, windowProperties = {}) {
   var window = { TEST_OUTPUT: null, ...windowProperties };
   window.window = window;
-  eval(code);
 
+  eval(code);
   return window.TEST_OUTPUT;
 }

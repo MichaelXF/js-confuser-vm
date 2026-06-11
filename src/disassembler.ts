@@ -108,6 +108,25 @@ const UNARY_SYMBOLS: Record<string, string> = {
   UNARY_BITNOT: "~",
 };
 
+// Extract every identifier-like label inside the leading "[...]" of an
+// annotation, in order, skipping pure numbers. Handles forms where the label
+// comes first (e.g. "[catch_4, 0]" or "[finally_1, 1, 2, finally_throw_3]").
+function extractBracketLabels(annotation: string): string[] {
+  const stripped = annotation.replace(/\s+\d+:\d+-\d+:\d+\s*$/, "").trim();
+  const m = stripped.match(/\[([^\]]+)\]/);
+  if (!m) return [];
+  return m[1]
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => /^[a-zA-Z_]\w*$/.test(s));
+}
+
+// Extract trailing source location like "1:0-1:27" from an annotation
+function extractSourceLoc(annotation: string): string | null {
+  const m = annotation.match(/(\d+:\d+-\d+:\d+)\s*$/);
+  return m ? m[1] : null;
+}
+
 // Extract value from annotation like 'reg[1] = "Hello"' or 'reg[1] = 42'
 function extractConstValue(annotation: string): string | null {
   const m = annotation.match(/=\s*(.+?)(?:\s+\d+:\d+-\d+:\d+)?$/);
@@ -287,12 +306,23 @@ function disassembleInstr(instr: ParsedInstr): string {
       return `${r(1)} = ForInNext(${r(2)}) else goto ${label ?? `pc:${raw[3]}`}`;
     }
 
-    // Exception handling
+    // Exception handling.
+    // Emitted as plain call-expression statements (no braces) so the listing
+    // stays parseable as JavaScript for a flat, raw debugging view.
     case "TRY_SETUP": {
-      return `try { catch -> pc:${raw[1]}, exReg=${r(2)}`;
+      const catchLabel = extractBracketLabels(annotation)[0] ?? `pc_${raw[1]}`;
+      return `TrySetup(${catchLabel}, exReg=${r(2)})`;
     }
     case "TRY_END":
-      return `} // end try`;
+      return `TryEnd()`;
+    case "FINALLY_SETUP": {
+      const labels = extractBracketLabels(annotation);
+      const finallyLabel = labels[0] ?? `pc_${raw[1]}`;
+      const throwLabel = labels[1] ?? `pc_${raw[4]}`;
+      return `FinallySetup(${finallyLabel}, cont=${r(2)}, payload=${r(
+        3
+      )}, onThrow=${throwLabel})`;
+    }
 
     // Self-modifying
     case "PATCH":
@@ -309,17 +339,38 @@ function disassembleInstr(instr: ParsedInstr): string {
 export function disassembleCommentBlock(commentBlock: string): string {
   const lines = parseBlock(commentBlock);
 
+  // First pass: map function-entry labels to their param/reg counts from MAKE_CLOSURE
+  const funcMeta = new Map<string, { params: number; regs: number }>();
+  for (const line of lines) {
+    if (line.kind === "instr" && line.instr?.opName === "MAKE_CLOSURE") {
+      const label = extractLabel(line.instr.annotation);
+      if (label) {
+        funcMeta.set(label, {
+          params: line.instr.raw[3],
+          regs: line.instr.raw[4],
+        });
+      }
+    }
+  }
+
   let bodies: string[][] = [];
   let currentBody: string[] = [];
 
   for (const line of lines) {
     if (line.kind === "label") {
-      let newBody = [];
-      newBody.push(`// ${line.label}:`);
+      const meta = funcMeta.get(line.label!);
+      const paramList = meta
+        ? `(${Array.from({ length: meta.params }, (_, i) => `r${i}`).join(", ")})`
+        : "";
+      let newBody: string[] = [];
+      newBody.push(`// ${line.label}${paramList}:`);
       bodies.push(newBody);
       currentBody = newBody;
     } else if (line.instr) {
-      currentBody.push(`  ${disassembleInstr(line.instr)}`);
+      const instrText = disassembleInstr(line.instr);
+      const loc = extractSourceLoc(line.instr.annotation);
+      const outputLine = loc ? `${instrText.padEnd(50)}  // ${loc}` : instrText;
+      currentBody.push(`  ${outputLine}`);
     }
   }
 

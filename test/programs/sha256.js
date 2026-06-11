@@ -450,4 +450,10 @@ var sha256 = (function () {
   };
 })();
 
-module.exports = sha256;
+// test-utils.js only defines 'window' and can't use 'module'
+if (typeof module !== "undefined") {
+  module.exports = sha256;
+}
+if (typeof window !== "undefined") {
+  window.TEST_OUTPUT = sha256;
+}

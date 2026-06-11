@@ -45,7 +45,7 @@
 // • Opcodes with no JS equivalent (JUMP_REG, BXOR used as decode, etc.) cannot
 //   be expressed in a template; write those instruction arrays manually.
 
-import { Compiler } from "./compiler.ts";
+import { Compiler, SOURCE_NODE_SYM } from "./compiler.ts";
 import { DEFAULT_OPTIONS } from "./options.ts";
 import type { Bytecode, Instruction, RegisterOperand } from "./types.ts";
 
@@ -64,6 +64,64 @@ export class Template {
       }
       return String(variables[name]);
     });
+  }
+
+  // ── Shared child-compiler setup ───────────────────────────────────────────
+  // Creates a child Compiler that inherits the parent's OP table and label
+  // counter, shares fnDescriptors (so inner functions auto-register), then
+  // compiles `code` to raw IR.  Returns startIdx so callers can slice out
+  // the descriptors that belong to this template invocation.
+  private _setupChild(
+    code: string,
+    parentCompiler: Compiler,
+  ): { startIdx: number } {
+    const child = new Compiler({ ...DEFAULT_OPTIONS, randomizeOpcodes: false });
+    child.OP = { ...parentCompiler.OP };
+    child.OP_NAME = { ...parentCompiler.OP_NAME };
+    child.JUMP_OPS = new Set(parentCompiler.JUMP_OPS);
+    child.SENTINELS = { ...parentCompiler.SENTINELS };
+    child._makeLabel = parentCompiler._makeLabel.bind(parentCompiler);
+
+    const startIdx = parentCompiler.fnDescriptors.length;
+    child.fnDescriptors = parentCompiler.fnDescriptors;
+
+    child.compile(code);
+
+    return { startIdx };
+  }
+
+  // ── Inner-function bytecode collection ───────────────────────────────────
+  // Gathers the descriptors for functions declared inside the template (all
+  // entries after startIdx in fnDescriptors), assembles their defineLabel +
+  // body into a flat bytecode array, and strips template source locations so
+  // they never leak into the parent's debug output.
+  private _collectInnerFunctions(
+    parentCompiler: Compiler,
+    startIdx: number,
+  ): { innerFns: any[]; innerBytecode: Bytecode } {
+    const innerFns = parentCompiler.fnDescriptors.slice(startIdx + 1);
+
+    const innerBytecode: Bytecode = [];
+    for (const desc of innerFns) {
+      innerBytecode.push([
+        null,
+        { type: "defineLabel", label: desc.entryLabel },
+      ] as Instruction);
+      for (const instr of (desc as any).bytecode as Bytecode) {
+        innerBytecode.push(instr);
+      }
+    }
+
+    this._stripSourceNodes(innerBytecode);
+    return { innerFns, innerBytecode };
+  }
+
+  // ── Source-location stripping ─────────────────────────────────────────────
+  // Removes the SOURCE_NODE_SYM symbol from every instruction so that template-
+  // internal line numbers (which point into the template string, not the user's
+  // source) never appear in the bytecode comment block.
+  private _stripSourceNodes(bytecode: Bytecode): void {
+    for (const instr of bytecode) delete (instr as any)[SOURCE_NODE_SYM];
   }
 
   // ── Main entry point ───────────────────────────────────────────────────────
@@ -97,46 +155,13 @@ export class Template {
     variables: Record<string, string | number>,
     parentCompiler: Compiler,
   ): { functions: any[]; bytecode: Bytecode } {
-    // ── 1. Interpolate ────────────────────────────────────────────────────
     const code = this._interpolate(variables);
-
-    // ── 2. Create child compiler, inherit parent's OP table ───────────────
-    // randomizeOpcodes is disabled — we copy the parent's already-randomized
-    // mapping directly so all opcode numbers are identical.
-    const child = new Compiler({ ...DEFAULT_OPTIONS, randomizeOpcodes: false });
-    child.OP = { ...parentCompiler.OP };
-    child.OP_NAME = { ...parentCompiler.OP_NAME };
-    child.JUMP_OPS = new Set(parentCompiler.JUMP_OPS);
-
-    child._makeLabel = parentCompiler._makeLabel.bind(parentCompiler);
-
-    // Record how many descriptors the parent already has so we can find the
-    // child's main (index = startIdx) and inner functions (startIdx+1 …).
-    const startIdx = parentCompiler.fnDescriptors.length;
-    child.fnDescriptors = parentCompiler.fnDescriptors; // share — inner functions auto-register
-
-    // ── 3. Compile to raw IR (no passes) ──────────────────────────────────
-    child.compile(code);
-
-    // parentCompiler.fnDescriptors[startIdx]   → child's main (discard)
-    // parentCompiler.fnDescriptors[startIdx+1…] → inner helper functions
-    const innerDescs = parentCompiler.fnDescriptors.slice(startIdx + 1);
-
-    // Build bytecode blocks for inner functions only.
-    // child.bytecode was assembled by _compileMain from ALL fnDescriptors
-    // starting at startIdx.  We rebuild it here from the inner descs only.
-    const innerBytecode: Bytecode = [];
-    for (const desc of innerDescs) {
-      innerBytecode.push([
-        null,
-        { type: "defineLabel", label: desc.entryLabel },
-      ] as Instruction);
-      for (const instr of (desc as any).bytecode as Bytecode) {
-        innerBytecode.push(instr);
-      }
-    }
-
-    return { functions: innerDescs, bytecode: innerBytecode };
+    const { startIdx } = this._setupChild(code, parentCompiler);
+    const { innerFns, innerBytecode } = this._collectInnerFunctions(
+      parentCompiler,
+      startIdx,
+    );
+    return { functions: innerFns, bytecode: innerBytecode };
   }
 
   // ── Inline compilation ───────────────────────────────────────────────────
@@ -179,17 +204,7 @@ export class Template {
     innerBytecode: Bytecode;
   } {
     const code = this._interpolate(variables);
-
-    const child = new Compiler({ ...DEFAULT_OPTIONS, randomizeOpcodes: false });
-    child.OP = { ...parentCompiler.OP };
-    child.OP_NAME = { ...parentCompiler.OP_NAME };
-    child.JUMP_OPS = new Set(parentCompiler.JUMP_OPS);
-    child._makeLabel = parentCompiler._makeLabel.bind(parentCompiler);
-
-    const startIdx = parentCompiler.fnDescriptors.length;
-    child.fnDescriptors = parentCompiler.fnDescriptors;
-
-    child.compile(code);
+    const { startIdx } = this._setupChild(code, parentCompiler);
 
     const mainDesc = parentCompiler.fnDescriptors[startIdx] as any;
     const mainFnId: number = mainDesc._fnIdx;
@@ -247,19 +262,13 @@ export class Template {
       bytecode = bytecode.slice(0, -2);
     }
 
-    // ── Inner function bytecode (same as compile()) ───────────────────────
-    const innerDescs = parentCompiler.fnDescriptors.slice(startIdx + 1);
-    const innerBytecode: Bytecode = [];
-    for (const desc of innerDescs) {
-      innerBytecode.push([
-        null,
-        { type: "defineLabel", label: desc.entryLabel },
-      ] as Instruction);
-      for (const instr of (desc as any).bytecode as Bytecode) {
-        innerBytecode.push(instr);
-      }
-    }
+    this._stripSourceNodes(bytecode);
 
-    return { bytecode, registers, functions: innerDescs, innerBytecode };
+    const { innerFns, innerBytecode } = this._collectInnerFunctions(
+      parentCompiler,
+      startIdx,
+    );
+
+    return { bytecode, registers, functions: innerFns, innerBytecode };
   }
 }

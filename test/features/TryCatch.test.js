@@ -1,7 +1,6 @@
 import { obfuscate, evalCode } from "../test-utils";
 
-// ── Basic try-catch ────────────────────────────────────────────────
-
+// Basic try-catch
 test("Variant #1: Basic — catch receives thrown string", async () => {
   const { code } = await obfuscate(`
     var result = "none";
@@ -87,8 +86,7 @@ test("Variant #6: Native Error object is instanceof Error in catch", async () =>
   expect(await evalCode(code)).toBe(true);
 });
 
-// ── Nested try-catch ───────────────────────────────────────────────
-
+// Nested try-catch
 test("Variant #7: Nested try-catch — inner catches its own throw", async () => {
   const { code } = await obfuscate(`
     var result = "";
@@ -126,8 +124,7 @@ test("Variant #8: Nested try-catch — inner rethrows to outer catch", async () 
   expect(await evalCode(code)).toBe("problem-rethrown");
 });
 
-// ── Exception thrown inside a called function ──────────────────────
-
+// Exception thrown inside a called function
 test("Variant #9: Exception propagates up from a called function", async () => {
   const { code } = await obfuscate(`
     function boom() {
@@ -163,8 +160,7 @@ test("Variant #10: Deep call stack unwind to catch", async () => {
   expect(await evalCode(code)).toBe("deep");
 });
 
-// ── Control flow through try-catch ────────────────────────────────
-
+// Control flow with try-catch
 test("Variant #11: Code after try-catch executes when no throw", async () => {
   const { code } = await obfuscate(`
     var log = [];
@@ -196,8 +192,7 @@ test("Variant #12: Code after try-catch executes after catch runs", async () => 
   expect(await evalCode(code)).toEqual(["try", "catch", "after"]);
 });
 
-// ── Break/continue out of try inside a loop ────────────────────────
-
+// Break/continue out of try inside a loop
 test("Variant #13: Break from inside a try block exits the loop cleanly", async () => {
   const { code } = await obfuscate(`
     var result = 0;
@@ -234,8 +229,7 @@ test("Variant #14: Continue from inside a try block skips the rest of the body",
   expect(await evalCode(code)).toBe(8);
 });
 
-// ── Return from inside try block ───────────────────────────────────
-
+// Return from inside try block
 test("Variant #15: Return from inside try block works correctly", async () => {
   const { code } = await obfuscate(`
     function safe(x) {
@@ -252,8 +246,7 @@ test("Variant #15: Return from inside try block works correctly", async () => {
   expect(await evalCode(code)).toBe("negative,positive");
 });
 
-// ── try-catch as expression guard ─────────────────────────────────
-
+// try-catch as expression guard
 test("Variant #16: try-catch used as a value guard pattern", async () => {
   const { code } = await obfuscate(`
     function attempt(fn) {
@@ -269,18 +262,4 @@ test("Variant #16: try-catch used as a value guard pattern", async () => {
   `);
 
   expect(await evalCode(code)).toEqual([42, null]);
-});
-
-// ── Error thrown via a finalizer-less pattern ─────────────────────
-
-test("Variant #17: finally keyword causes a compile-time error", async () => {
-  await expect(
-    obfuscate(`
-      try {
-        var x = 1;
-      } finally {
-        var y = 2;
-      }
-    `),
-  ).rejects.toThrow(/finally/i);
 });

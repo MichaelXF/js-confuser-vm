@@ -10,13 +10,10 @@ const sourceCode = readFileSync(
 test("Variant #1: Obfuscate sha256.js", async () => {
   const { code } = await obfuscate(sourceCode);
 
-  var module = { exports: {} };
-  await evalCode(code, { module });
-
   /**
    * @type {import('./sha256.js')}
    */
-  var sha256 = module.exports;
+  var sha256 = await evalCode(code);
 
   expect(Object.keys(sha256)).toEqual([
     "hex",

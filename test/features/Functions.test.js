@@ -259,3 +259,35 @@ test("Variant #21: Deeply nested rest functions all receive correct slices", asy
 
   expect(await evalCode(code)).toEqual([[1], [2, 3], [4, 5, 6]]);
 });
+
+test("Variant #22: Hoisted function used before declaration", async () => {
+  const { code } = await obfuscate(`
+    window.TEST_OUTPUT = {
+      programLevel: hoisted(1, 2, 3),
+      fnLevel: fnLevel(),
+      blockLevel: blockLevel()
+    };
+    
+    function hoisted(x, y, z) {
+      return x + y + z;
+    }
+
+    function fnLevel(){
+      return subtract(5 , 1);
+      function subtract(x, y) { return x - y }
+    }
+
+    function blockLevel(){
+      if(true){
+        return get10();
+        function get10(){ return 10 }    
+      }
+    }
+  `);
+
+  expect(await evalCode(code)).toEqual({
+    programLevel: 6,
+    fnLevel: 4,
+    blockLevel: 10,
+  });
+});

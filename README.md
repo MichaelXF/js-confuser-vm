@@ -3,8 +3,7 @@
   [![NPM](https://img.shields.io/badge/NPM-%23000000.svg?style=for-the-badge&logo=npm&logoColor=white)](https://npmjs.com/package/js-confuser-vm) [![GitHub](https://img.shields.io/badge/github-%23121011.svg?style=for-the-badge&logo=github&logoColor=white)](https://github.com/MichaelXF/js-confuser-vm) [![Netlify](https://img.shields.io/badge/netlify-%23000000.svg?style=for-the-badge&logo=netlify&logoColor=#00C7B7)](https://js-confuser.com/vm)
 
 
-- **Requires Node v24.13.1 or higher**
-- ES5 support only. No complex features: async, generator, and even try..finally aren't supported.
+- Supports ES5 and limited ES6 features. No complex features, such as async and generators aren't supported.
 - Experimental. Expect issues.
 - [Try the web version.](https://js-confuser.com/vm)
 
@@ -37,16 +36,19 @@ JsConfuserVM.obfuscate(`
   target: "browser", // or "node"
   randomizeOpcodes: true, // randomize the opcode numbers?
   shuffleOpcodes: true, // shuffle order of opcode handlers in the runtime?
-  encodeBytecode: true, // encode the bytecode array?
-  concealConstants: true, // conceal strings and integers in the constant pool?
-  dispatcher: true, // create middleman blocks to process jumps?
+  encodeBytecode: true, // encode bytecode? when off, comments for instructions are added
   selfModifying: true, // do self-modifying bytecode for function bodies?
+  dispatcher: true, // create middleman blocks to process jumps?
+  controlFlowFlattening: true, // flatten the control flow of your program into a convoluted state machine?
+  stringConcealing: true, // base64-encode strings to conceal plain-text values?
   macroOpcodes: true, // create combined opcodes for repeated instruction sequences?
   specializedOpcodes: true, // create specialized opcodes for commonly used opcode+operand pairs?
   aliasedOpcodes: true, // create duplicate opcodes for commonly used opcodes?
+  handlerTable: true, // convert switch dispatch to a handler table on the VM prototype?
   timingChecks: true, // add timing checks to detect debuggers?
+  concealConstants: true, // conceal strings and integers in the constant pool?
   classObfuscation: true, // obfuscate the VM runtime classes?
-  minify: true // pass final output through Google Closure Compiler? (Renames VM class properties)
+  minify: true, // pass final output through Google Closure Compiler? (Renames VM class properties)
 }).then(result => {
   console.log(result.code)
 })
@@ -112,17 +114,19 @@ A(new p(function(a){a=typeof Buffer!=="undefined"?Buffer.from(a,"base64"):Uint8A
 - [x] labeled statements
 - [x] for..in loop
 - [x] RegExp literals
-- [x] try..catch
+- [x] try..catch..finally
 - [x] getter/setters
 - [x] debugger;
 - [x] template literals (**ES6**)
 - [x] rest parameters (**ES6**)
+- [x] spread operator (**ES6**)
+- [x] object methods, computed property keys (**ES6**)
 
 ### Missing
 
-- [ ] try..finally
 - [ ] with statement
 - [ ] arguments.callee, argument parameter syncing   
+- [ ] eval() referencing local variables
 
 ### Hardening
 
@@ -420,9 +424,9 @@ console.log("Hello world!");
 // [43, 5, 1, 3, 1, 4], CALL_METHOD  reg[5] = method(recv=reg[1], fn=reg[3], 1 args)1:0-1:27
 
 // What the opcode "LOAD_GLOBAL" looks like:
-case OP.LOAD_CONST:
+case OP.LOAD_GLOBAL:
   var dst = this._operand();
-  frame.regs[dst] = this.constants[this._operand()];
+  frame.regs[dst] = this.globals[this.constants[this._operand()]];
   break;
 
 // After
@@ -621,7 +625,7 @@ main().catch(console.error);
 ### WIP
 
 - 202 tests, 91.18% coverage
-- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 78.58%
+- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 82.43%
 
 ### Made with AI
 
