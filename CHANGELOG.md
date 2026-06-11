@@ -8,6 +8,7 @@
 - Added support for `try..finally`
 - Added simple ES6 features: spread operator, object methods, and computed property keys
 - Added source locations to `JSConfuserVM.disassemble(sourceCode)`'s output
+- Improved the VM Runtime's closure tracking to a private WeakMap over an exposed `Symbol`
 
 ## `0.1.1` Control Flow Flattening, String Concealing, and more
 
