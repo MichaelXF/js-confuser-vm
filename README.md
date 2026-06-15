@@ -44,7 +44,6 @@ JsConfuserVM.obfuscate(`
   macroOpcodes: true, // create combined opcodes for repeated instruction sequences?
   specializedOpcodes: true, // create specialized opcodes for commonly used opcode+operand pairs?
   aliasedOpcodes: true, // create duplicate opcodes for commonly used opcodes?
-  handlerTable: true, // convert switch dispatch to a handler table on the VM prototype?
   timingChecks: true, // add timing checks to detect debuggers?
   concealConstants: true, // conceal strings and integers in the constant pool?
   classObfuscation: true, // obfuscate the VM runtime classes?
@@ -132,6 +131,7 @@ new Uint32Array(R.length/4),W=0;W<Ka.length;W++)Ka[W]=(R[W*4]|R[W*4+1]<<8|R[W*4+
 - [x] rest parameters (**ES6**)
 - [x] spread operator (**ES6**)
 - [x] object methods, computed property keys (**ES6**)
+- [x] arrow functions (**ES6**)
 
 ### Missing
 

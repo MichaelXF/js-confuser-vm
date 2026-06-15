@@ -126,6 +126,7 @@ export interface ObfuscationResult {
       [transformName: string]: {
         fileSize?: number;
         bytecodeSize?: number;
+        flatBytecodeSize?: number;
         transformTime?: number;
         handlerCount?: number;
       };

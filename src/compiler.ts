@@ -284,6 +284,11 @@ interface FnDescriptor {
   upvalues?: any[];
   _fnIdx?: number;
 
+  // Number of leading local-pool registers (params + `arguments` + `this`)
+  // whose slot index is fixed by position. resolveRegisters() maps virtual ids
+  // 0..reservedRegisters-1 to identical slots, even when some are uncollected.
+  reservedRegisters?: number;
+
   hasRest?: boolean;
 
   /**
@@ -527,9 +532,27 @@ export class Compiler {
   }
 
   // Function compilation
-  _compileFunctionDecl(node: t.FunctionDeclaration | t.FunctionExpression) {
-    ok(!node.generator, "Generator functions are not supported");
+  _compileFunctionDecl(
+    node:
+      | t.FunctionDeclaration
+      | t.FunctionExpression
+      | t.ArrowFunctionExpression,
+  ) {
+    const isArrow = node.type === "ArrowFunctionExpression";
+    ok(!(node as any).generator, "Generator functions are not supported");
     ok(!node.async, "Async functions are not supported");
+
+    // Arrow functions do NOT bind their own `this` or `arguments`; both are
+    // inherited lexically from the nearest enclosing non-arrow function. We
+    // model this with the ordinary upvalue machinery: a non-arrow function
+    // materializes its receiver into a hidden `this` local (see the prologue
+    // below) and an arrow that references `this`/`arguments` simply resolves the
+    // name up the scope chain, capturing it as an upvalue. The result is that an
+    // arrow's MAKE_CLOSURE is byte-for-byte indistinguishable from any other
+    // nested closure — there is no "arrow" marker anywhere in the bytecode.
+    // `node.body` may be an Expression (concise body: `x => x + 1`) rather than
+    // a BlockStatement.
+    const isBlockBody = node.body.type === "BlockStatement";
 
     var fnIdx = this.fnDescriptors.length;
     const entryLabel = this._makeLabel(`fn_${fnIdx}`);
@@ -564,22 +587,41 @@ export class Compiler {
       }
     }
 
-    // 2. Reserve the `arguments` virtual register (immediately after params).
-    ctx.scope.define("arguments", ctx);
+    // 2. Reserve the `arguments` virtual register (immediately after params)
+    // and a hidden `this` register (immediately after that). Order matters: the
+    // runtime writes the args array into slot `paramCount`, so `arguments` must
+    // keep that slot and `this` follows it. Arrow functions bind neither — a
+    // reference climbs the scope chain to the enclosing function's register.
+    if (!isArrow) {
+      ctx.scope.define("arguments", ctx);
+      const thisReg = ctx.scope.define("this", ctx);
+      // Prologue: materialize the receiver (frame.thisVal) into the hidden
+      // `this` local so it reads like any other register and can be captured as
+      // an upvalue by nested arrows. This is the only place LOAD_THIS is now
+      // emitted, so `this` usage sites become generic register reads.
+      this.emit(ctx.bc, [this.OP.LOAD_THIS, thisReg], node);
+    }
 
     // 3. Hoist all var declarations so locals are allocated before any temps.
-    this._hoistVars(node.body.body, ctx.scope, ctx);
+    // Concise-body arrows have an expression body with no statements to hoist.
+    if (isBlockBody) {
+      this._hoistVars((node.body as t.BlockStatement).body, ctx.scope, ctx);
+    }
 
     // 4. Hoist function declarations: compile and emit MAKE_CLOSURE at function
     // entry so they are available before any code in the body runs.
-    const hoistedFnDecls = this._collectHoistedFunctions(node.body.body);
-    for (const fnDecl of hoistedFnDecls) {
-      const fnDesc = this._compileFunctionDecl(fnDecl);
-      (fnDecl as any)._hoistedDesc = fnDesc;
-      const closureReg = this._emitMakeClosure(fnDesc, fnDecl, ctx.bc);
-      const slot = ctx.scope._locals.get(fnDecl.id!.name)!;
-      if (closureReg !== slot) {
-        this.emit(ctx.bc, [this.OP.MOVE, slot, closureReg], fnDecl);
+    if (isBlockBody) {
+      const hoistedFnDecls = this._collectHoistedFunctions(
+        (node.body as t.BlockStatement).body,
+      );
+      for (const fnDecl of hoistedFnDecls) {
+        const fnDesc = this._compileFunctionDecl(fnDecl);
+        (fnDecl as any)._hoistedDesc = fnDesc;
+        const closureReg = this._emitMakeClosure(fnDesc, fnDecl, ctx.bc);
+        const slot = ctx.scope._locals.get(fnDecl.id!.name)!;
+        if (closureReg !== slot) {
+          this.emit(ctx.bc, [this.OP.MOVE, slot, closureReg], fnDecl);
+        }
       }
     }
 
@@ -620,18 +662,28 @@ export class Compiler {
     }
 
     // 6. Compile body.
-    for (const stmt of node.body.body) {
-      this._compileStatement(stmt, ctx.scope, ctx.bc);
-    }
+    if (!isBlockBody) {
+      // Concise-body arrow: `(...) => expr` is equivalent to `{ return expr }`.
+      const reg = this._compileExpr(
+        node.body as t.Expression,
+        ctx.scope,
+        ctx.bc,
+      );
+      this.emit(ctx.bc, [this.OP.RETURN, reg], node);
+    } else {
+      for (const stmt of (node.body as t.BlockStatement).body) {
+        this._compileStatement(stmt, ctx.scope, ctx.bc);
+      }
 
-    // Implicit return undefined at end of function.
-    const reg_undef = ctx.allocReg();
-    this.emit(
-      ctx.bc,
-      [this.OP.LOAD_CONST, reg_undef, b.constantOperand(undefined)],
-      node,
-    );
-    this.emit(ctx.bc, [this.OP.RETURN, reg_undef], node);
+      // Implicit return undefined at end of function.
+      const reg_undef = ctx.allocReg();
+      this.emit(
+        ctx.bc,
+        [this.OP.LOAD_CONST, reg_undef, b.constantOperand(undefined)],
+        node,
+      );
+      this.emit(ctx.bc, [this.OP.RETURN, reg_undef], node);
+    }
 
     this._currentCtx = savedCtx;
     this._loopStack = savedLoopStack;
@@ -643,6 +695,13 @@ export class Compiler {
     desc.bytecode = ctx.bc as b.Bytecode;
     desc._fnIdx = fnIdx;
     desc.paramCount = node.params.length;
+    // Leading locals whose slots are fixed by position and written by the
+    // runtime at call time: the params (slots 0..paramCount-1), plus — for
+    // non-arrow functions — `arguments` (slot paramCount) and the hidden `this`
+    // (slot paramCount+1). These MUST get an identity slot mapping even when
+    // unused, otherwise a later local/upvalue capture slides into a param slot
+    // and the runtime's fixed-slot writes corrupt it. See resolveRegisters().
+    desc.reservedRegisters = node.params.length + (isArrow ? 0 : 2);
     desc.hasRest = hasRest;
     // regCount is NOT set here — resolveRegisters() fills it after liveness analysis.
     desc.upvalues = ctx.upvalues.slice();
@@ -1662,7 +1721,11 @@ export class Compiler {
     const prefixRegs = prefix.map((a) => {
       if (a === null) {
         const r = ctx.allocReg();
-        this.emit(bc, [this.OP.LOAD_CONST, r, b.constantOperand(undefined)], node);
+        this.emit(
+          bc,
+          [this.OP.LOAD_CONST, r, b.constantOperand(undefined)],
+          node,
+        );
         return r;
       }
       return this._compileExpr(a as t.Expression, scope, bc);
@@ -1685,13 +1748,21 @@ export class Compiler {
         node,
       );
       const concatFnReg = ctx.allocReg();
-      this.emit(bc, [this.OP.GET_PROP, concatFnReg, accReg, concatKeyReg], node);
+      this.emit(
+        bc,
+        [this.OP.GET_PROP, concatFnReg, accReg, concatKeyReg],
+        node,
+      );
 
       let argArrReg: b.RegisterOperand;
       if (arg === null) {
         // Array hole — treat as undefined wrapped in [undefined]
         const elemReg = ctx.allocReg();
-        this.emit(bc, [this.OP.LOAD_CONST, elemReg, b.constantOperand(undefined)], node);
+        this.emit(
+          bc,
+          [this.OP.LOAD_CONST, elemReg, b.constantOperand(undefined)],
+          node,
+        );
         argArrReg = ctx.allocReg();
         this.emit(bc, [this.OP.BUILD_ARRAY, argArrReg, 1, elemReg], node);
       } else if ((arg as any).type === "SpreadElement") {
@@ -1811,6 +1882,20 @@ export class Compiler {
       }
 
       case "ThisExpression": {
+        // `this` is resolved like any ordinary binding. In a non-arrow function
+        // it is a hidden local (materialized by the entry prologue); in an arrow
+        // it climbs to the enclosing function and becomes an upvalue read. Either
+        // way the usage site is a generic register/upvalue access, not a
+        // semantically-revealing LOAD_THIS.
+        const res = this._resolve("this", this._currentCtx);
+        if (res.kind === "local") return res.reg; // register IS the local
+        if (res.kind === "upvalue") {
+          const dst = ctx.allocReg();
+          this.emit(bc, [this.OP.LOAD_UPVALUE, dst, res.index], node);
+          return dst;
+        }
+        // Fallback (no enclosing `this` binding, e.g. a stray top-level use):
+        // read the frame receiver directly.
         const dst = ctx.allocReg();
         this.emit(bc, [this.OP.LOAD_THIS, dst], node);
         return dst;
@@ -1818,17 +1903,39 @@ export class Compiler {
 
       case "NewExpression": {
         const n = node as t.NewExpression;
-        ok(n.arguments.length < U16_MAX, `Too many arguments (max ${U16_MAX - 1})`);
+        ok(
+          n.arguments.length < U16_MAX,
+          `Too many arguments (max ${U16_MAX - 1})`,
+        );
         const calleeReg = this._compileExpr(n.callee, scope, bc);
         const dst = ctx.allocReg();
         if (this._hasSpread(n.arguments)) {
-          const argsArrayReg = this._buildSpreadArgs(n.arguments, scope, bc, node);
-          this.emit(bc, [this.OP.NEW, dst, calleeReg, this.SENTINELS.CALL_SPREAD, argsArrayReg], node);
+          const argsArrayReg = this._buildSpreadArgs(
+            n.arguments,
+            scope,
+            bc,
+            node,
+          );
+          this.emit(
+            bc,
+            [
+              this.OP.NEW,
+              dst,
+              calleeReg,
+              this.SENTINELS.CALL_SPREAD,
+              argsArrayReg,
+            ],
+            node,
+          );
         } else {
           const argRegs = n.arguments.map((a) =>
             this._compileExpr(a as t.Expression, scope, bc),
           );
-          this.emit(bc, [this.OP.NEW, dst, calleeReg, n.arguments.length, ...argRegs], node);
+          this.emit(
+            bc,
+            [this.OP.NEW, dst, calleeReg, n.arguments.length, ...argRegs],
+            node,
+          );
         }
         return dst;
       }
@@ -2202,7 +2309,10 @@ export class Compiler {
 
       case "CallExpression": {
         const n = node as t.CallExpression;
-        ok(n.arguments.length < U16_MAX, `Too many arguments (max ${U16_MAX - 1})`);
+        ok(
+          n.arguments.length < U16_MAX,
+          `Too many arguments (max ${U16_MAX - 1})`,
+        );
 
         if (n.callee.type === "MemberExpression") {
           // Method call: receiver.method(args)
@@ -2237,15 +2347,38 @@ export class Compiler {
 
           const dst = ctx.allocReg();
           if (this._hasSpread(n.arguments)) {
-            const argsArrayReg = this._buildSpreadArgs(n.arguments, scope, bc, node);
-            this.emit(bc, [this.OP.CALL_METHOD, dst, receiverReg, calleeReg, this.SENTINELS.CALL_SPREAD, argsArrayReg], node);
+            const argsArrayReg = this._buildSpreadArgs(
+              n.arguments,
+              scope,
+              bc,
+              node,
+            );
+            this.emit(
+              bc,
+              [
+                this.OP.CALL_METHOD,
+                dst,
+                receiverReg,
+                calleeReg,
+                this.SENTINELS.CALL_SPREAD,
+                argsArrayReg,
+              ],
+              node,
+            );
           } else {
             const argRegs = n.arguments.map((a) =>
               this._compileExpr(a as t.Expression, scope, bc),
             );
             this.emit(
               bc,
-              [this.OP.CALL_METHOD, dst, receiverReg, calleeReg, n.arguments.length, ...argRegs],
+              [
+                this.OP.CALL_METHOD,
+                dst,
+                receiverReg,
+                calleeReg,
+                n.arguments.length,
+                ...argRegs,
+              ],
               node,
             );
           }
@@ -2259,13 +2392,32 @@ export class Compiler {
           );
           const dst = ctx.allocReg();
           if (this._hasSpread(n.arguments)) {
-            const argsArrayReg = this._buildSpreadArgs(n.arguments, scope, bc, node);
-            this.emit(bc, [this.OP.CALL, dst, calleeReg, this.SENTINELS.CALL_SPREAD, argsArrayReg], node);
+            const argsArrayReg = this._buildSpreadArgs(
+              n.arguments,
+              scope,
+              bc,
+              node,
+            );
+            this.emit(
+              bc,
+              [
+                this.OP.CALL,
+                dst,
+                calleeReg,
+                this.SENTINELS.CALL_SPREAD,
+                argsArrayReg,
+              ],
+              node,
+            );
           } else {
             const argRegs = n.arguments.map((a) =>
               this._compileExpr(a as t.Expression, scope, bc),
             );
-            this.emit(bc, [this.OP.CALL, dst, calleeReg, n.arguments.length, ...argRegs], node);
+            this.emit(
+              bc,
+              [this.OP.CALL, dst, calleeReg, n.arguments.length, ...argRegs],
+              node,
+            );
           }
           return dst;
         }
@@ -2380,6 +2532,16 @@ export class Compiler {
 
       case "FunctionExpression": {
         const desc = this._compileFunctionDecl(node as t.FunctionExpression);
+        return this._emitMakeClosure(desc, node, bc);
+      }
+
+      case "ArrowFunctionExpression": {
+        // Arrows compile through the same path as any other function. They differ
+        // only in that they bind no `this`/`arguments` (handled in
+        // _compileFunctionDecl), so the resulting closure is indistinguishable.
+        const desc = this._compileFunctionDecl(
+          node as t.ArrowFunctionExpression,
+        );
         return this._emitMakeClosure(desc, node, bc);
       }
 
@@ -2588,8 +2750,7 @@ export class Compiler {
                 key.type === "NumericLiteral"
               )
                 keyStr = String(key.value);
-              else
-                throw new Error(`Unsupported object key type: ${key.type}`);
+              else throw new Error(`Unsupported object key type: ${key.type}`);
               keyReg = ctx.allocReg();
               this.emit(
                 bc,
@@ -3016,6 +3177,7 @@ export async function compileAndSerialize(
     compiler.profileData.transforms[name] = {
       transformTime: elapsedMs,
       bytecodeSize: bytecode.length,
+      flatBytecodeSize: bytecode.flat().length,
     };
 
     compiler.log(

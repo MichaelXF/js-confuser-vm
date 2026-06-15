@@ -31,7 +31,7 @@ export function specializedOpcodes(
       op: number;
       operands: InstrOperand[];
       operandsKey: string;
-      occurences: number;
+      occurrences: number;
     }
   >();
 
@@ -71,21 +71,21 @@ export function specializedOpcodes(
     const key = `${op},${operandsKey}`;
     const entry = freqMap.get(key);
     if (entry) {
-      entry.occurences++;
+      entry.occurrences++;
     } else {
       freqMap.set(key, {
         op,
         operands,
         operandsKey,
-        occurences: 1,
+        occurrences: 1,
       });
     }
   }
 
   // ── Step 2: keep combinations that appear >= 2 times, sort by frequency ───
   const candidates = Array.from(freqMap.values())
-    .filter((e) => e.occurences >= 1)
-    .sort((a, b) => b.occurences - a.occurences)
+    .filter((e) => e.occurrences >= 1)
+    .sort((a, b) => b.occurrences - a.occurrences)
     .slice(0, 1000);
 
   if (candidates.length === 0) return { bytecode: bc };
@@ -93,8 +93,12 @@ export function specializedOpcodes(
   // ── Step 3: assign free opcode slots to the best candidates ───────────────
   const sigToSpecial = new Map<string, number>();
   const specializedOps: Compiler["SPECIALIZED_OPS"] = {};
+  let opCounts: { [originalOp: number]: number } = {};
 
   for (const candidate of candidates) {
+    if (opCounts[candidate.op] > 3) continue;
+    opCounts[candidate.op] = (opCounts[candidate.op] || 0) + 1;
+
     const specialOp = nextFreeSlot(compiler);
     if (specialOp === -1) break;
     const { op: originalOp, operands, operandsKey } = candidate;

@@ -132,18 +132,33 @@ export function resolveRegisters(
     // nextSlot is the high-water mark: the next fresh slot to allocate.
     // It is shared across all pools so each pool's slots start above the
     // previous pool's maximum slot.
-    let nextSlot = 0;
+    //
+    // Leading locals (params, `arguments`, `this`) have slots fixed by position
+    // and are written by the runtime at call time. Start the cursor above that
+    // reserved region so no other register can land in it — even when some
+    // reserved locals are unused (and therefore never collected above). This is
+    // essential for correctness: e.g. a function with unused named params whose
+    // `arguments` is captured by a nested arrow would otherwise slide into a
+    // param slot and read a parameter value instead of the arguments object.
+    const reserved = compiler.fnDescriptors[fnId]?.reservedRegisters ?? 0;
+    let nextSlot = reserved;
 
     for (const poolKey of sortedPoolKeys) {
       const regs = pools.get(poolKey)!;
 
       if (poolKey === "local::") {
         // ── Local pool: virtual-id order, no reuse ────────────────────────
-        // Params must be at the lowest slots (written by the runtime at call
-        // time); upvalue captures must keep their slot for the frame's lifetime.
+        // Reserved leading locals keep an identity slot mapping (id N → slot N)
+        // so the runtime's positional writes always land correctly; upvalue
+        // captures must keep their slot for the frame's lifetime. Remaining
+        // locals (hoisted vars, captured variables) pack above the reserved region.
         regs.sort((a, b) => a.id - b.id);
         for (const reg of regs) {
-          slotMap.set(reg.id, nextSlot++);
+          if (reg.id < reserved) {
+            slotMap.set(reg.id, reg.id);
+          } else {
+            slotMap.set(reg.id, nextSlot++);
+          }
         }
       } else {
         // ── Non-local pool: firstUse order, linear-scan reuse ─────────────
