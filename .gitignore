@@ -6,10 +6,6 @@ input.js
 /index.ts
 /disassemble.ts
 /bench.ts
-output.js
-output.min.js
-output.obf.js
-output.original.js
 output.*
 .claude
 package-lock.json
