@@ -132,6 +132,8 @@ new Uint32Array(R.length/4),W=0;W<Ka.length;W++)Ka[W]=(R[W*4]|R[W*4+1]<<8|R[W*4+
 - [x] spread operator (**ES6**)
 - [x] object methods, computed property keys (**ES6**)
 - [x] arrow functions (**ES6**)
+- [x] exponentiation operator `**`, `**=`
+- [x] nullish coalescing `??`
 
 ### Missing
 
@@ -632,7 +634,7 @@ main().catch(console.error);
 ### WIP
 
 - 202 tests, 91.18% coverage
-- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 85.58%%
+- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 85.58%
 
 ### Made with AI
 

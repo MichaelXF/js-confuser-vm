@@ -11,6 +11,7 @@
 
 - Added support for `try..finally`
 - Added ES6 features: arrow functions, spread operator, object methods, and computed property keys
+- Added support for the exponentiation operator (`**`, `**=`) and nullish coalescing (`??`)
 - Added source locations to `JSConfuserVM.disassemble(sourceCode)`'s output
 - Improved the VM Runtime's closure tagging to a private WeakMap over an exposed `Symbol`
 

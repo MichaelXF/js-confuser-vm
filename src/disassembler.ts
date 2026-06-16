@@ -80,6 +80,7 @@ const ARITH_SYMBOLS: Record<string, string> = {
   MUL: "*",
   DIV: "/",
   MOD: "%",
+  EXP: "**",
   BAND: "&",
   BOR: "|",
   BXOR: "^",
@@ -176,6 +177,7 @@ function disassembleInstr(instr: ParsedInstr): string {
     case "MUL":
     case "DIV":
     case "MOD":
+    case "EXP":
     case "BAND":
     case "BOR":
     case "BXOR":

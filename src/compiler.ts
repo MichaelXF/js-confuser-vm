@@ -74,6 +74,7 @@ export const OP_ORIGINAL = {
   MUL: 13,
   DIV: 14,
   MOD: 15,
+  EXP: 60, // dst, src1, src2   regs[dst] = regs[src1] ** regs[src2]
   BAND: 16,
   BOR: 17,
   BXOR: 18,
@@ -1984,7 +1985,8 @@ export class Compiler {
         const n = node as t.LogicalExpression;
         const endLabel = this._makeLabel("logical_end");
         const isOr = n.operator === "||";
-        if (!isOr && n.operator !== "&&")
+        const isNullish = n.operator === "??";
+        if (!isOr && !isNullish && n.operator !== "&&")
           throw new Error(`Unsupported logical operator: ${n.operator}`);
 
         const lhsReg = this._compileExpr(n.left, scope, bc);
@@ -1992,17 +1994,45 @@ export class Compiler {
         if (lhsReg !== reg_result)
           this.emit(bc, [this.OP.MOVE, reg_result, lhsReg], node);
 
-        // For ||: if truthy keep LHS, jump past RHS.
-        // For &&: if falsy keep LHS, jump past RHS.
-        this.emit(
-          bc,
-          [
-            isOr ? this.OP.JUMP_IF_TRUE : this.OP.JUMP_IF_FALSE,
-            reg_result,
-            { type: "label", label: endLabel },
-          ],
-          node,
-        );
+        if (isNullish) {
+          // a ?? b — keep LHS unless it is null or undefined, otherwise use RHS.
+          // `reg_result == null` (loose) is true for exactly null and undefined,
+          // which is precisely the set of "nullish" values.
+          const nullReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.LOAD_CONST, nullReg, b.constantOperand(null)],
+            node,
+          );
+          const isNullishReg = ctx.allocReg();
+          this.emit(
+            bc,
+            [this.OP.LOOSE_EQ, isNullishReg, reg_result, nullReg],
+            node,
+          );
+          // Not nullish → keep LHS and skip RHS.
+          this.emit(
+            bc,
+            [
+              this.OP.JUMP_IF_FALSE,
+              isNullishReg,
+              { type: "label", label: endLabel },
+            ],
+            node,
+          );
+        } else {
+          // For ||: if truthy keep LHS, jump past RHS.
+          // For &&: if falsy keep LHS, jump past RHS.
+          this.emit(
+            bc,
+            [
+              isOr ? this.OP.JUMP_IF_TRUE : this.OP.JUMP_IF_FALSE,
+              reg_result,
+              { type: "label", label: endLabel },
+            ],
+            node,
+          );
+        }
 
         // Compile RHS into reg_result.
         const rhsReg = this._compileExpr(n.right, scope, bc);
@@ -2065,6 +2095,7 @@ export class Compiler {
             "*": this.OP.MUL,
             "/": this.OP.DIV,
             "%": this.OP.MOD,
+            "**": this.OP.EXP,
             "&": this.OP.BAND,
             "|": this.OP.BOR,
             "^": this.OP.BXOR,
@@ -2206,6 +2237,7 @@ export class Compiler {
             "*=": this.OP.MUL,
             "/=": this.OP.DIV,
             "%=": this.OP.MOD,
+            "**=": this.OP.EXP,
             "&=": this.OP.BAND,
             "|=": this.OP.BOR,
             "^=": this.OP.BXOR,

@@ -11,6 +11,24 @@ test("Variant #1: Arithmetic binary operators (+, -, *, /, %)", async () => {
   expect(await evalCode(code)).toEqual([5, 6, 12, 5, 1]);
 });
 
+test("Variant #1b: Exponentiation operator (**)", async () => {
+  const { code } = await obfuscate(`
+    var base = 2;
+    var exp = 3;
+    window.TEST_OUTPUT = [
+      2 ** 10,
+      base ** exp,
+      2 ** 3 ** 2,
+      4 ** 0.5,
+      2 ** -1,
+      (-2) ** 2
+    ];
+  `);
+
+  // 1024, 8, right-associative 2**(3**2)=512, sqrt(4)=2, 1/2=0.5, 4
+  expect(await evalCode(code)).toEqual([1024, 8, 512, 2, 0.5, 4]);
+});
+
 test("Variant #2: Bitwise binary operators (&, |, ^, <<, >>, >>>)", async () => {
   const { code } = await obfuscate(`
     window.TEST_OUTPUT = [5 & 3, 5 | 3, 5 ^ 3, 1 << 3, 16 >> 2, -1 >>> 28];
@@ -113,6 +131,41 @@ test("Variant #8: Logical || — short-circuits on truthy LHS", async () => {
 
   // true || ... keeps true, skips RHS; false || "fallback" evaluates to "fallback"
   expect(await evalCode(code)).toEqual([true, "fallback", 0]);
+});
+
+test("Variant #8b: Nullish coalescing (??) — falls through only on null/undefined", async () => {
+  const { code } = await obfuscate(`
+    var sideEffect = 0;
+    var r1 = null      ?? "fromNull";
+    var r2 = undefined ?? "fromUndef";
+    var r3 = 0         ?? (sideEffect = 1);
+    var r4 = ""        ?? (sideEffect = 1);
+    var r5 = false     ?? (sideEffect = 1);
+    window.TEST_OUTPUT = [r1, r2, r3, r4, r5, sideEffect];
+  `);
+
+  // null/undefined use RHS; 0, "", false are NOT nullish so the RHS side effect is skipped
+  expect(await evalCode(code)).toEqual([
+    "fromNull",
+    "fromUndef",
+    0,
+    "",
+    false,
+    0,
+  ]);
+});
+
+test("Variant #8c: Nullish coalescing for default values and chaining", async () => {
+  const { code } = await obfuscate(`
+    var config = { timeout: 0, name: "app" };
+    var timeout = config.timeout ?? 1000;
+    var retries = config.retries ?? 3;
+    var label   = config.label ?? config.name ?? "unknown";
+    window.TEST_OUTPUT = [timeout, retries, label];
+  `);
+
+  // timeout kept at 0 (not nullish); retries falls back to 3; label chains to config.name
+  expect(await evalCode(code)).toEqual([0, 3, "app"]);
 });
 
 // ── Unary ─────────────────────────────────────────────────────────
@@ -284,6 +337,18 @@ test("Variant #15: Arithmetic compound assignments (+=, -=, *=, /=, %=)", async 
 
   // 10 → 15 → 12 → 24 → 6 → 2
   expect(await evalCode(code)).toBe(2);
+});
+
+test("Variant #15b: Exponentiation compound assignment (**=)", async () => {
+  const { code } = await obfuscate(`
+    var x = 2;
+    x **= 3;
+    x **= 2;
+    window.TEST_OUTPUT = x;
+  `);
+
+  // 2 → 8 → 64
+  expect(await evalCode(code)).toBe(64);
 });
 
 test("Variant #16: Bitwise compound assignments (&=, |=, ^=, <<=, >>=)", async () => {

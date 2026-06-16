@@ -328,6 +328,13 @@ VM.prototype.run = function () {
           regs[base + dst] = a % regs[base + this._operand()];
           break;
         }
+        case OP.EXP: {
+          // Math.pow instead of `**`
+          var dst = this._operand();
+          var a = regs[base + this._operand()];
+          regs[base + dst] = Math.pow(a, regs[base + this._operand()]);
+          break;
+        }
         case OP.BAND: {
           var dst = this._operand();
           var a = regs[base + this._operand()];
