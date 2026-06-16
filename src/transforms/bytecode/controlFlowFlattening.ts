@@ -46,11 +46,7 @@
 // Same slot as Dispatcher: before resolveRegisters and resolveLabels.
 // Can run alongside Dispatcher (they are composable).
 
-import type {
-  Bytecode,
-  Instruction,
-  RegisterOperand,
-} from "../../types.ts";
+import type { Bytecode, Instruction, RegisterOperand } from "../../types.ts";
 import { Compiler } from "../../compiler.ts";
 import { getRandomInt } from "../../utils/random-utils.ts";
 import { U16_MAX } from "../../utils/op-utils.ts";
@@ -85,10 +81,7 @@ function isTerminator(op: number, compiler: Compiler): boolean {
   );
 }
 
-function splitBasicBlocks(
-  instrs: Bytecode,
-  compiler: Compiler,
-): BasicBlock[] {
+function splitBasicBlocks(instrs: Bytecode, compiler: Compiler): BasicBlock[] {
   const blocks: BasicBlock[] = [];
   const usedStates = new Set<number>();
 
@@ -105,7 +98,11 @@ function splitBasicBlocks(
   let currentBody: Bytecode = [];
 
   const flushBlock = (terminator: Instruction | null) => {
-    if (currentBody.length === 0 && terminator === null && currentLabel === null)
+    if (
+      currentBody.length === 0 &&
+      terminator === null &&
+      currentLabel === null
+    )
       return;
 
     const label = currentLabel ?? compiler._makeLabel("cff_block");
@@ -270,8 +267,8 @@ function buildDispatchTemplate(
     }
   `;
 
-  const tmpl = new Template(source);
-  const result = tmpl.compileInline({}, compiler, fnId, maxId);
+  const template = new Template(source);
+  const result = template.compileInline({}, compiler, fnId, maxId);
 
   // Pin ALL dispatch-loop registers so resolveRegisters assigns them to the
   // "local::" pool (no slot reuse).  The dispatch loop is re-entered on every
@@ -402,10 +399,7 @@ function processFunctionBlock(
   const fallthroughStateMap = new Map<number, number>();
   for (let i = 0; i < blocks.length; i++) {
     const next = blocks[i].originalNextIndex;
-    fallthroughStateMap.set(
-      i,
-      next >= 0 ? blocks[next].stateValue : endState,
-    );
+    fallthroughStateMap.set(i, next >= 0 ? blocks[next].stateValue : endState);
   }
 
   // ── 4. Shuffle block order ──────────────────────────────────────────────
@@ -487,13 +481,7 @@ function processFunctionBlock(
             cond,
             { type: "label", label: skipLabel },
           ]);
-          emitStateTransition(
-            out,
-            rState,
-            targetState,
-            loopTopLabel,
-            compiler,
-          );
+          emitStateTransition(out, rState, targetState, loopTopLabel, compiler);
           out.push([null, { type: "defineLabel", label: skipLabel }]);
           emitStateTransition(
             out,
@@ -527,13 +515,7 @@ function processFunctionBlock(
             cond,
             { type: "label", label: skipLabel },
           ]);
-          emitStateTransition(
-            out,
-            rState,
-            targetState,
-            loopTopLabel,
-            compiler,
-          );
+          emitStateTransition(out, rState, targetState, loopTopLabel, compiler);
           out.push([null, { type: "defineLabel", label: skipLabel }]);
           emitStateTransition(
             out,

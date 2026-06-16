@@ -12,7 +12,7 @@ export function concealConstants(
   for (const instr of bytecode) {
     const [op, ...operands] = instr;
 
-    const hasContant = operands.some(
+    const hasConstant = operands.some(
       (o) =>
         o !== undefined &&
         o !== null &&
@@ -20,7 +20,7 @@ export function concealConstants(
         (o as any).type === "constant",
     );
 
-    if (!hasContant) {
+    if (!hasConstant) {
       newBytecode.push(instr);
       continue;
     }

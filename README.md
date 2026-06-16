@@ -593,7 +593,7 @@ Please transpile your code down first using [Babel](https://github.com/babel/bab
 
 ### Best practices
 
-- **Don't rely on "function.length"**
+- Don't rely on "function.length"
 - Avoid undeclared variables
 - Don't rely on "function.name"
 - Don't use eval() to reference or modify local variables
@@ -632,7 +632,7 @@ main().catch(console.error);
 ### WIP
 
 - 202 tests, 91.18% coverage
-- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 82.43%
+- [Test262 (es5-tests)](https://github.com/tc39/test262/tree/es5-tests) percentage: 85.58%%
 
 ### Made with AI
 

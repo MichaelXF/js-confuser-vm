@@ -34,18 +34,13 @@ function decodeBytecode(s) {
 }
 
 // Closure map
-// Maps shell functions -> inner Closure so the VM can fast-path back to the
-// inner Closure instead of going through a sub-VM on internal calls.
-// A WeakMap (rather than an own symbol property) keeps the link off the
-// function object: escaped closures expose no own keys, and the map is
-// non-enumerable, so host/attacker code can't pivot from a leaked function
-// to VM internals. Module-scoped so it is shared across all VM/sub-VM instances.
+// Maps shell functions -> inner Closure so the VM can fast-path instead of going through a sub-VM on internal calls.
+// A WeakMap is used over a Symbol to prevent leaking information to debuggers
 var CLOSURE_MAP = new WeakMap();
 
-// Upvalue — Lua/CPython style.
+// Upvalue (Lua style)
 // While the outer frame is alive: reads/writes go to vm._regs[_absSlot].
 // After the outer frame returns (closed): reads/writes hit this._value.
-// _absSlot is the absolute index in VM._regs (frame._base + local slot).
 function Upvalue(regs, absSlot) {
   this._regs = regs; // shared reference to VM._regs flat array
   this._absSlot = absSlot; // absolute index; stable as long as frame is alive
@@ -71,7 +66,7 @@ function Closure(fn) {
   this.prototype = {}; // <- default prototype object for `new`
 }
 
-// Frame — analogous to Lua CallInfo / CPython PyFrameObject.
+// Frame (Lua CallInfo / CPython PyFrameObject)
 // Does NOT own a register array; registers live in VM._regs[_base .. _base+regCount).
 function Frame(closure, returnPc, parent, thisVal, retDstReg, base) {
   this.closure = closure;
@@ -93,8 +88,8 @@ function VM(bytecode, mainStartPc, mainRegCount, constants, globals) {
   this._frameStack = [];
   this._openUpvalues = [];
 
-  // ── Flat register file (Lua-style) ────────────────────────────────────────
-  // All frames share a single array.  Each Frame records its _base offset.
+  // Flat register array (Lua-style)
+  // Each Frame records its _base offset.
   // _regsTop is the next free slot (= base of the hypothetical next frame).
   // On CALL:   newBase = _regsTop; _regsTop += fn.regCount
   // On RETURN: _regsTop = frame._base   (pop the frame's register window)
@@ -135,8 +130,8 @@ VM.prototype.captureUpvalue = function (frame, slot) {
 };
 
 // Reads and decodes a constant from the pool.
-// idx  — pool index (first operand of the constant pair emitted by resolveConstants).
-// key  — conceal key (second operand). 0 means no concealment.
+// idx: pool index (first operand of the constant pair emitted by resolveConstants).
+// key: conceal key (second operand). 0 means no concealment.
 //
 // For integers:  stored value is (original ^ key); XOR again to recover.
 // For strings:   stored value is a base64 string containing u16 LE byte pairs.
@@ -195,11 +190,7 @@ VM.prototype.run = function () {
     var pc = frame._pc++;
     var op = this.bytecode[pc];
     var opcode = this.bytecode[pc];
-    // console.log(
-    //   "pc=" + pc,
-    //   "opcode=" + opcode,
-    //   Object.keys(OP).find((key) => OP[key] === opcode),
-    // );
+    // console.log(`[run] pc=${pc}, opcode=${opcode}, name=${Object.keys(OP).find((key) => OP[key] === opcode)}`);
 
     // Debugging protection: Detects debugger by checking for >1s pauses which can only happen from debugger; or extremely slow sync tasks
     if (TIMING_CHECKS) {
@@ -959,7 +950,7 @@ VM.prototype.run = function () {
         this._regs[hBase + h.exceptionReg] = err;
         handledFrame._pc = h.handlerPc;
       } else {
-        // finally region — run the finalizer with the exception pending, then
+        // finally region: run the finalizer with the exception pending, then
         // resume at its throw pad (which re-raises and continues unwinding).
         this._regs[hBase + h.contReg] = h.throwPad;
         this._regs[hBase + h.payloadReg] = err;

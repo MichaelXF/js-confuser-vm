@@ -5,13 +5,13 @@
 //
 // ── Usage ─────────────────────────────────────────────────────────────────────
 //
-//   const tmpl = new Template(`
+//   const template = new Template(`
 //     function {name}(x, y) {
 //       return x + y;
 //     }
 //   `);
 //
-//   const bc = tmpl.compile({ name: "myHelper" }, parentCompiler);
+//   const bc = template.compile({ name: "myHelper" }, parentCompiler);
 //   result.push(...bc);
 //
 // ── How it works ──────────────────────────────────────────────────────────────
@@ -225,7 +225,12 @@ export class Template {
     for (const instr of mainBc) {
       for (let j = 1; j < instr.length; j++) {
         const op = instr[j] as any;
-        if (op && typeof op === "object" && op.type === "register" && op.fnId === mainFnId) {
+        if (
+          op &&
+          typeof op === "object" &&
+          op.type === "register" &&
+          op.fnId === mainFnId
+        ) {
           const mapped = remapReg(op.id);
           op.id = mapped.id;
           op.fnId = mapped.fnId;

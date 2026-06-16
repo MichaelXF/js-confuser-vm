@@ -178,10 +178,10 @@ function processFunctionBlock(
   const fnSalt = getRandomInt(1, U16_MAX);
 
   // Compile a unique decode closure for this function.
-  const tmpl = new Template(
+  const template = new Template(
     `function decode(x, k) { return ((x ^ k) + ${fnSalt}) & ${U16_MAX}; }`,
   ).compile({}, compiler);
-  const decodeDesc = tmpl.functions[0];
+  const decodeDesc = template.functions[0];
 
   const dispatcherLabel = labelCounter();
   const rDisp = allocReg(fnId, maxId); // carries encoded PC to dispatcher
@@ -272,7 +272,7 @@ function processFunctionBlock(
     ...buildDispatcherBlock(compiler, rDisp, rKey, rClosure, dispatcherLabel),
   );
 
-  return { instrs: out, tail: tmpl.bytecode };
+  return { instrs: out, tail: template.bytecode };
 }
 
 // ── Pass entry point ──────────────────────────────────────────────────────────
