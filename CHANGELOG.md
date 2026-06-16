@@ -5,6 +5,10 @@
 
 ## `0.1.2` Updates
 
+- Improved `String Concealing`
+- - Strings are now joined into a singular string bank to hide string lengths
+- - Improved XOR algorithm
+
 - Added support for `try..finally`
 - Added ES6 features: arrow functions, spread operator, object methods, and computed property keys
 - Added source locations to `JSConfuserVM.disassemble(sourceCode)`'s output
