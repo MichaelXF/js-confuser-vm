@@ -429,25 +429,10 @@ VM.prototype.run = function () {
         }
         case OP.INSTANCEOF: {
           // regs[dst] = regs[obj] instanceof regs[ctor]
+          // Since VM closures are wrapped in native function shells (MAKE_CLOSURE), the native operator works
           var dst = this._operand();
           var obj = regs[base + this._operand()];
-          var ctor = regs[base + this._operand()];
-          if (typeof ctor === "function") {
-            regs[base + dst] = obj instanceof ctor;
-          } else {
-            // TODO: Why is this needed?
-            var proto = ctor.prototype;
-            var target = Object.getPrototypeOf(obj);
-            var result = false;
-            while (target !== null) {
-              if (target === proto) {
-                result = true;
-                break;
-              }
-              target = Object.getPrototypeOf(target);
-            }
-            regs[base + dst] = result;
-          }
+          regs[base + dst] = obj instanceof regs[base + this._operand()];
           break;
         }
 

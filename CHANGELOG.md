@@ -5,6 +5,9 @@
 
 ## `0.1.2` Updates
 
+- Improved `Control Flow Flattening`
+- - State transitions are now relative assignments to make it more difficult to follow
+
 - Improved `String Concealing`
 - - Strings are now joined into a singular string bank to hide string lengths
 - - Improved XOR algorithm
@@ -14,6 +17,7 @@
 - Added support for the exponentiation operator (`**`, `**=`) and nullish coalescing (`??`)
 - Added source locations to `JSConfuserVM.disassemble(sourceCode)`'s output
 - Improved the VM Runtime's closure tagging to a private WeakMap over an exposed `Symbol`
+- Fixed `instanceof` operator semantics for non-callable RHS
 
 ## `0.1.1` Control Flow Flattening, String Concealing, and more
 

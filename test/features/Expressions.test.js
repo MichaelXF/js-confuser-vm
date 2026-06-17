@@ -101,10 +101,48 @@ test("Variant #6: `instanceof` operator", async () => {
     }
     var a = new Animal("cat");
     var plain = {};
-    window.TEST_OUTPUT = [a instanceof Animal, plain instanceof Animal];
+    window.TEST_OUTPUT = [a instanceof Animal, plain instanceof Animal, a instanceof Object, plain instanceof Object];
   `);
 
-  expect(await evalCode(code)).toEqual([true, false]);
+  expect(await evalCode(code)).toEqual([true, false, true, true]);
+});
+
+test("Variant #6b: `instanceof` with non-callable right-hand side throws TypeError", async () => {
+  // Real JS throws "Right-hand side of 'instanceof' is not callable" when the
+  // RHS is neither callable nor has Symbol.hasInstance. The VM defers to the
+  // native operator, so it must surface the same TypeError (caught in-VM here).
+  const { code } = await obfuscate(`
+    var notCallable = {};
+    var result;
+    try {
+      var x = ({}) instanceof notCallable;
+      result = "no throw: " + x;
+    } catch (e) {
+      result = [e instanceof TypeError, e.constructor.name];
+    }
+    window.TEST_OUTPUT = result;
+  `);
+
+  expect(await evalCode(code)).toEqual([true, "TypeError"]);
+});
+
+test("Variant #6c: uncaught `instanceof` TypeError propagates to the host", async () => {
+  const { code } = await obfuscate(`
+    var notCallable = 123;
+    window.TEST_OUTPUT = ({}) instanceof notCallable;
+  `);
+
+  var caught;
+  try {
+    await evalCode(code);
+  } catch (err) {
+    caught = err;
+  }
+
+  expect(caught.constructor.name).toStrictEqual("TypeError");
+  expect(caught.toString()).toContain(
+    "Right-hand side of 'instanceof' is not an object",
+  );
 });
 
 // ── Logical ───────────────────────────────────────────────────────
