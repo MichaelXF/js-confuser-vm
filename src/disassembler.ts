@@ -157,9 +157,10 @@ function disassembleInstr(instr: ParsedInstr): string {
       return `${r(1)} = ${r(2)}`;
 
     case "STORE_GLOBAL": {
-      // annotation: globals[name] = reg[src]
-      const val = extractConstValue(annotation);
-      return `global[${val ?? raw[1]}] = ${r(2)}`;
+      // raw: [constIdx, concealKey, srcReg]; annotation: name = reg[src]
+      const nameMatch = annotation.match(/^(.+?)\s*=\s*reg\[/);
+      const name = nameMatch ? `"${nameMatch[1].trim()}"` : `const[${raw[1]}]`;
+      return `global[${name}] = ${r(3)}`;
     }
     case "STORE_UPVALUE":
       return `upvalue[${raw[1]}] = ${r(2)}`;

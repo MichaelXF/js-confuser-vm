@@ -1,4 +1,6 @@
+import JsConfuserVM from "../src";
 import { disassembleCommentBlock } from "../src/disassembler";
+import { obfuscate } from "./test-utils";
 
 // Bytecode comment block matching the compiler's debug output for: console.log("Hello world!")
 const HELLO_WORLD_BYTECODE = `
@@ -81,4 +83,40 @@ test("Variant #8: Multiple functions are each emitted as separate label sections
   expect(labelLines).toHaveLength(2);
   expect(labelLines[0]).toMatch(/fn_0_0/);
   expect(labelLines[1]).toMatch(/fn_2_2/);
+});
+
+// End-to-end: disassemble the real bytecode comments emitted by the compiler.
+// We pass an explicit empty options object so this stays deterministic even when
+// another test suite sets global.VM_OPTIONS to enable obfuscations.
+
+test("Variant #9: Disassembles the actual bytecode comments produced by obfuscate()", async () => {
+  const { code } = await obfuscate(
+    `
+    function add(x, y) {
+      return x + y;
+    }
+
+    TEST_OUTPUT = add(5, 10);
+  `,
+    {}
+  );
+
+  const output = await JsConfuserVM.disassemble(code);
+  var lines = output.split("\n");
+
+  // Two functions: the root frame and the inner `add` closure (with its params).
+  var labelLines = lines.filter((l) => /^\/\/ \w+[\w()*, ]*:/.test(l));
+  expect(labelLines).toHaveLength(2);
+  expect(labelLines[0]).toBe("// fn_0_0:");
+  expect(labelLines[1]).toBe("// fn_1_1(r0, r1):");
+
+  // Root frame: build the closure, load the two int args, call it, store the result.
+  expect(output).toContain("MakeClosure(fn_1_1, params=2, regs=5)");
+  expect(output).toContain("= 5");
+  expect(output).toContain("= 10");
+  expect(output).toMatch(/r\d+ = r\d+\(r\d+, r\d+\)/); // add(5, 10)
+  expect(output).toContain('global["TEST_OUTPUT"] = r5'); // TEST_OUTPUT = result reg
+
+  // Inner `add`: the body is a single `x + y` add of the two parameter registers.
+  expect(output).toContain("r0 + r1");
 });
