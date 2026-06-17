@@ -6,11 +6,11 @@
 ## `0.1.2` Updates
 
 - Improved `Control Flow Flattening`
-- - State transitions are now relative assignments to make it more difficult to follow
+- - State transitions are now relative assignments to make it harder for static tools to track
 
 - Improved `String Concealing`
 - - Strings are now joined into a singular string bank to hide string lengths
-- - Improved XOR algorithm
+- - Changed from base64 encoding to XOR algorithm
 
 - Added support for `try..finally`
 - Added ES6 features: arrow functions, spread operator, object methods, and computed property keys

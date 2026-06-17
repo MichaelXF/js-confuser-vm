@@ -211,57 +211,70 @@ if (true) {
 
 // Before
 // fn_0_0:
-  r0 = undefined
-  r1 = true
-  if (!r1) goto: if_else_1
-  r1 = "Hello World"
-  r0 = r1
+  r1 = this
+  r2 = undefined                                      // 1:0-1:12
+  r3 = true                                           // 2:4-2:8
+  if (!r3) goto: if_else_1                            // 2:0-4:1
+  r3 = "Hello World"                                  // 3:12-3:25
+  r2 = r3                                             // 3:2-3:25
 // if_else_1:
-  r1 = undefined
-  return r1
+  r3 = undefined
+  return r3
 
 // After
 // fn_0_0:
-  r1 = 969
-  r2 = r1
+  r3 = this
+  r4 = 14110
+  r5 = r4
+  r6 = 0
+  r7 = r6
 // while_top_5:
-  r3 = 4439
-  r4 = r2 !== r3
-  if (!r4) goto: while_exit_6
-  r5 = 969
-  r6 = r2 === r5
-  if (!r6) goto: if_else_7
+  r8 = 8201
+  r9 = r5 !== r8
+  if (!r9) goto: while_exit_6
+  r10 = 14110
+  r7 = r10
+  r11 = r5 === r7
+  if (!r11) goto: if_else_7
   goto: cff_block_2
 // if_else_7:
-  r7 = 1317
-  r8 = r2 === r7
-  if (!r8) goto: if_else_8
+  r12 = 6428
+  r13 = r7 + r12
+  r7 = r13
+  r14 = r5 === r7
+  if (!r14) goto: if_else_8
   goto: cff_block_3
 // if_else_8:
-  r9 = 58894
-  r10 = r2 === r9
-  if (!r10) goto: if_else_9
+  r15 = 40055
+  r16 = r7 + r15
+  r7 = r16
+  r17 = r5 === r7
+  if (!r17) goto: if_else_9
   goto: if_else_1
 // if_else_9:
   goto: while_top_5
 // while_exit_6:
-// cff_block_3:
-  r11 = "Hello World"
-  r0 = r11
-  r2 = 58894
-  goto: while_top_5
-// if_else_1:
-  r11 = undefined
-  return r11
 // cff_block_2:
-  r0 = undefined
-  r11 = true
-  if (r11) goto: cff_skip_10
-  r2 = 58894
+  r1 = this
+  r2 = undefined                                      // 1:0-1:12
+  r19 = true                                          // 2:4-2:8
+  if (r19) goto: cff_skip_10
+  r18 = 46483
+  r5 = r5 + r18
   goto: while_top_5
 // cff_skip_10:
-  r2 = 1317
+  r18 = 6428
+  r5 = r5 + r18
   goto: while_top_5
+// cff_block_3:
+  r19 = "Hello World"                                 // 3:12-3:25
+  r2 = r19                                            // 3:2-3:25
+  r18 = 40055
+  r5 = r5 + r18
+  goto: while_top_5
+// if_else_1:
+  r19 = undefined
+  return r19
 ```
 
 #### `dispatcher` (true/false)
@@ -325,32 +338,116 @@ console.log("Hello world!");
 
 // Before
 // fn_0_0:
-  r0 = console
-  r1 = "log"
-  r2 = r0[r1]
-  r1 = "Hello world!"
-  r3 = r2.call(r0, r1)
-  r0 = undefined
-  return r0                       
+  r1 = this
+  r2 = console                                        // 1:0-1:7
+  r3 = "log"                                          // 1:0-1:27
+  r4 = r2[r3]                                         // 1:0-1:27
+  r3 = "Hello world!"                                 // 1:12-1:26
+  r5 = r4.call(r2, r3)                                // 1:0-1:27
+  r2 = undefined
+  return r2
 
 // After
 // fn_0_0:
-  r0 = MakeClosure(fn_2_2, params=1, regs=3)
-  r1 = console
-  r2 = "bG9n"
-  r2 = r0(r2)
-  r3 = r1[r2]
-  r2 = "SGVsbG8gd29ybGQh"
-  r2 = r0(r2)
-  r4 = r3.call(r1, r2)
-  r1 = undefined
-  return r1
-// fn_2_2:
-  r1 = atob
-  r2 = r1(r0)
-  return r2
-  r1 = undefined
-  return r1
+  r5 = MakeClosure(fn_2_2, params=1, regs=12)
+  r6 = "mKNIF30WffjjBsylG/34gYmefN1/xPh7UBAQJ5lhW9Axbf6irGnhIDhJoyz7PSAZp4OL0StDBm98+RAFiFSwvPj5NbNkE+dd//DZB1kuXk5qw3i287bfPMJtzwWl3O13yKjBWjToZqoCw7SnH+9zMbm0FjK76/010vycgCswFeL55IW3NWzIrJgZz/SAfUuohmCo8TgTjg7+3gF/W40QcIRntolhFMb6FeMOjly3nJ5yIFyC24zSCeT/dfQwA3dfLySb+WmAcj/ytb8goSiw2u5s41NkX2m1mjVscIvlKrqYJQXuhnIwxvBDwj7S0rplK/6mamCW5GVdeHtS/oB/jiayKOikal19OIR7bYT4HI6BD3XHs4BKcaMkCafa1xCxCQvA4wLVE8LATUSS1w1ej0DltwM4Uep0/RhY/YCdxt5X1KpQ8ba37D4Ym5+isUpRF14iNX/8yX+mEGccPJDsu1R+ONC6CM7Zk6gmWAczweJlVy4vQZnjvMVIXGkldqBK2IVDDR88xw9VrCDaeLoKuDT4wEVOrKgjIbJB7BvmwArqQtflYayMCyWL/Q9GO+NVqORgx90mGLRUgEg2WxAtY6f8HLSTWILcC0a1o63oVOwgGQRjx3t255bOSNlwDprNdmJJ1qlLpU+orau4uJc="
+  r4 = r5(r6)
+  r7 = MakeClosure(fn_3_6, params=4, regs=14)
+  r1 = this
+  r11 = console                                       // 1:0-1:7
+  r8 = 2508801877
+  r9 = 106
+  r10 = 3
+  r2 = r7(r4, r8, r9, r10)
+  r12 = r11[r2]                                       // 1:0-1:27
+  r8 = 3419107516
+  r9 = 111
+  r10 = 12
+  r3 = r7(r4, r8, r9, r10)
+  r13 = r12.call(r11, r3)                             // 1:0-1:27
+  r11 = undefined
+  return r11
+// fn_2_2(r0):
+  r2 = this
+  r6 = atob
+  r7 = r6(r0)
+  r3 = r7
+  r6 = ""
+  r4 = r6
+  r6 = 0
+  r5 = r6
+// for_top_3:
+  r6 = "length"
+  r7 = r3[r6]
+  r6 = r5 < r7
+  if (!r6) goto: for_exit_4
+  r6 = String
+  r7 = "fromCharCode"
+  r8 = r6[r7]
+  r7 = "charCodeAt"
+  r9 = r3[r7]
+  r7 = r9.call(r3, r5)
+  r9 = "charCodeAt"
+  r10 = r3[r9]
+  r9 = 1
+  r11 = r5 + r9
+  r9 = r10.call(r3, r11)
+  r10 = 8
+  r11 = r9 << r10
+  r9 = r7 | r11
+  r7 = r8.call(r6, r9)
+  r6 = r4 + r7
+  r4 = r6
+// for_update_5:
+  r6 = 2
+  r7 = r5 + r6
+  r5 = r7
+  goto: for_top_3
+// for_exit_4:
+  return r4
+  r6 = undefined
+  return r6
+// fn_3_6(r0, r1, r2, r3):
+  r5 = this
+  r9 = ""
+  r6 = r9
+  r9 = 0
+  r7 = r9
+// for_top_7:
+  r9 = r7 < r3
+  if (!r9) goto: for_exit_8
+  r9 = 2654435769
+  r10 = r1 + r9
+  r9 = 0
+  r11 = r10 | r9
+  r1 = r11
+  r9 = 13
+  r10 = r1 >>> r9
+  r9 = r1 ^ r10
+  r10 = 65535
+  r11 = r9 & r10
+  r8 = r11
+  r9 = String
+  r10 = "fromCharCode"
+  r11 = r9[r10]
+  r10 = "charCodeAt"
+  r12 = r0[r10]
+  r10 = r2 + r7
+  r13 = r12.call(r0, r10)
+  r10 = r13 ^ r8
+  r12 = r11.call(r9, r10)
+  r9 = r6 + r12
+  r6 = r9
+// for_update_9:
+  r9 = r7
+  r9 = 1
+  r10 = r7 + r9
+  r7 = r10
+  goto: for_top_7
+// for_exit_8:
+  return r6
+  r9 = undefined
+  return r9
 ```
 
 

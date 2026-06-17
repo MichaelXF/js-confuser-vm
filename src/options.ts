@@ -7,7 +7,7 @@ export interface Options {
   selfModifying?: boolean; // do self-modifying bytecode for function bodies?
   dispatcher?: boolean; // create middleman blocks to process jumps?
   controlFlowFlattening?: boolean; // flatten the control flow of your program into a convoluted state machine?
-  stringConcealing?: boolean; // base64-encode strings to conceal plain-text values?
+  stringConcealing?: boolean; // encode strings to conceal plain-text values?
   macroOpcodes?: boolean; // create combined opcodes for repeated instruction sequences?
   specializedOpcodes?: boolean; // create specialized opcodes for commonly used opcode+operand pairs?
   aliasedOpcodes?: boolean; // create duplicate opcodes for commonly used opcodes?
