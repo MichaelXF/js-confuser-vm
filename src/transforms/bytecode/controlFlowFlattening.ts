@@ -13,32 +13,58 @@
 // 2. Each block is assigned a random u16 state value.  A sentinel endState
 //    (not used by any block) marks loop termination.
 //
-// 3. A dispatch loop is compiled from a Template:
+// 3. A dispatch loop is compiled from a Template.  Rather than comparing the
+//    state register against an absolute constant in each arm, a single
+//    accumulator `c` walks the (ascending-sorted) state values RELATIVELY:
+//    it is seeded with the smallest state at the top of every iteration and
+//    each subsequent arm adds the delta to the previous state, so the target
+//    state of an arm is `oldState + diff` rather than a readable literal.
 //
 //      var state = <startState>;
+//      var c = 0;
 //      while (state !== <endState>) {
-//        if (state === <s0>) _VM_JUMP_("<block0>");
-//        if (state === <s1>) _VM_JUMP_("<block1>");
+//        c = <s0>;            if (state === c) _VM_JUMP_("<block0>");
+//        c += <s1 - s0>;      if (state === c) _VM_JUMP_("<block1>");
+//        c -= <s1 - s2>;      if (state === c) _VM_JUMP_("<block2>");
 //        ...
 //      }
+//
+//    The running sum telescopes (c = s0 + Σ(si − si−1) = si exactly), so chain
+//    order is irrelevant to correctness and is shuffled unpredictably.  Deltas
+//    may be negative; since LOAD_INT operands are unsigned u16 a negative delta
+//    is emitted as a `-=` of its magnitude (always <= U16_MAX) rather than via
+//    masking.  Static solvers can no longer read which block a state routes to
+//    without replaying the running sum.
 //
 //    The Template's `state` register is extracted via compileInline() so that
 //    block bodies can write state transitions to it.
 //
 // 4. Block bodies are emitted with their original instructions.  Terminators
-//    are rewritten:
+//    are rewritten.  Each transition is RELATIVE: when a block runs, the state
+//    register still holds that block's own dispatch value, so the target is
+//    reached by ADDing the delta (target − current) rather than loading the
+//    absolute next-state as a constant.  A negative delta is a SUB of its
+//    magnitude (additive operators only — no constant, no masking):
 //
-//      JUMP target         → LOAD_INT state, targetBlock.stateValue
-//                             JUMP <loopTop>
+//      JUMP target         → LOAD_INT  delta, |targetState - blockState|
+//                             ADD/SUB   state, state, delta
+//                             JUMP      <loopTop>
 //
 //      JUMP_IF_FALSE c, t  → JUMP_IF_TRUE c, <skipLabel>
-//                             LOAD_INT state, targetBlock.stateValue
-//                             JUMP <loopTop>
+//                             ADD/SUB   state, state, <delta to targetState>
+//                             JUMP      <loopTop>
 //                             <skipLabel>:
-//                             LOAD_INT state, fallthroughBlock.stateValue
-//                             JUMP <loopTop>
+//                             ADD/SUB   state, state, <delta to fallthrough>
+//                             JUMP      <loopTop>
 //
 //      RETURN / THROW      → kept in-place (exits the VM frame directly)
+//
+//    Relative transitions assume the `state` register holds the running block's
+//    own value on entry — true for every dispatcher-routed entry.  Some opcodes
+//    (FOR_IN_NEXT, TRY_SETUP, FINALLY_SETUP, and JUMP_REG via LOAD_INT-of-label)
+//    jump DIRECTLY to a block label, bypassing the dispatcher, so for those
+//    "direct-entry" blocks `state` is seeded absolutely at entry before the
+//    relative math runs (see collectDirectEntryLabels).
 //
 // 5. Block order is shuffled randomly so spatial locality gives no hints.
 //
@@ -53,6 +79,7 @@ import { U16_MAX } from "../../utils/op-utils.ts";
 import { Template } from "../../template.ts";
 import {
   ref,
+  allocReg,
   buildMaxIdMap,
   forEachFunction,
   extractLabel,
@@ -79,6 +106,42 @@ function isTerminator(op: number, compiler: Compiler): boolean {
     op === OP.RETURN ||
     op === OP.THROW
   );
+}
+
+// ── Direct-entry block detection ─────────────────────────────────────────────
+// CFF rewrites the JUMP / JUMP_IF_* terminators into state transitions that all
+// route through the dispatch loop, so a block entered that way always has the
+// dispatcher's matched value in `state`.  But several opcodes embed a target
+// label and jump to it DIRECTLY, bypassing the dispatch loop entirely:
+//
+//   • FOR_IN_NEXT  exitTarget            (loop-done jump)
+//   • TRY_SETUP    handlerPc             (catch entry, taken by the VM unwinder)
+//   • FINALLY_SETUP finallyPc / throwPad (finalizer + re-raise pad)
+//   • LOAD_INT reg, <label>  →  JUMP_REG (finally continuation / break / continue
+//                                         resume pads materialized by _emitLoadLabel)
+//
+// A block reached through one of these does NOT have its own stateValue in the
+// `state` register, which breaks the RELATIVE transition (it assumes state ==
+// blockState on entry).  We collect every label referenced by a NON-terminator
+// instruction; the blocks owning those labels are seeded with an absolute
+// `state = blockState` at entry so the relative terminator math stays correct.
+function collectDirectEntryLabels(
+  instrs: Bytecode,
+  compiler: Compiler,
+): Set<string> {
+  const labels = new Set<string>();
+  for (const instr of instrs) {
+    const op = instr[0];
+    if (op === null) continue; // IR pseudo (defineLabel) — not a real jump
+    if (isTerminator(op, compiler)) continue; // rewritten → routed through dispatcher
+    for (let j = 1; j < instr.length; j++) {
+      const operand = instr[j] as any;
+      if (operand && typeof operand === "object" && operand.type === "label") {
+        labels.add(operand.label as string);
+      }
+    }
+  }
+  return labels;
 }
 
 function splitBasicBlocks(instrs: Bytecode, compiler: Compiler): BasicBlock[] {
@@ -252,18 +315,37 @@ function buildDispatchTemplate(
   loopExitLabel: string;
   innerBytecode: Bytecode;
 } {
-  // Build the if-chain cases
-  const cases = blocks
-    .map(
-      (block) =>
-        `if (state === ${block.stateValue}) _VM_JUMP_("${block.label}");`,
-    )
-    .join("\n    ");
+  // Build the if-chain using a RELATIVE comparison accumulator.
+  //
+  // The accumulator `c` is seeded with the first arm's state at the top of each
+  // iteration, then each subsequent arm adjusts it by the delta from the
+  // previous state (new = oldState + diff).  Because the running sum telescopes
+  // (c = s0 + Σ(si − si−1) = si exactly), the chain order is irrelevant to
+  // correctness, so we shuffle it into an unpredictable order.  Deltas can be
+  // negative; since LOAD_INT operands are unsigned u16 we emit a `-=` of the
+  // magnitude in that case rather than masking — every magnitude is <= U16_MAX.
+  const chainOrder = [...blocks];
+  for (let i = chainOrder.length - 1; i > 0; i--) {
+    const j = getRandomInt(0, i);
+    [chainOrder[i], chainOrder[j]] = [chainOrder[j], chainOrder[i]];
+  }
+
+  const cases: string[] = [];
+  let prevState = chainOrder[0].stateValue;
+  cases.push(`c = ${prevState};`);
+  cases.push(`if (state === c) _VM_JUMP_("${chainOrder[0].label}");`);
+  for (let i = 1; i < chainOrder.length; i++) {
+    const delta = chainOrder[i].stateValue - prevState;
+    cases.push(delta >= 0 ? `c += ${delta};` : `c -= ${-delta};`);
+    cases.push(`if (state === c) _VM_JUMP_("${chainOrder[i].label}");`);
+    prevState = chainOrder[i].stateValue;
+  }
 
   const source = `
     var state = ${startState};
+    var c = 0;
     while (state !== ${endState}) {
-      ${cases}
+      ${cases.join("\n      ")}
     }
   `;
 
@@ -321,15 +403,32 @@ function buildDispatchTemplate(
 
 // ── State transition helpers ─────────────────────────────────────────────────
 
+// Emit a RELATIVE state transition.  When a block runs, the state register
+// still holds that block's own dispatch value (`currentState`), so adjusting it
+// by the delta lands exactly on `targetState` — without ever loading the
+// absolute next-state as a constant, which is what static solvers read to lift
+// the CFG.  The delta is applied with additive operators only: a non-negative
+// delta is an ADD, a negative one a SUB of its magnitude (so the loaded operand
+// always stays within the unsigned u16 range LOAD_INT requires — no masking).
 function emitStateTransition(
   out: Bytecode,
   rState: RegisterOperand,
+  rDelta: RegisterOperand,
+  currentState: number,
   targetState: number,
   loopTopLabel: string,
   compiler: Compiler,
 ): void {
-  out.push([compiler.OP.LOAD_INT!, ref(rState), targetState]);
-  out.push([compiler.OP.JUMP!, { type: "label", label: loopTopLabel }]);
+  const OP = compiler.OP;
+  const delta = targetState - currentState;
+  out.push([OP.LOAD_INT!, ref(rDelta), Math.abs(delta)]);
+  out.push([
+    delta >= 0 ? OP.ADD! : OP.SUB!,
+    ref(rState),
+    ref(rState),
+    ref(rDelta),
+  ]);
+  out.push([OP.JUMP!, { type: "label", label: loopTopLabel }]);
 }
 
 // ── Per-function transformation ──────────────────────────────────────────────
@@ -348,6 +447,14 @@ function processFunctionBlock(
     return op === OP.JUMP || op === OP.JUMP_IF_FALSE || op === OP.JUMP_IF_TRUE;
   });
   if (!hasRoutableJump) return { instrs, tail: [] };
+
+  // Labels that can be entered by an embedded/indirect jump (FOR_IN_NEXT exit,
+  // catch/finally handlers, JUMP_REG continuation pads) — collected from the
+  // ORIGINAL stream before it is carved into blocks.  Blocks owning these labels
+  // need an absolute state seed (see emission below) because the RELATIVE
+  // transition assumes `state` already holds the block's value on entry, which
+  // only holds for dispatcher-routed entries.
+  const directEntryLabels = collectDirectEntryLabels(instrs, compiler);
 
   // ── 1. Split into basic blocks ──────────────────────────────────────────
   const blocks = splitBasicBlocks(instrs, compiler);
@@ -383,6 +490,12 @@ function processFunctionBlock(
     maxId,
   );
   const { rState, loopTopLabel, loopExitLabel } = dispatch;
+
+  // Scratch register holding the per-transition delta.  allocReg yields a
+  // "local::" register (the same pool pinned dispatch registers use), so it is
+  // never slot-reused across blocks.  It is rewritten before every use, so a
+  // single register is safely shared by all transitions.
+  const rDelta = allocReg(fnId, maxId);
 
   // ── 3. Pre-compute all state mappings BEFORE shuffle ─────────────────
   // These maps capture the correct stateValues while the blocks array is
@@ -431,6 +544,18 @@ function processFunctionBlock(
     // Block label
     out.push([null, { type: "defineLabel", label: block.label }]);
 
+    // If this block can be entered by a jump that bypasses the dispatch loop
+    // (FOR_IN_NEXT exit, catch/finally handlers, JUMP_REG continuation pads),
+    // the `state` register may not hold this block's value on entry.  Seed it
+    // absolutely so the relative terminator transition below lands correctly.
+    // (split keeps the original label on the first sub-block, which is exactly
+    // the jump target, so seeding it is sufficient.)  When the block is instead
+    // reached through the dispatcher, state already equals blockState and this
+    // write is a harmless no-op.
+    if (directEntryLabels.has(block.label)) {
+      out.push([OP.LOAD_INT!, ref(rState), block.stateValue]);
+    }
+
     // Block body
     out.push(...block.body);
 
@@ -442,6 +567,8 @@ function processFunctionBlock(
       emitStateTransition(
         out,
         rState,
+        rDelta,
+        block.stateValue,
         fallthroughStateMap.get(origIdx)!,
         loopTopLabel,
         compiler,
@@ -454,7 +581,15 @@ function processFunctionBlock(
       if (targetLabel !== null) {
         const targetState = labelToState.get(targetLabel);
         if (targetState !== undefined) {
-          emitStateTransition(out, rState, targetState, loopTopLabel, compiler);
+          emitStateTransition(
+            out,
+            rState,
+            rDelta,
+            block.stateValue,
+            targetState,
+            loopTopLabel,
+            compiler,
+          );
         } else {
           // Target outside this function's blocks — keep original
           out.push(term);
@@ -481,11 +616,21 @@ function processFunctionBlock(
             cond,
             { type: "label", label: skipLabel },
           ]);
-          emitStateTransition(out, rState, targetState, loopTopLabel, compiler);
+          emitStateTransition(
+            out,
+            rState,
+            rDelta,
+            block.stateValue,
+            targetState,
+            loopTopLabel,
+            compiler,
+          );
           out.push([null, { type: "defineLabel", label: skipLabel }]);
           emitStateTransition(
             out,
             rState,
+            rDelta,
+            block.stateValue,
             fallthroughStateMap.get(origIdx)!,
             loopTopLabel,
             compiler,
@@ -515,11 +660,21 @@ function processFunctionBlock(
             cond,
             { type: "label", label: skipLabel },
           ]);
-          emitStateTransition(out, rState, targetState, loopTopLabel, compiler);
+          emitStateTransition(
+            out,
+            rState,
+            rDelta,
+            block.stateValue,
+            targetState,
+            loopTopLabel,
+            compiler,
+          );
           out.push([null, { type: "defineLabel", label: skipLabel }]);
           emitStateTransition(
             out,
             rState,
+            rDelta,
+            block.stateValue,
             fallthroughStateMap.get(origIdx)!,
             loopTopLabel,
             compiler,
