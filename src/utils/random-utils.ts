@@ -9,6 +9,14 @@ export function choice<T>(elements: T[]): T {
   return elements[Math.floor(Math.random() * elements.length)];
 }
 
+/**
+ * Returns a true/false based on the percent chance (0%-100%)
+ * @param percentChance AS A PERCENTAGE 0 - 100%
+ */
+export function chance(percentChance: number): boolean {
+  return Math.random() < percentChance / 100;
+}
+
 export function getRandom(): number {
   return Math.random();
 }

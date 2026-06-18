@@ -68,13 +68,20 @@
 //
 // 5. Block order is shuffled randomly so spatial locality gives no hints.
 //
+// 6. Fake "dead" blocks are mixed into the dispatcher (see generateFakeBlocks).
+//
 // ── Pipeline position ─────────────────────────────────────────────────────────
 // Same slot as Dispatcher: before resolveRegisters and resolveLabels.
 // Can run alongside Dispatcher (they are composable).
 
 import type { Bytecode, Instruction, RegisterOperand } from "../../types.ts";
 import { Compiler } from "../../compiler.ts";
-import { getRandomInt } from "../../utils/random-utils.ts";
+import {
+  getRandomInt,
+  choice,
+  shuffle,
+  chance,
+} from "../../utils/random-utils.ts";
 import { U16_MAX } from "../../utils/op-utils.ts";
 import { Template } from "../../template.ts";
 import {
@@ -95,6 +102,12 @@ interface BasicBlock {
   // Index of the block that originally followed this one (for fallthroughs).
   // -1 means "no successor" (last block, or ends with RETURN/THROW).
   originalNextIndex: number;
+
+  // This block's position in the array before the emission-order shuffle.
+  originalIndex?: number;
+
+  // Marks a fake dead block
+  isFake?: boolean;
 }
 
 function isTerminator(op: number, compiler: Compiler): boolean {
@@ -108,7 +121,7 @@ function isTerminator(op: number, compiler: Compiler): boolean {
   );
 }
 
-// ── Direct-entry block detection ─────────────────────────────────────────────
+// Direct-entry block detection
 // CFF rewrites the JUMP / JUMP_IF_* terminators into state transitions that all
 // route through the dispatch loop, so a block entered that way always has the
 // dispatcher's matched value in `state`.  But several opcodes embed a target
@@ -299,8 +312,7 @@ function promoteMultiBlockRegisters(blocks: BasicBlock[]): void {
   }
 }
 
-// ── Generate the dispatch loop via Template ──────────────────────────────────
-
+// Generate the dispatch loop via Template
 function buildDispatchTemplate(
   blocks: BasicBlock[],
   endState: number,
@@ -431,8 +443,102 @@ function emitStateTransition(
   out.push([OP.JUMP!, { type: "label", label: loopTopLabel }]);
 }
 
-// ── Per-function transformation ──────────────────────────────────────────────
+// Fake (dead) block generation
+// Create 1-5 blocks whose state values are NEVER the target of any real
+// transition.
+function generateFakeBlocks(
+  usedStates: Set<number>,
+  endState: number,
+  compiler: Compiler,
+): BasicBlock[] {
+  const fakeCount = getRandomInt(1, 5);
 
+  // Reserve a fresh, never-reached state for each fake block.  Mutating
+  // usedStates keeps these distinct from the real states, endState, and each
+  // other.
+  const assignState = (): number => {
+    let s: number;
+    do {
+      s = getRandomInt(0, U16_MAX);
+    } while (usedStates.has(s) || s === endState);
+    usedStates.add(s);
+    return s;
+  };
+
+  const fakes: BasicBlock[] = [];
+  for (let i = 0; i < fakeCount; i++) {
+    fakes.push({
+      // Reuse the exact label hints real blocks use so a fake arm is lexically
+      // indistinguishable from a real one.
+      label: compiler._makeLabel(choice(["cff_block", "cff_split"])),
+      body: [],
+      terminator: null,
+      stateValue: assignState(),
+      originalNextIndex: -1,
+      isFake: true,
+    });
+  }
+
+  return fakes;
+}
+
+// Emit a fake (dead) block's bytecode
+function emitFakeBlock(
+  out: Bytecode,
+  block: BasicBlock,
+  rState: RegisterOperand,
+  rDelta: RegisterOperand,
+  targetStates: number[],
+  loopTopLabel: string,
+  compiler: Compiler,
+): void {
+  const OP = compiler.OP;
+
+  // 50% chance for single random jump.
+  if (chance(50)) {
+    emitStateTransition(
+      out,
+      rState,
+      rDelta,
+      block.stateValue,
+      choice(targetStates),
+      loopTopLabel,
+      compiler,
+    );
+    return;
+  }
+
+  // Two-way fork
+  const skipLabel = compiler._makeLabel("cff_skip");
+  out.push([OP.LOAD_INT!, ref(rDelta), getRandomInt(0, U16_MAX)]);
+  out.push([OP.LT!, ref(rDelta), ref(rState), ref(rDelta)]);
+  out.push([
+    OP.JUMP_IF_TRUE!,
+    ref(rDelta),
+    { type: "label", label: skipLabel },
+  ]);
+  emitStateTransition(
+    out,
+    rState,
+    rDelta,
+    block.stateValue,
+    choice(targetStates),
+    loopTopLabel,
+    compiler,
+  );
+  out.push([null, { type: "defineLabel", label: skipLabel }]);
+  emitStateTransition(
+    out,
+    rState,
+    rDelta,
+    block.stateValue,
+    choice(targetStates),
+    loopTopLabel,
+    compiler,
+  );
+}
+
+// Per-function transformation
 function processFunctionBlock(
   instrs: Bytecode,
   fnId: number,
@@ -456,11 +562,11 @@ function processFunctionBlock(
   // only holds for dispatcher-routed entries.
   const directEntryLabels = collectDirectEntryLabels(instrs, compiler);
 
-  // ── 1. Split into basic blocks ──────────────────────────────────────────
+  // 1. Split into basic blocks
   const blocks = splitBasicBlocks(instrs, compiler);
   if (blocks.length < 2) return { instrs, tail: [] };
 
-  // ── 1b. Promote cross-block registers to "local" pool ──────────────────
+  // 1b. Promote cross-block registers to "local" pool
   // resolveRegisters does a linear-scan liveness analysis that doesn't
   // understand the CFF dispatch loop (backward jumps).  A "temp" register
   // that's live across two blocks would appear to die within its first
@@ -480,7 +586,11 @@ function processFunctionBlock(
 
   const startState = blocks[0].stateValue;
 
-  // ── 2. Build dispatch loop from Template ────────────────────────────────
+  // 1c. Inject fake (dead) blocks
+  const fakeBlocks = generateFakeBlocks(usedStates, endState, compiler);
+  blocks.push(...fakeBlocks);
+
+  // 2. Build dispatch loop from Template
   const dispatch = buildDispatchTemplate(
     blocks,
     endState,
@@ -497,52 +607,60 @@ function processFunctionBlock(
   // single register is safely shared by all transitions.
   const rDelta = allocReg(fnId, maxId);
 
-  // ── 3. Pre-compute all state mappings BEFORE shuffle ─────────────────
+  // 3. Pre-compute all state mappings BEFORE shuffle
   // These maps capture the correct stateValues while the blocks array is
   // still in its original split order.  After the shuffle, indexing into
   // blocks[] by original index would give the wrong block.
 
-  // label → stateValue (for jump target resolution)
+  // label -> stateValue (for jump target resolution)
   const labelToState = new Map<string, number>();
   for (const block of blocks) {
     labelToState.set(block.label, block.stateValue);
   }
 
-  // originalIndex → fallthrough stateValue
+  // originalIndex -> fallthrough stateValue.  Also stamp each block with its
+  // pre-shuffle position so emission can recover this mapping after the order is
+  // randomized below.
   const fallthroughStateMap = new Map<number, number>();
   for (let i = 0; i < blocks.length; i++) {
+    blocks[i].originalIndex = i;
     const next = blocks[i].originalNextIndex;
     fallthroughStateMap.set(i, next >= 0 ? blocks[next].stateValue : endState);
   }
 
-  // ── 4. Shuffle block order ──────────────────────────────────────────────
-  // Track which original index each shuffled position came from, so we can
-  // look up fallthroughStateMap correctly during emission.
-  const originalIndices = blocks.map((_, i) => i);
+  // 4. Shuffle block order
+  shuffle(blocks);
 
-  // Fisher-Yates shuffle
-  for (let i = blocks.length - 1; i > 0; i--) {
-    const j = getRandomInt(0, i);
-    [blocks[i], blocks[j]] = [blocks[j], blocks[i]];
-    [originalIndices[i], originalIndices[j]] = [
-      originalIndices[j],
-      originalIndices[i],
-    ];
-  }
-
-  // ── 5. Emit: dispatch loop + block bodies ───────────────────────────────
+  // 5. Emit: dispatch loop + block bodies
   const out: Bytecode = [];
 
   // Dispatch loop (var state = ...; while(...) { if-chain })
   out.push(...dispatch.bytecode);
 
-  // Each block: defineLabel → body → state transition → JUMP loopTop
+  // Universe of states a fake block may bogusly "jump" to (real + fake).
+  const fakeTargetStates = blocks.map((b) => b.stateValue);
+
+  // Each block: defineLabel -> body -> state transition -> JUMP loopTop
   for (let i = 0; i < blocks.length; i++) {
     const block = blocks[i];
-    const origIdx = originalIndices[i];
+    const origIdx = block.originalIndex!;
 
     // Block label
     out.push([null, { type: "defineLabel", label: block.label }]);
+
+    // Fake (dead) block
+    if (block.isFake) {
+      emitFakeBlock(
+        out,
+        block,
+        rState,
+        rDelta,
+        fakeTargetStates,
+        loopTopLabel,
+        compiler,
+      );
+      continue;
+    }
 
     // If this block can be entered by a jump that bypasses the dispatch loop
     // (FOR_IN_NEXT exit, catch/finally handlers, JUMP_REG continuation pads),
@@ -691,7 +809,7 @@ function processFunctionBlock(
   return { instrs: out, tail: dispatch.innerBytecode };
 }
 
-// ── Pass entry point ──────────────────────────────────────────────────────────
+//Pass entry point
 export function controlFlowFlattening(
   bc: Bytecode,
   compiler: Compiler,

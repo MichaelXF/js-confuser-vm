@@ -40,7 +40,7 @@ JsConfuserVM.obfuscate(`
   selfModifying: true, // do self-modifying bytecode for function bodies?
   dispatcher: true, // create middleman blocks to process jumps?
   controlFlowFlattening: true, // flatten the control flow of your program into a convoluted state machine?
-  stringConcealing: true, // base64-encode strings to conceal plain-text values?
+  stringConcealing: true, // encode strings to conceal plain-text values?
   macroOpcodes: true, // create combined opcodes for repeated instruction sequences?
   specializedOpcodes: true, // create specialized opcodes for commonly used opcode+operand pairs?
   aliasedOpcodes: true, // create duplicate opcodes for commonly used opcodes?
