@@ -133,10 +133,11 @@ VM.prototype.captureUpvalue = function (frame, slot) {
 // idx: pool index (first operand of the constant pair emitted by resolveConstants).
 // key: conceal key (second operand). 0 means no concealment.
 //
-// For integers:  stored value is (original ^ key); XOR again to recover.
+// For integers:  stored value is (original ^ key) with the full u32 key; XOR
+//                again to recover (JS `^` is int32, so this is symmetric).
 // For strings:   stored value is a base64 string containing u16 LE byte pairs.
-//                Mirrors decodeBytecode: base64 → bytes → u16 LE → XOR with
-//                (key + i) & 0xFFFF to recover the original char codes.
+//                Mirrors decodeBytecode: base64 → bytes → u16 LE → XOR with a
+//                position-based Weyl keystream seeded by the full u32 key.
 // idxIn, keyIn are passed in from specializedOpcodes when the operands are determined at compile time.
 VM.prototype._constant = function (idxIn, keyIn) {
   var idx = idxIn ?? this._operand();
@@ -145,12 +146,16 @@ VM.prototype._constant = function (idxIn, keyIn) {
   var v = this.constants[idx];
   if (!key) return v;
   if (typeof v === "number") return v ^ key;
-  // String: base64-decode to u16 LE byte pairs, then XOR each code with (key+i).
+  // String: base64-decode to u16 LE byte pairs, then XOR each code with a
+  // 16-bit keystream word derived from the full 32-bit key + position.
   var b = base64ToBytes(v);
   var out = "";
+  var k = key;
   for (var i = 0; i < b.length / 2; i++) {
+    k = (k + 0x9e3779b9) | 0; // 32-bit Weyl step (position-based)
+    var ks = (k ^ (k >>> 13)) & 0xffff; // 16-bit keystream word
     var code = b[i * 2] | (b[i * 2 + 1] << 8); // u16 LE
-    out += String.fromCharCode(code ^ ((key + i) & 0xffff));
+    out += String.fromCharCode(code ^ ks);
   }
   return out;
 };

@@ -1,18 +1,28 @@
 import type * as b from "../../types.ts";
 import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
 import { getRandomInt } from "../../utils/random-utils.ts";
-import { U16_MAX } from "../../utils/op-utils.ts";
+import { U32_MAX } from "../../utils/op-utils.ts";
 
-// Encrypt a string with a position-dependent XOR key (u16) then base64-encode.
+// Encrypt a string with a position-dependent, full-width u32 XOR key, then base64.
 //
-// Each char code is XOR'd with ((key + i) & 0xFFFF), producing a u16 value.
-// The u16 values are packed as little-endian byte pairs (matching decodeBytecode),
-// then base64-encoded so the stored constant is always safe ASCII — no raw Unicode
+// The key is a full 32-bit seed (2^32 keyspace). A Weyl-sequence keystream
+// (golden-ratio increment + xorshift fold) derives a fresh 16-bit keyword per
+// character, so EVERY bit of the key affects the output and the keystream
+// advances with position i — masking the key to 16 bits (the old `(key+i)&0xFFFF`
+// scheme) would have thrown away the upper half and left only a 2^16 keyspace
+// to brute-force. The 16-bit keyword XORs cleanly with each u16 char code; the
+// results are packed as little-endian byte pairs (matching decodeBytecode) and
+// base64-encoded so the stored constant is always safe ASCII — no raw Unicode
 // surrogates, control chars, or quote chars that would break JS string literals.
+//
+// Mirrored exactly by runtime `_constant` and compiler `_decryptConst`.
 function concealString(s: string, key: number): string {
   const bytes = new Uint8Array(s.length * 2);
+  let k = key;
   for (let i = 0; i < s.length; i++) {
-    const code = s.charCodeAt(i) ^ ((key + i) & 0xffff);
+    k = (k + 0x9e3779b9) | 0; // 32-bit Weyl step (position-based)
+    const ks = (k ^ (k >>> 13)) & 0xffff; // 16-bit keystream word from full 32-bit state
+    const code = s.charCodeAt(i) ^ ks;
     bytes[i * 2] = code & 0xff;
     bytes[i * 2 + 1] = (code >> 8) & 0xff;
   }
@@ -29,7 +39,10 @@ function concealString(s: string, key: number): string {
 // The constants array stores the CONCEALED value when key != 0.
 // The runtime's _readConstant(idx, key) reverses the concealment on the fly.
 //
-// Both slots are u16; all existing operand serialization handles them identically.
+// The index slot is a small u16-range pool index; the key slot is a full u32.
+// Both ride the bytecode stream as plain operands, which is now u32-wide
+// (serialized as 4 little-endian bytes, decoded via Uint32Array), so the
+// existing operand serialization handles them identically.
 export function resolveConstants(
   bc: b.Bytecode,
   compiler: Compiler,
@@ -52,16 +65,18 @@ export function resolveConstants(
       constantsMap.set(value, idx);
 
       if (compiler.options.concealConstants && typeof value === "string") {
-        // Strings: position-dependent XOR. Key must be >= 1.
-        key = getRandomInt(1, U16_MAX);
+        // Strings: position-dependent full-width XOR (2^32 keyspace). Key >= 1.
+        key = getRandomInt(1, U32_MAX);
         constants.push(concealString(value, key));
       } else if (
         compiler.options.concealConstants &&
         typeof value === "number" &&
         Number.isInteger(value)
       ) {
-        // Integers: simple XOR. Result is still a valid JS integer.
-        key = getRandomInt(1, U16_MAX);
+        // Integers: XOR with a full u32 key. JS `^` operates on int32, so the
+        // stored value (often negative) and the runtime XOR-back are symmetric
+        // for any int32-range integer, and all 32 key bits resist enumeration.
+        key = getRandomInt(1, U32_MAX);
         constants.push(value ^ key);
       } else {
         // Not concealable (null, undefined, boolean, float, RegExp…) or option off.
@@ -85,7 +100,7 @@ export function resolveConstants(
       resolvedValue: key,
     };
 
-    // key is a plain u16 number — no wrapping needed.
+    // key is a plain u32 number — no wrapping needed.
     return [idxOperand, keyOperand];
   }
 

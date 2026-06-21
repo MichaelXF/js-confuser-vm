@@ -2868,12 +2868,16 @@ class Serializer {
     if (!key) return v;
     if (typeof v === "number") return v ^ key;
     if (typeof v !== "string") return v;
-    // String: base64 → u16 LE byte pairs → XOR with (key + i) (mirrors _readConstant)
+    // String: base64 → u16 LE byte pairs → XOR with a position-based Weyl
+    // keystream seeded by the full u32 key (mirrors runtime _constant).
     const bytes = Buffer.from(v as string, "base64");
     let out = "";
+    let k = key;
     for (let i = 0; i < bytes.length / 2; i++) {
+      k = (k + 0x9e3779b9) | 0; // 32-bit Weyl step (position-based)
+      const ks = (k ^ (k >>> 13)) & 0xffff; // 16-bit keystream word
       const code = bytes[i * 2] | (bytes[i * 2 + 1] << 8);
-      out += String.fromCharCode(code ^ ((key + i) & 0xffff));
+      out += String.fromCharCode(code ^ ks);
     }
     return out;
   }
@@ -3257,11 +3261,7 @@ export async function compileAndSerialize(
     compiler,
   );
 
-  // for (const key of Object.keys(timings)) {
-  //  console.log(`  ${key}: ${timings[key]}ms`);
-  // }
-
-  // This part was purposefully pulled out Serializer as OP_NAME's get resolved during buildRuntime
+  // This part was purposefully pulled out Serializer as OP_NAME's are resolved during buildRuntime
   // So for the most useful comments, it's ran absolutely last
   // Tests also rely on correct comments so it's required
   const generateBytecodeComment = () => {

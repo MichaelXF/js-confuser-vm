@@ -3,6 +3,14 @@
 - - Planned: Shuffle the order of constructor and method parameters
 - - Planned: Alias variables, and other function related obfuscations
 
+## `0.1.3` Updates
+
+- Improved `Control Flow Flattening`
+- - Now includes dead code with fake jumps to mess with deobfuscators ("irreducible control flow")
+
+- Improved `Conceal Constants`
+- - Now uses position-based XOR decryption with larger key range (u16->u32)
+
 ## `0.1.2` Updates
 
 - Improved `Control Flow Flattening`
