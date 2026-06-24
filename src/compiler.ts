@@ -16,6 +16,7 @@ import { selfModifying } from "./transforms/bytecode/selfModifying.ts";
 import { macroOpcodes } from "./transforms/bytecode/macroOpcodes.ts";
 import { specializedOpcodes } from "./transforms/bytecode/specializedOpcodes.ts";
 import { aliasedOpcodes } from "./transforms/bytecode/aliasedOpcodes.ts";
+import { antiInstrumentation } from "./transforms/bytecode/antiInstrumentation.ts";
 import { getRandomInt } from "./utils/random-utils.ts";
 import { U16_MAX, U32_MAX } from "./utils/op-utils.ts";
 import { concealConstants } from "./transforms/bytecode/concealConstants.ts";
@@ -338,6 +339,10 @@ export class Compiler {
     }
   >;
   ALIASED_OPS: Record<number, { originalOp: number; order: number[] }>;
+  ANTI_OPS: Record<
+    number,
+    { steps: { op: number; arity: number }[]; order: number[] }
+  >;
   MICRO_OPS: Record<
     number,
     { originalOp: number; stmtIndex: number; irOperandCount: number }
@@ -386,6 +391,7 @@ export class Compiler {
     this.MICRO_OPS = {};
     this.SPECIALIZED_OPS = {};
     this.ALIASED_OPS = {};
+    this.ANTI_OPS = {};
 
     this.OP = { ...OP_ORIGINAL };
 
@@ -2953,10 +2959,17 @@ class Serializer {
           break;
         }
 
+        case this.OP.LOAD_THIS: {
+          // resolvedOperands: [dst]
+          comment += `  reg[${dst}] = this`;
+          break;
+        }
+
         case this.OP.LOAD_GLOBAL:
           // resolvedOperands: [dst, constIdx, concealKey]
           comment += `  reg[${dst}] = ${this._decryptConst(constants, displayOperands[1], displayOperands[2])}`;
           break;
+
         case this.OP.STORE_GLOBAL:
           // resolvedOperands: [constIdx, concealKey, srcReg]
           comment += `  ${this._decryptConst(constants, displayOperands[0], displayOperands[1])} = reg[${displayOperands[2]}]`;
@@ -3106,7 +3119,15 @@ class Serializer {
     sections.push(`var MAIN_START_PC = ${mainStartPc};`);
     sections.push(`var MAIN_REG_COUNT = ${mainRegCount};`);
     sections.push(`var ENCODE_BYTECODE = ${!!this.options.encodeBytecode};`);
-    sections.push(`var TIMING_CHECKS = ${!!this.options.timingChecks};`);
+    sections.push(
+      `var TIMING_CHECKS = ${
+        typeof this.options.timingChecks === "number"
+          ? this.options.timingChecks
+          : this.options.timingChecks === true
+            ? 1000
+            : false
+      };`,
+    );
 
     const object = t.objectExpression(
       Object.entries(this.OP).map(([name, value]) =>
@@ -3174,6 +3195,17 @@ export async function compileAndSerialize(
     pass: concealConstants,
     name: "concealConstants",
   });
+
+  // antiInstrumentation runs AFTER concealConstants (it emits its own constant
+  // idx+key pairs, so it must not be re-expanded) and BEFORE the
+  // specialized/macro/aliased group (which all leave the synthetic anti-ops
+  // untouched — see the pass header for why).
+  if (options.antiInstrumentation) {
+    passes.push({
+      pass: antiInstrumentation,
+      name: "antiInstrumentation",
+    });
+  }
 
   if (options.specializedOpcodes) {
     passes.push({

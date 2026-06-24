@@ -323,7 +323,7 @@ function disassembleInstr(instr: ParsedInstr): string {
       const finallyLabel = labels[0] ?? `pc_${raw[1]}`;
       const throwLabel = labels[1] ?? `pc_${raw[4]}`;
       return `FinallySetup(${finallyLabel}, cont=${r(2)}, payload=${r(
-        3
+        3,
       )}, onThrow=${throwLabel})`;
     }
 

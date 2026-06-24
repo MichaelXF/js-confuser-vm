@@ -4,7 +4,7 @@ const OPTIONS_MATRIX = [
   { displayName: "shuffleOpcodes", VM_OPTIONS: { shuffleOpcodes: true } },
   { displayName: "encodeBytecode", VM_OPTIONS: { encodeBytecode: true } },
   { displayName: "selfModifying", VM_OPTIONS: { selfModifying: true } },
-  { displayName: "timingChecks", VM_OPTIONS: { timingChecks: true } },
+  { displayName: "timingChecks", VM_OPTIONS: { timingChecks: 10_000 } },
   { displayName: "macroOpcodes", VM_OPTIONS: { macroOpcodes: true } },
   {
     displayName: "specializedOpcodes",
@@ -35,16 +35,21 @@ const OPTIONS_MATRIX = [
     VM_OPTIONS: { classObfuscation: true },
   },
   {
+    displayName: "antiInstrumentation",
+    VM_OPTIONS: { antiInstrumentation: true },
+  },
+  {
     displayName: "all",
     VM_OPTIONS: {
       randomizeOpcodes: true,
       shuffleOpcodes: true,
       encodeBytecode: true,
       selfModifying: true,
-      timingChecks: true,
+      timingChecks: 10_000,
       macroOpcodes: true,
       specializedOpcodes: true,
       aliasedOpcodes: true,
+      antiInstrumentation: true,
       concealConstants: true,
       dispatcher: true,
       stringConcealing: true,

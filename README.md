@@ -44,6 +44,7 @@ JsConfuserVM.obfuscate(`
   macroOpcodes: true, // create combined opcodes for repeated instruction sequences?
   specializedOpcodes: true, // create specialized opcodes for commonly used opcode+operand pairs?
   aliasedOpcodes: true, // create duplicate opcodes for commonly used opcodes?
+  antiInstrumentation: true, // add fake opcode effects to hinder opcode instrumentation?
   timingChecks: true, // add timing checks to detect debuggers?
   concealConstants: true, // conceal strings and integers in the constant pool?
   classObfuscation: true, // obfuscate the VM runtime classes?
@@ -596,6 +597,38 @@ case 52040:
     break;
 ```
 
+#### `antiInstrumentation` (true/false)
+
+Adds fake opcode effects to hinder opcode analysis and instrumentation.
+
+```js
+// Input Code
+console.log(10 + 15 * 2);
+
+// After  (reg[2..4] are the function's fake-register pool)
+// [0, 2, 0, 0],        LOAD_CONST  reg[2] = 57846          // fake seed (int)
+// [0, 3, 1, 0],        LOAD_CONST  reg[3] = "rE1o5cIo"     // fake seed (string)
+// [0, 4, 2, 0],        LOAD_CONST  reg[4] = 43829          // fake seed (int)
+// ...
+// [0, 8, 6, 0],        LOAD_CONST  reg[8] = 15                           1:26-1:28
+// [0, 9, 7, 0],        LOAD_CONST  reg[9] = 2                            1:31-1:32
+// [61, 10, 8, 9, 4, 4, 2, 4, 4, 3], ANTI_MUL_0_1_2_7_8_5_3_6_4  [10, 8, 9, 4, 4, 2, 4, 4, 3]  1:26-1:32
+// [62, 4, 3, 2, 7, 4, 2, 4, 4, 4, 8, 10, 3], ANTI_ADD_9_3_4_1_8_5_6_7_11_0_2_10  [...]        1:21-1:32
+
+// What the opcode "ANTI_MUL_0_1_2_7_8_5_3_6_4" looks like
+case 61:
+    // ANTI_MUL_0_1_2_7_8_5_3_6_4 (order: [0,1,2,7,8,5,3,6,4])
+    let _unsortedOperands = [this._operand(), /* ...9 reads... */ this._operand()];
+    let _operands = [/* canonical order restored via inverse permutation */];
+    { var dst = _operands[0]; var a = regs[base + _operands[1]];
+      regs[base + dst] = a * regs[base + _operands[2]]; }      // real
+    { var dst = _operands[3]; var a = regs[base + _operands[4]];
+      regs[base + dst] = a * regs[base + _operands[5]]; }      // fake
+    { var dst = _operands[6]; var a = regs[base + _operands[7]];
+      regs[base + dst] = a + regs[base + _operands[8]]; }      // fake
+    break;
+```
+
 #### `selfModifying` (true/false)
 
 Function bodies are replaced upon runtime entry to the real bytecode.
@@ -646,9 +679,11 @@ console.log("Hello, world!");
 +// [0, 1, 3],           LOAD_CONST  reg[1] = undefined                    
 ```
 
-#### `timingChecks` (true/false)
+#### `timingChecks` (number/true/false)
 
-Detects the use of debuggers by checking for >1second pauses. May break code with slow sync tasks.
+Detects the use of debuggers by checking for >1second pauses. 
+- May break code with slow sync tasks.
+- Provide a number of milliseconds to change the duration.
 
 #### `classObfuscation` (true/false)
 

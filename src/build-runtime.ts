@@ -8,6 +8,7 @@ import { applyMinify } from "./transforms/runtime/minify.ts";
 import { Compiler } from "./compiler.ts";
 import { applySpecializedOpcodes } from "./transforms/runtime/specializedOpcodes.ts";
 import { applyAliasedOpcodes } from "./transforms/runtime/aliasedOpcodes.ts";
+import { applyAntiInstrumentation } from "./transforms/runtime/antiInstrumentation.ts";
 import { applyClassObfuscation } from "./transforms/runtime/classObfuscation.ts";
 import type * as b from "./types.ts";
 import { getSwitchStatement } from "./utils/ast-utils.ts";
@@ -68,6 +69,11 @@ export async function buildRuntime(
   // Aliased opcode cases must be applied BEFORE shuffleOpcodes
   if (options.aliasedOpcodes) {
     runAndTime(applyAliasedOpcodes, "applyAliasedOpcodes");
+  }
+
+  // Anti-instrumentation cases must be applied BEFORE shuffleOpcodes
+  if (options.antiInstrumentation) {
+    runAndTime(applyAntiInstrumentation, "applyAntiInstrumentation");
   }
 
   // Shuffle opcode handle order

@@ -200,7 +200,7 @@ VM.prototype.run = function () {
     // Debugging protection: Detects debugger by checking for >1s pauses which can only happen from debugger; or extremely slow sync tasks
     if (TIMING_CHECKS) {
       var currentTime = now();
-      var isTamper = currentTime - lastTime > 1000;
+      var isTamper = currentTime - lastTime > TIMING_CHECKS;
       lastTime = currentTime;
       if (isTamper) {
         // Poison the bytecode

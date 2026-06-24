@@ -3,7 +3,14 @@
 - - Planned: Shuffle the order of constructor and method parameters
 - - Planned: Alias variables, and other function related obfuscations
 
-## `0.1.3` Updates
+## `0.1.3` Anti Opcode Instrumentation
+
+- Added new option `antiInstrumentation`
+- - Adds fake opcode effects to hinder opcode analysis and instrumentation.
+- - TODO: Shuffle order of opcode effects (first opcode is always real opcode)
+
+- Improved `Timing Checks`
+- - The option `timingChecks` now accepts a number of milliseconds to change the pause duration to detect debuggers
 
 - Improved `Control Flow Flattening`
 - - Now includes dead code with fake jumps to mess with deobfuscators ("irreducible control flow")
