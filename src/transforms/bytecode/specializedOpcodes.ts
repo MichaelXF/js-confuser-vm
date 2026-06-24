@@ -1,5 +1,5 @@
 import type { Bytecode, InstrOperand, Instruction } from "../../types.ts";
-import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
+import { Compiler, OP_ORIGINAL, SOURCE_NODE_SYM } from "../../compiler.ts";
 import { getInstructionSize, nextFreeSlot } from "../../utils/op-utils.ts";
 
 export const nSizedOps = [
@@ -40,6 +40,10 @@ export function specializedOpcodes(
   for (const instr of bc) {
     const op = instr[0];
     if (op === null || disallowedOps.has(op)) continue;
+
+    // Only change original opcodes
+    const opName = compiler.OP_NAME[op];
+    if (OP_ORIGINAL[opName] === undefined) continue;
 
     // Only supports between 1-6 operands
     const operandCount = getInstructionSize(instr) - 1;

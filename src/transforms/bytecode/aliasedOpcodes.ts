@@ -58,8 +58,9 @@ export function aliasedOpcodes(
     const arity = instr.length - 1;
     if (arity < 1) continue; // 0-operand opcodes have nothing to permute
 
+    // Only change original opcodes
     const opName = compiler.OP_NAME[op];
-    if (!OP_ORIGINAL[opName]) continue; // only consider original ops, not already-specialized ones
+    if (OP_ORIGINAL[opName] === undefined) continue;
 
     const existing = opStats.get(op);
     if (!existing) {
