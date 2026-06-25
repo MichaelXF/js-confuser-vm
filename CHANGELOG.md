@@ -1,19 +1,18 @@
-# Planned:
-
-- - Planned: Shuffle the order of constructor and method parameters
-- - Planned: Alias variables, and other function related obfuscations
-
 ## `0.1.3` Anti Opcode Instrumentation
 
 - Added new option `antiInstrumentation`
-- - Adds fake opcode effects to hinder opcode analysis and instrumentation.
-- - TODO: Shuffle order of opcode effects (first opcode is always real opcode)
-
-- Improved `Timing Checks`
-- - The option `timingChecks` now accepts a number of milliseconds to change the pause duration to detect debuggers
+- - Adds fake opcode effects to hinder opcode analysis and instrumentation
 
 - Improved `Control Flow Flattening`
 - - Now includes dead code with fake jumps to mess with deobfuscators ("irreducible control flow")
+
+- Improved `Class Obfuscation`
+- - Now renames the class properties and methods
+- - Shuffles order of arguments for constructors and methods
+- - Adds fake arguments and fake fields to classes
+
+- Improved `Timing Checks`
+- - The option `timingChecks` now accepts a number of milliseconds to change the pause duration to detect debuggers
 
 - Improved `Conceal Constants`
 - - Now uses position-based XOR decryption with larger key range (u16->u32)
