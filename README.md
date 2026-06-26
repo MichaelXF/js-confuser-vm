@@ -689,6 +689,10 @@ Detects the use of debuggers by checking for >1second pauses.
 
 Obfuscates the VM runtime classes by shuffling the order of declarations and methods.
 
+#### `handlerTable` (true/false)
+
+Converts the switch-case dispatch into a handler table for performance reasons.
+
 #### `minify` (true/false)
 
 Minifies the final code with Google Closure Compiler. Renames the VM class properties.

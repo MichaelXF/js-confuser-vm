@@ -88,6 +88,10 @@ function VM(bytecode, mainStartPc, mainRegCount, constants, globals) {
   this._frameStack = [];
   this._openUpvalues = [];
 
+  // Return of the main frame
+  this._halt = false;
+  this._haltValue = undefined;
+
   // Flat register array (Lua-style)
   // Each Frame records its _base offset.
   // _regsTop is the next free slot (= base of the hypothetical next frame).
@@ -655,17 +659,26 @@ VM.prototype.run = function () {
             this._regs[i] = undefined;
           this._regsTop = frame._base;
 
-          if (this._frameStack.length === 0) return retVal; // main script returning
+          if (this._frameStack.length === 0) {
+            // Main script returning. Signal run()'s loop to halt and hand back
+            // retVal. A bare `return retVal` would only exit an extracted
+            // VM.prototype[op] handler function (handlerTable option), not the
+            // loop — so the value must travel out via _halt/_haltValue instead.
+            // Keeping the sole `break` trailing (no mid-body break/return) also
+            // lets the handlerTable transform lift this body verbatim.
+            this._halt = true;
+            this._haltValue = retVal;
+          } else {
+            // NewExpression: When invoking from the 'new' keyword, the newly constructed object is returned instead (if the original function doesn't return an object)
+            if (frame._newObj !== null) {
+              if (typeof retVal !== "object" || retVal === null)
+                retVal = frame._newObj;
+            }
 
-          // NewExpression: When invoking from the 'new' keyword, the newly constructed object is returned instead (if the original function doesn't return an object)
-          if (frame._newObj !== null) {
-            if (typeof retVal !== "object" || retVal === null)
-              retVal = frame._newObj;
+            var parentFrame = this._frameStack.pop();
+            this._regs[parentFrame._base + frame._retDstReg] = retVal;
+            this._currentFrame = parentFrame;
           }
-
-          var parentFrame = this._frameStack.pop();
-          this._regs[parentFrame._base + frame._retDstReg] = retVal;
-          this._currentFrame = parentFrame;
           break;
         }
 
@@ -956,6 +969,10 @@ VM.prototype.run = function () {
       this._regsTop = hBase + handledFrame.closure.fn.regCount;
       this._currentFrame = handledFrame;
     }
+
+    // RETURN of the main frame raised the halt flag — stop the loop and hand
+    // the value back to run()'s caller (host code, or the sub-VM shell).
+    if (this._halt) return this._haltValue;
   }
 };
 

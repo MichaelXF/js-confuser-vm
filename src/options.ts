@@ -15,6 +15,7 @@ export interface Options {
   timingChecks?: boolean; // add timing checks to detect debuggers?
   concealConstants?: boolean; // conceal strings and integers in the constant pool?
   classObfuscation?: boolean; // obfuscate the VM runtime classes?
+  handlerTable?: boolean; // Converts the switch-case dispatch into a handler table
   minify?: boolean; // pass final output through Google Closure Compiler? (Renames VM class properties)
 
   verbose?: boolean;

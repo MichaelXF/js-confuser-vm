@@ -3,13 +3,16 @@
 - Added new option `antiInstrumentation`
 - - Adds fake opcode effects to hinder opcode analysis and instrumentation
 
+- Added new option `handlerTable`
+- - Converts the switch-case dispatch into a handler table for performance reasons
+
 - Improved `Control Flow Flattening`
 - - Now includes dead code with fake jumps to mess with deobfuscators ("irreducible control flow")
 
 - Improved `Class Obfuscation`
-- - Now renames the class properties and methods
-- - Shuffles order of arguments for constructors and methods
-- - Adds fake arguments and fake fields to classes
+- - Now renames the VM's properties and methods
+- - Shuffles the order of arguments for the VM's constructors and methods
+- - Adds fake arguments and fake properties to the VM's classes
 
 - Improved `Timing Checks`
 - - The option `timingChecks` now accepts a number of milliseconds to change the pause duration to detect debuggers
