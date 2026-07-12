@@ -20,7 +20,7 @@ test("Variant #1: Lifts the opcode switch into a VM.prototype[op] handler table"
 
   // The @SWITCH dispatch became VM.prototype[<opcode>] = function () { ... }.
   // With classObfuscation off, OP is not inlined, so keys stay as OP.X.
-  expect(output).toMatch(/\.prototype\[OP\.\w+\] = function/);
+  expect(output).toMatch(/VMPrototype\[OP\.\w+\] = function/);
 
   // Ensure the switch itself became a single dynamic dispatch.
   expect(output).toMatch(/this\[op\]\(\)/);
@@ -52,7 +52,7 @@ test("Variant #2: Handler table stays correct with specialized opcodes + class o
   );
 
   // classObfuscation inlines OP, so handler keys are now numeric opcodes.
-  expect(output).toMatch(/\.prototype\[\d+\] = function/);
+  expect(output).toMatch(/VMPrototype\[\d+\] = function/);
 
   // Recursion exercises RETURN -> halt across many frames; the ternary and
   // arithmetic exercise the injected frame/regs/base vars inside handlers.

@@ -39,6 +39,10 @@ const OPTIONS_MATRIX = [
     VM_OPTIONS: { antiInstrumentation: true },
   },
   {
+    displayName: "handlerTable",
+    VM_OPTIONS: { handlerTable: true },
+  },
+  {
     displayName: "all",
     VM_OPTIONS: {
       randomizeOpcodes: true,
@@ -53,6 +57,7 @@ const OPTIONS_MATRIX = [
       concealConstants: true,
       dispatcher: true,
       stringConcealing: true,
+      handlerTable: true,
       classObfuscation: true,
     },
   },

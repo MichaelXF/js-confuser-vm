@@ -48,6 +48,7 @@ JsConfuserVM.obfuscate(`
   timingChecks: true, // add timing checks to detect debuggers?
   concealConstants: true, // conceal strings and integers in the constant pool?
   classObfuscation: true, // obfuscate the VM runtime classes?
+  handlerTable: true, // Converts the switch-case dispatch into a handler table
   minify: true, // pass final output through Google Closure Compiler? (Renames VM class properties)
 }).then(result => {
   console.log(result.code)

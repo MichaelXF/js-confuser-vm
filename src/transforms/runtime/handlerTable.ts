@@ -3,6 +3,7 @@ import { parse } from "@babel/parser";
 import traverseImport from "@babel/traverse";
 import { ok } from "assert";
 import { Compiler } from "../../compiler.ts";
+import { shuffle } from "../../utils/random-utils.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -142,10 +143,7 @@ export function applyHandlerTable(ast: t.File, _compiler: Compiler): void {
             t.assignmentExpression(
               "=",
               t.memberExpression(
-                t.memberExpression(
-                  t.identifier("VM"),
-                  t.identifier("prototype"),
-                ),
+                t.identifier("VMPrototype"),
                 t.cloneNode(sc.test, true),
                 true, // computed
               ),
@@ -165,11 +163,18 @@ export function applyHandlerTable(ast: t.File, _compiler: Compiler): void {
 
   ok(handlers, "Could not find @SWITCH statement for handler table");
 
-  // Drop the handler assignments in just before the @BOOT section so they sit
+  shuffle(handlers);
+
+  // Append: var VMPrototype = VM.prototype; for minification reasons
+  var initStatement = parse("var VMPrototype=VM.prototype;", {
+    sourceType: "unambiguous",
+  }).program.body[0];
+
+  // Place the handler assignments in just before the @BOOT section so they sit
   // alongside the other VM.prototype.* method definitions — classObfuscation's
   // statement shuffler then mixes them in with the rest.
   const body = ast.program.body;
   let bootIdx = body.findIndex((stmt) => hasComment(stmt, "@BOOT"));
   if (bootIdx === -1) bootIdx = body.length;
-  body.splice(bootIdx, 0, ...handlers);
+  body.splice(bootIdx, 0, initStatement, ...handlers);
 }
