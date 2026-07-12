@@ -142,10 +142,7 @@ export const OP_ORIGINAL = {
   // Debug
   DEBUGGER: 57,
 
-  // Indirect jump (register-addressed)
-  // Used by Dispatcher pass. The target PC is read from a register
-  // rather than encoded as a bytecode immediate, so static analysis cannot
-  // determine the destination without tracking register values at runtime.
+  // Indirect jump (target PC is read from a register)
   JUMP_REG: 58, // src — frame._pc = regs[src]
 
   // Exception handling (finally)
@@ -3197,9 +3194,7 @@ export async function compileAndSerialize(
   });
 
   // antiInstrumentation runs AFTER concealConstants (it emits its own constant
-  // idx+key pairs, so it must not be re-expanded) and BEFORE the
-  // specialized/macro/aliased group (which all leave the synthetic anti-ops
-  // untouched — see the pass header for why).
+  // idx+key pairs, so it must not be re-expanded)
   if (options.antiInstrumentation) {
     passes.push({
       pass: antiInstrumentation,
@@ -3260,30 +3255,23 @@ export async function compileAndSerialize(
   }
 
   // Resolve virtual registers to concrete slot indices and set regCount per fn.
-  // Must run BEFORE selfModifying: that pass moves body instructions to the end
-  // of the bytecode while leaving RETURN in place, splitting a function's code
-  // into two non-contiguous regions. Linear-scan liveness then sees incorrect
-  // firstUse/lastUse for registers that span the gap, causing slot collisions.
-  const regsResult = runAndTime(resolveRegisters, "resolveRegisters");
-  bytecode = regsResult.bytecode;
+  // Must run BEFORE selfModifying
+  runAndTime(resolveRegisters, "resolveRegisters");
 
   // selfModifying runs after register resolution so concrete slot indices are
   // already in place; only label operands remain unresolved at this stage.
   if (options.selfModifying) {
-    const smResult = runAndTime(selfModifying, "selfModifying");
-    bytecode = smResult.bytecode;
+    runAndTime(selfModifying, "selfModifying");
   }
 
-  // Resolve label references to flat bytecode indices.
-  const labelsResult = runAndTime(resolveLabels, "resolveLabels");
-  bytecode = labelsResult.bytecode;
+  // Resolve label references to real PCs
+  runAndTime(resolveLabels, "resolveLabels");
 
   // Set mainStartPc from the first function descriptor (or 0 for top-level start).
   compiler.mainStartPc = compiler.mainFn.startPc;
 
   // Resolve constant references to pool indices (+ conceal key operand).
   const constResult = runAndTime(resolveConstants, "resolveConstants");
-  bytecode = constResult.bytecode;
   compiler.constants = constResult.constants;
 
   // Build and obfuscate the runtime.

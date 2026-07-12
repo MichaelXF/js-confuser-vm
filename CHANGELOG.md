@@ -20,6 +20,9 @@
 - Improved `Conceal Constants`
 - - Now uses position-based XOR decryption with larger key range (u16->u32)
 
+- Improved `Dispatcher`
+- - Now uses larger key range (u16->u32)
+
 ## `0.1.2` Updates
 
 - Improved `Control Flow Flattening`
