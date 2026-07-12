@@ -1,4 +1,4 @@
-## `0.1.3` Anti Opcode Instrumentation
+## `0.1.3` Anti Opcode Instrumentation, Handler Table, and more
 
 - Added new option `antiInstrumentation`
 - - Adds fake opcode effects to hinder opcode analysis and instrumentation
