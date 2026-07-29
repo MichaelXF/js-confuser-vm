@@ -1,3 +1,11 @@
+Ideas: Claude Opus 5 vs. JS-Confuser, Different types of VMs
+
+## `0.1.4` 
+
+- Improved `Dispatcher`
+- - Added arithmetic conditional jumps so it encodes both edges of a branch (before the fall-through jump wasn't encoded) 
+- - Added randomness to each generated decoder function with random arithmetic, parameter passing, and how the result is returned
+
 ## `0.1.3` Anti Opcode Instrumentation, Handler Table, and more
 
 - Added new option `antiInstrumentation`
