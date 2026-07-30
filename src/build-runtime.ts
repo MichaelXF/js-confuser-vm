@@ -35,7 +35,7 @@ export async function buildRuntime(
   };
 
   const timings: { [name: string]: number } = {};
-  function runAndTime(pass: typeof applySpecializedOpcodes, name: string) {
+  function runAndTime(pass: b.RuntimePass, name: string) {
     const startedAt = now();
 
     compiler.log(`Running runtime pass ${name}...`);

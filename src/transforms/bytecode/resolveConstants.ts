@@ -48,7 +48,6 @@ export function resolveConstants(
   compiler: Compiler,
 ): {
   bytecode: b.Bytecode;
-  constants: any[];
 } {
   const constants: any[] = [];
   const constantsMap = new Map<any, number>(); // original value → pool index
@@ -137,5 +136,7 @@ export function resolveConstants(
     }
   }
 
-  return { bytecode: resolved, constants };
+  compiler.constants = constants;
+
+  return { bytecode: resolved };
 }

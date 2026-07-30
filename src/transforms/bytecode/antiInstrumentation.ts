@@ -199,7 +199,9 @@ function randomString(min: number, max: number): string {
 }
 
 function randomFakeValue(): number | string {
-  return getRandomInt(0, 1) === 0 ? getRandomInt(0, U16_MAX) : randomString(3, 8);
+  return getRandomInt(0, 1) === 0
+    ? getRandomInt(0, U16_MAX)
+    : randomString(3, 8);
 }
 
 // Emit the (idx, key) constant operand pair that resolveConstants expects.
@@ -321,14 +323,16 @@ export function antiInstrumentation(
     antiByRealOp.set(realOp, antiOp);
     stepKindsByAnti.set(
       antiOp,
-      allSteps.map((s): StepKind =>
-        s.real ? { real: true } : { real: false, slots: s.slots! },
+      allSteps.map(
+        (s): StepKind =>
+          s.real ? { real: true } : { real: false, slots: s.slots! },
       ),
     );
     antiNeedsAnchors.set(
       antiOp,
       allSteps.some(
-        (s) => !s.real && (s.slots!.includes("predT") || s.slots!.includes("predF")),
+        (s) =>
+          !s.real && (s.slots!.includes("predT") || s.slots!.includes("predF")),
       ),
     );
     compiler.ANTI_OPS[antiOp] = {
@@ -356,10 +360,12 @@ export function antiInstrumentation(
 
     // Only mint anchors if some real op fused into this function actually
     // uses one — most functions won't, so they simply don't appear.
-    const needsAnchors = Array.from(fnRealOps.get(fnId) ?? []).some((realOp) => {
-      const antiOp = antiByRealOp.get(realOp);
-      return antiOp !== undefined && antiNeedsAnchors.get(antiOp) === true;
-    });
+    const needsAnchors = Array.from(fnRealOps.get(fnId) ?? []).some(
+      (realOp) => {
+        const antiOp = antiByRealOp.get(realOp);
+        return antiOp !== undefined && antiNeedsAnchors.get(antiOp) === true;
+      },
+    );
 
     const flowingCount = getRandomInt(FLOWING_REGS_MIN, FLOWING_REGS_MAX);
     const pendingSeeds: { reg: RegisterOperand; value: number | string }[] = [];
@@ -493,7 +499,7 @@ export function antiInstrumentation(
       if (sk.real) {
         canonical.push(...(instr.slice(1) as InstrOperand[]));
       } else {
-        for (const slot of sk.slots) canonical.push(...genSlot(slot));
+        for (const slot of (sk as any).slots) canonical.push(...genSlot(slot));
       }
     }
 

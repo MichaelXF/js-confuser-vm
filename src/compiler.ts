@@ -3093,9 +3093,10 @@ class Serializer {
     return Buffer.from(buf).toString("base64");
   }
 
-  serialize(bytecode: b.Bytecode, constants: any[], compiler: Compiler) {
+  serialize(bytecode: b.Bytecode, compiler: Compiler) {
     const mainStartPc = compiler.mainStartPc;
     const mainRegCount = compiler.mainRegCount;
+    const constants = compiler.constants;
     let sections = [];
 
     var initBody = [];
@@ -3159,10 +3160,7 @@ export async function compileAndSerialize(
   let bytecode = compiler.compile(sourceCode);
 
   const passes: {
-    pass: (
-      bytecode: b.Bytecode,
-      compiler: Compiler,
-    ) => { bytecode: b.Bytecode; constants?: any[] };
+    pass: b.BytecodePass;
     name: string;
   }[] = [];
 
@@ -3271,15 +3269,10 @@ export async function compileAndSerialize(
   compiler.mainStartPc = compiler.mainFn.startPc;
 
   // Resolve constant references to pool indices (+ conceal key operand).
-  const constResult = runAndTime(resolveConstants, "resolveConstants");
-  compiler.constants = constResult.constants;
+  runAndTime(resolveConstants, "resolveConstants");
 
   // Build and obfuscate the runtime.
-  const runtimeSource = compiler.serializer.serialize(
-    bytecode,
-    constResult.constants,
-    compiler,
-  );
+  const runtimeSource = compiler.serializer.serialize(bytecode, compiler);
 
   // This part was purposefully pulled out Serializer as OP_NAME's are resolved during buildRuntime
   // So for the most useful comments, it's ran absolutely last
