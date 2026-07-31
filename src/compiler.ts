@@ -25,6 +25,7 @@ import { controlFlowFlattening } from "./transforms/bytecode/controlFlowFlatteni
 import { stringConcealing } from "./transforms/bytecode/stringConcealing.ts";
 import { now } from "./utils/profile-utils.ts";
 import { walkHoistScope } from "./utils/ast-utils.ts";
+import { createFrameLayout, type FrameLayout } from "./utils/frame-layout.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -327,6 +328,7 @@ export class Compiler {
 
   OP: Partial<typeof OP_ORIGINAL>;
   SENTINELS: { CALL_SPREAD: number };
+  FRAME_LAYOUT: FrameLayout;
   MACRO_OPS: Record<number, number[]>;
   SPECIALIZED_OPS: Record<
     number,
@@ -413,6 +415,11 @@ export class Compiler {
         ? getRandomInt(U16_MAX, U32_MAX)
         : U16_MAX,
     };
+
+    // Offsets of the VM frame header inside the flat slot array. Runtime-only
+    // (the compiler emits frame-relative register indices), and randomized per
+    // build when randomizeOpcodes is on.
+    this.FRAME_LAYOUT = createFrameLayout(this.options);
 
     this.OP_NAME = Object.fromEntries(
       Object.entries(this.OP).map(([k, v]) => [v, k]),
@@ -3140,6 +3147,16 @@ class Serializer {
       ),
     );
     sections.push(`var SENTINELS = ${generate(sentinelsObject).code};`);
+
+    const layout = compiler.FRAME_LAYOUT;
+    const slotsObject = t.objectExpression(
+      Object.entries(layout.SLOTS).map(([name, value]) =>
+        t.objectProperty(t.identifier(name), t.numericLiteral(value)),
+      ),
+    );
+    sections.push(`var SLOTS = ${generate(slotsObject).code};`);
+    sections.push(`var HEADER_SIZE = ${layout.HEADER_SIZE};`);
+    sections.push(`var FRAME_START = ${layout.FRAME_START};`);
 
     initBody.push(this._serializeConstants(constants));
 

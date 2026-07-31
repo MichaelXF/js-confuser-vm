@@ -6,6 +6,18 @@ const CONSTANTS = [];
 const ENCODE_BYTECODE = false;
 const TIMING_CHECKS = false;
 const SENTINELS = { CALL_SPREAD: 0 };
+const SLOTS = {
+  PC: 0,
+  CALLER: 0,
+  RET_DST: 0,
+  THIS: 0,
+  CLOSURE: 0,
+  HANDLERS: 0,
+  FRAME_SIZE: 0,
+  REG_BASE: 0,
+};
+const HEADER_SIZE = 0;
+const FRAME_START = 0;
 // The text above is not included in the compiled output - for type intellisense only
 // @START
 
@@ -41,6 +53,8 @@ var CLOSURE_MAP = new WeakMap();
 // Upvalue (Lua style)
 // While the outer frame is alive: reads/writes go to vm._regs[_absSlot].
 // After the outer frame returns (closed): reads/writes hit this._value.
+// (_absSlot is an absolute index into the flat slot array, so it stays valid
+// no matter where the owning frame's block sits.)
 function Upvalue(regs, absSlot) {
   this._regs = regs; // shared reference to VM._regs flat array
   this._absSlot = absSlot; // absolute index; stable as long as frame is alive
@@ -66,71 +80,90 @@ function Closure(fn) {
   this.prototype = {}; // <- default prototype object for `new`
 }
 
-// Frame (Lua CallInfo / CPython PyFrameObject)
-// Does NOT own a register array; registers live in VM._regs[_base .. _base+regCount).
-function Frame(closure, returnPc, parent, thisVal, retDstReg, base) {
-  this.closure = closure;
-  this._base = base; // absolute offset into VM._regs for this frame's r0
-  this._pc = closure.fn.startPc;
-  this._returnPc = returnPc;
-  this._parent = parent;
-  this.thisVal = thisVal !== undefined ? thisVal : undefined;
-  this._retDstReg = retDstReg !== undefined ? retDstReg : 0;
-  this._newObj = null;
-  this._handlerStack = [];
-}
-
 // VM
-function VM(bytecode, mainStartPc, mainRegCount, constants, globals) {
+// There is no Frame object and no frame stack. A frame is a block of slots in
+// the flat array `_regs`: HEADER_SIZE header slots (see utils/frame-layout.ts) followed
+// by the frame's registers. `_f` — the only piece of live execution state the VM
+// object exposes — is the current frame's base offset, and each frame's CALLER
+// slot points at the one that called it, so the call stack is an implicit linked
+// list with nothing to enumerate.
+function VM(bytecode, constants, globals) {
   this.bytecode = bytecode;
   this.constants = constants;
   this.globals = globals;
-  this._frameStack = [];
-  this._openUpvalues = [];
+  // Open upvalues, keyed by absolute slot; created on the first capture so a
+  // closure-free program never allocates it. See captureUpvalue().
+  this._openUpvalues = null;
 
-  // Return of the main frame
-  this._halt = false;
-  this._haltValue = undefined;
-
-  // Flat register array (Lua-style)
-  // Each Frame records its _base offset.
+  // Flat slot array (Lua-style register file, with the frame headers folded in).
   // _regsTop is the next free slot (= base of the hypothetical next frame).
-  // On CALL:   newBase = _regsTop; _regsTop += fn.regCount
-  // On RETURN: _regsTop = frame._base   (pop the frame's register window)
-  this._regs = new Array(mainRegCount).fill(undefined);
-  this._regsTop = mainRegCount; // main frame occupies [0, mainRegCount)
-
-  var mainFn = {
-    paramCount: 0,
-    regCount: mainRegCount,
-    startPc: mainStartPc,
-  };
-  this._currentFrame = new Frame(
-    new Closure(mainFn),
-    null,
-    null,
-    undefined,
-    0,
-    0,
-  );
+  // On CALL:   newBase = _regsTop; _regsTop += HEADER_SIZE + fn.regCount
+  // On RETURN: _regsTop = <returning frame's base>   (pop the whole block)
+  // Slot 0 is never part of a frame: it holds the value run() hands back, and
+  // doubles as the "no frame" sentinel for _f / CALLER.
+  this._regs = [];
+  this._regsTop = FRAME_START;
+  this._f = 0;
 }
 
 // Consume the next slot from the flat bytecode stream and advance the PC.
 // Called by opcode handlers to read each of their operands in order.
+// The PC is a header slot, so no object anywhere holds a property containing it.
 VM.prototype._operand = function () {
-  return this.bytecode[this._currentFrame._pc++];
+  return this.bytecode[this._regs[this._f + SLOTS.PC]++];
 };
 
-VM.prototype.captureUpvalue = function (frame, slot) {
-  // Dedup by absolute slot — two closures capturing the same local share one Upvalue.
-  var absSlot = frame._base + slot;
-  for (var i = 0; i < this._openUpvalues.length; i++) {
-    var uv = this._openUpvalues[i];
-    if (!uv._closed && uv._absSlot === absSlot) return uv;
+// Push a new frame block on top of the slot array and make it current.
+// retDst encodes the caller's destination register as (reg << 1), with bit 0 set
+// for a constructor call (`new`) — RETURN uses it to decide whether to hand back
+// the THIS slot instead of the returned value.
+// args === null skips parameter setup (used for the root frame).
+VM.prototype._pushFrame = function (closure, args, thisVal, retDst) {
+  var fn = closure.fn;
+  var regs = this._regs;
+  var fp = this._regsTop;
+  var size = HEADER_SIZE + fn.regCount;
+  var end = fp + size;
+
+  while (regs.length < end) regs.push(undefined);
+  for (var i = fp; i < end; i++) regs[i] = undefined;
+
+  var base = fp + HEADER_SIZE;
+  regs[fp + SLOTS.PC] = fn.startPc;
+  regs[fp + SLOTS.CALLER] = this._f;
+  regs[fp + SLOTS.RET_DST] = retDst;
+  regs[fp + SLOTS.THIS] = thisVal;
+  regs[fp + SLOTS.CLOSURE] = closure;
+  regs[fp + SLOTS.FRAME_SIZE] = size;
+  regs[fp + SLOTS.REG_BASE] = base;
+  this._regsTop = end;
+
+  if (args) {
+    if (fn.hasRest) {
+      var restSlot = fn.paramCount - 1;
+      for (var p = 0; p < restSlot; p++)
+        regs[base + p] = p < args.length ? args[p] : undefined;
+      regs[base + restSlot] = args.slice(restSlot);
+    } else {
+      for (var a = 0; a < args.length && a < fn.regCount; a++)
+        regs[base + a] = args[a];
+    }
+    if (fn.paramCount < fn.regCount) regs[base + fn.paramCount] = args;
   }
-  var uv = new Upvalue(this._regs, absSlot);
-  this._openUpvalues.push(uv);
-  return uv;
+
+  this._f = fp;
+};
+
+VM.prototype.captureUpvalue = function (fp, slot) {
+  // Dedup by absolute slot — two closures capturing the same local share one
+  // Upvalue. _openUpvalues is keyed BY absolute slot rather than being a list of
+  // live captures, so this is a direct lookup instead of a scan, and closing a
+  // frame's captures costs a walk of that frame's own window (below) instead of
+  // a filter over every capture in the program. Entries are removed on close, so
+  // anything found here is open by construction.
+  var absSlot = this._regs[fp + SLOTS.REG_BASE] + slot;
+  var uvs = this._openUpvalues || (this._openUpvalues = []);
+  return uvs[absSlot] || (uvs[absSlot] = new Upvalue(this._regs, absSlot));
 };
 
 // Reads and decodes a constant from the pool.
@@ -164,41 +197,44 @@ VM.prototype._constant = function (idxIn, keyIn) {
   return out;
 };
 
-VM.prototype._closeUpvaluesFor = function (frame) {
-  // Called on RETURN — close every upvalue whose absolute slot falls within
-  // this frame's register window [_base, _base + regCount).
-  var lo = frame._base;
-  var hi = frame._base + frame.closure.fn.regCount;
-  this._openUpvalues = this._openUpvalues.filter(function (uv) {
-    if (!uv._closed && uv._absSlot >= lo && uv._absSlot < hi) {
+VM.prototype._closeUpvaluesFor = function (fp) {
+  // Called on RETURN — close every upvalue captured from this frame's register
+  // window [REG_BASE, end of the frame block) and free its table entry, so a
+  // later frame reusing those slots starts with no captures.
+  var uvs = this._openUpvalues;
+  if (!uvs) return; // nothing in this program ever captured a local
+  var regs = this._regs;
+  var hi = fp + regs[fp + SLOTS.FRAME_SIZE];
+  for (var i = regs[fp + SLOTS.REG_BASE]; i < hi; i++) {
+    var uv = uvs[i];
+    if (uv) {
       uv._close();
-      return false;
+      uvs[i] = undefined;
     }
-    return true;
-  });
+  }
 };
 
-VM.prototype._ensureRegisterWindow = function (base, regCount) {
-  var end = base + regCount;
-  while (this._regs.length < end) this._regs.push(undefined);
-  for (var i = base; i < end; i++) this._regs[i] = undefined;
-};
-
-VM.prototype.run = function () {
+// Executes `closure` to completion and returns its return value.
+// The root frame's CALLER slot is 0 (the sentinel), so its RETURN parks the
+// value in slot 0 and clears _f, which stops the loop below.
+VM.prototype.run = function (closure, thisVal, args) {
   var now = () => {
     return performance.now();
   };
 
   var lastTime = now();
+  this._pushFrame(closure, args, thisVal, 0);
 
   while (true) {
-    var frame = this._currentFrame;
+    var fp = this._f;
+    var regs = this._regs;
     var bc = this.bytecode;
-    if (frame._pc >= bc.length) break;
+    var pc = regs[fp + SLOTS.PC];
+    if (pc >= bc.length) break;
 
-    var pc = frame._pc++;
+    regs[fp + SLOTS.PC] = pc + 1;
     var op = this.bytecode[pc];
-    var opcode = this.bytecode[pc];
+    // var opcode = this.bytecode[pc];
     // console.log(`[run] pc=${pc}, opcode=${opcode}, name=${Object.keys(OP).find((key) => OP[key] === opcode)}`);
 
     // Debugging protection: Detects debugger by checking for >1s pauses which can only happen from debugger; or extremely slow sync tasks
@@ -210,16 +246,14 @@ VM.prototype.run = function () {
         // Poison the bytecode
         for (var i = 0; i < this.bytecode.length; i++) this.bytecode[i] = 0;
         // Break the current state
-        for (var i2 = frame._base; i2 < this._regsTop; i2++)
-          this._regs[i2] = undefined;
+        for (var i2 = fp; i2 < this._regsTop; i2++) this._regs[i2] = undefined;
         op = OP.JUMP;
-        frame._pc = this.bytecode.length; // jump past end to halt
+        regs[fp + SLOTS.PC] = this.bytecode.length; // jump past end to halt
       }
     }
 
     try {
-      var regs = this._regs;
-      var base = frame._base;
+      var base = regs[fp + SLOTS.REG_BASE];
 
       /* @SWITCH */
       switch (op) {
@@ -249,13 +283,14 @@ VM.prototype.run = function () {
 
         case OP.LOAD_UPVALUE: {
           var dst = this._operand();
-          regs[base + dst] = frame.closure.upvalues[this._operand()]._read();
+          regs[base + dst] =
+            regs[fp + SLOTS.CLOSURE].upvalues[this._operand()]._read();
           break;
         }
 
         case OP.LOAD_THIS: {
           var dst = this._operand();
-          regs[base + dst] = frame.thisVal;
+          regs[base + dst] = regs[fp + SLOTS.THIS];
           break;
         }
 
@@ -273,7 +308,9 @@ VM.prototype.run = function () {
 
         case OP.STORE_UPVALUE: {
           var uvIdx = this._operand();
-          frame.closure.upvalues[uvIdx]._write(regs[base + this._operand()]);
+          regs[fp + SLOTS.CLOSURE].upvalues[uvIdx]._write(
+            regs[base + this._operand()],
+          );
           break;
         }
 
@@ -491,13 +528,13 @@ VM.prototype.run = function () {
 
         // Control flow
         case OP.JUMP:
-          frame._pc = this._operand();
+          regs[fp + SLOTS.PC] = this._operand();
           break;
 
         case OP.JUMP_IF_FALSE: {
           var src = this._operand();
           var target = this._operand();
-          if (!regs[base + src]) frame._pc = target;
+          if (!regs[base + src]) regs[fp + SLOTS.PC] = target;
           break;
         }
 
@@ -505,7 +542,7 @@ VM.prototype.run = function () {
           // || short-circuit: if truthy, jump over RHS.
           var src = this._operand();
           var target = this._operand();
-          if (regs[base + src]) frame._pc = target;
+          if (regs[base + src]) regs[fp + SLOTS.PC] = target;
           break;
         }
 
@@ -526,31 +563,7 @@ VM.prototype.run = function () {
 
           var closure = callee && CLOSURE_MAP.get(callee);
           if (closure) {
-            var newBase = this._regsTop;
-            this._ensureRegisterWindow(newBase, closure.fn.regCount);
-            this._regsTop = newBase + closure.fn.regCount;
-            var f = new Frame(
-              closure,
-              frame._pc,
-              frame,
-              this.globals,
-              dst,
-              newBase,
-            );
-            if (closure.fn.hasRest) {
-              var restSlot = closure.fn.paramCount - 1;
-              for (var i = 0; i < restSlot; i++)
-                this._regs[newBase + i] = i < args.length ? args[i] : undefined;
-              this._regs[newBase + restSlot] = args.slice(restSlot);
-            } else {
-              for (var i = 0; i < args.length && i < closure.fn.regCount; i++)
-                this._regs[newBase + i] = args[i];
-            }
-            if (closure.fn.paramCount < closure.fn.regCount) {
-              this._regs[newBase + closure.fn.paramCount] = args;
-            }
-            this._frameStack.push(this._currentFrame);
-            this._currentFrame = f;
+            this._pushFrame(closure, args, this.globals, dst << 1);
           } else {
             regs[base + dst] = callee.apply(null, args);
           }
@@ -574,31 +587,7 @@ VM.prototype.run = function () {
 
           var closure = callee && CLOSURE_MAP.get(callee);
           if (closure) {
-            var newBase = this._regsTop;
-            this._ensureRegisterWindow(newBase, closure.fn.regCount);
-            this._regsTop = newBase + closure.fn.regCount;
-            var f = new Frame(
-              closure,
-              frame._pc,
-              frame,
-              receiver,
-              dst,
-              newBase,
-            );
-            if (closure.fn.hasRest) {
-              var restSlot = closure.fn.paramCount - 1;
-              for (var i = 0; i < restSlot; i++)
-                this._regs[newBase + i] = i < args.length ? args[i] : undefined;
-              this._regs[newBase + restSlot] = args.slice(restSlot);
-            } else {
-              for (var i = 0; i < args.length && i < closure.fn.regCount; i++)
-                this._regs[newBase + i] = args[i];
-            }
-            if (closure.fn.paramCount < closure.fn.regCount) {
-              this._regs[newBase + closure.fn.paramCount] = args;
-            }
-            this._frameStack.push(this._currentFrame);
-            this._currentFrame = f;
+            this._pushFrame(closure, args, receiver, dst << 1);
           } else {
             regs[base + dst] = callee.apply(receiver, args);
           }
@@ -621,26 +610,14 @@ VM.prototype.run = function () {
 
           var closure = callee && CLOSURE_MAP.get(callee);
           if (closure) {
-            var newObj = Object.create(closure.prototype || null);
-            var newBase = this._regsTop;
-            this._ensureRegisterWindow(newBase, closure.fn.regCount);
-            this._regsTop = newBase + closure.fn.regCount;
-            var f = new Frame(closure, frame._pc, frame, newObj, dst, newBase);
-            if (closure.fn.hasRest) {
-              var restSlot = closure.fn.paramCount - 1;
-              for (var i = 0; i < restSlot; i++)
-                this._regs[newBase + i] = i < args.length ? args[i] : undefined;
-              this._regs[newBase + restSlot] = args.slice(restSlot);
-            } else {
-              for (var i = 0; i < args.length && i < closure.fn.regCount; i++)
-                this._regs[newBase + i] = args[i];
-            }
-            if (closure.fn.paramCount < closure.fn.regCount) {
-              this._regs[newBase + closure.fn.paramCount] = args;
-            }
-            f._newObj = newObj;
-            this._frameStack.push(this._currentFrame);
-            this._currentFrame = f;
+            // The new object doubles as the frame's THIS; bit 0 of RET_DST marks
+            // the frame as a constructor call so RETURN can fall back to it.
+            this._pushFrame(
+              closure,
+              args,
+              Object.create(closure.prototype || null),
+              (dst << 1) | 1,
+            );
           } else {
             // Reflect.construct is required - Object.create+apply does NOT set
             // internal slots ([[NumberData]], [[StringData]], etc.) for built-ins.
@@ -651,34 +628,30 @@ VM.prototype.run = function () {
 
         case OP.RETURN: {
           var retVal = regs[base + this._operand()];
-          this._closeUpvaluesFor(frame); // must happen before frame is abandoned
+          this._closeUpvaluesFor(fp); // must happen before frame is abandoned
 
-          // Zero out callee's register window to limit exposing runtime values
-          var hi = frame._base + frame.closure.fn.regCount;
-          for (var i = frame._base as number; i < hi; i++)
-            this._regs[i] = undefined;
-          this._regsTop = frame._base;
+          var caller = regs[fp + SLOTS.CALLER];
+          var retDst = regs[fp + SLOTS.RET_DST];
 
-          if (this._frameStack.length === 0) {
-            // Main script returning. Signal run()'s loop to halt and hand back
-            // retVal. A bare `return retVal` would only exit an extracted
-            // VM.prototype[op] handler function (handlerTable option), not the
-            // loop — so the value must travel out via _halt/_haltValue instead.
-            // Keeping the sole `break` trailing (no mid-body break/return) also
-            // lets the handlerTable transform lift this body verbatim.
-            this._halt = true;
-            this._haltValue = retVal;
-          } else {
-            // NewExpression: When invoking from the 'new' keyword, the newly constructed object is returned instead (if the original function doesn't return an object)
-            if (frame._newObj !== null) {
-              if (typeof retVal !== "object" || retVal === null)
-                retVal = frame._newObj;
-            }
+          // NewExpression: When invoking from the 'new' keyword, the newly constructed object is returned instead (if the original function doesn't return an object)
+          if ((retDst & 1) && (typeof retVal !== "object" || retVal === null))
+            retVal = regs[fp + SLOTS.THIS];
 
-            var parentFrame = this._frameStack.pop();
-            this._regs[parentFrame._base + frame._retDstReg] = retVal;
-            this._currentFrame = parentFrame;
-          }
+          // Zero out the callee's whole block (header included) to limit
+          // exposing runtime values, then hand the slots back.
+          var hi = fp + regs[fp + SLOTS.FRAME_SIZE];
+          for (var i = fp as number; i < hi; i++) regs[i] = undefined;
+          this._regsTop = fp;
+          this._f = caller;
+
+          // A caller of 0 is the root frame returning to the host: park the
+          // value in slot 0 for run() to hand back. A bare `return retVal`
+          // would only exit an extracted VM.prototype[op] handler function
+          // (handlerTable option), not the loop. Keeping the sole `break`
+          // trailing (no mid-body break/return) also lets the handlerTable
+          // transform lift this body verbatim.
+          regs[caller ? regs[caller + SLOTS.REG_BASE] + (retDst >> 1) : 0] =
+            retVal;
           break;
         }
 
@@ -702,11 +675,14 @@ VM.prototype.run = function () {
             uvDescs[i] = { isLocal: isLocalRaw, _index: uvIndex };
           }
 
+          // uvDescs is consumed by the capture loop below and then dropped — it
+          // is deliberately NOT kept on the descriptor. A closure that carries
+          // its capture plan around spells out the closure graph ("captures
+          // local 2 of the parent frame") to anything that gets hold of it.
           var fn = {
             paramCount: paramCount,
             regCount: regCount,
             startPc: startPc,
-            upvalueDescriptors: uvDescs,
             hasRest: hasRest,
           };
 
@@ -714,9 +690,11 @@ VM.prototype.run = function () {
           for (var i = 0; i < uvDescs.length; i++) {
             var uvd = uvDescs[i];
             if (uvd.isLocal) {
-              closure.upvalues.push(this.captureUpvalue(frame, uvd._index));
+              closure.upvalues.push(this.captureUpvalue(fp, uvd._index));
             } else {
-              closure.upvalues.push(frame.closure.upvalues[uvd._index]);
+              closure.upvalues.push(
+                regs[fp + SLOTS.CLOSURE].upvalues[uvd._index],
+              );
             }
           }
 
@@ -726,36 +704,11 @@ VM.prototype.run = function () {
           var self = this;
           var shell = (function (c) {
             return function () {
-              var args = Array.prototype.slice.call(arguments);
-              var sub = new VM(
-                self.bytecode,
-                0,
-                c.fn.regCount,
-                self.constants,
-                self.globals,
-              );
-              var f = new Frame(
+              return new VM(self.bytecode, self.constants, self.globals).run(
                 c,
-                null,
-                null,
                 this == null ? self.globals : this,
-                0,
-                0,
+                Array.prototype.slice.call(arguments),
               );
-              sub._currentFrame = f;
-              if (c.fn.hasRest) {
-                var restSlot = c.fn.paramCount - 1;
-                for (var i = 0; i < restSlot; i++)
-                  sub._regs[i] = i < args.length ? args[i] : undefined;
-                sub._regs[restSlot] = args.slice(restSlot);
-              } else {
-                for (var i = 0; i < args.length && i < c.fn.regCount; i++)
-                  sub._regs[i] = args[i];
-              }
-              if (c.fn.paramCount < c.fn.regCount) {
-                sub._regs[c.fn.paramCount] = args;
-              }
-              return sub.run();
             };
           })(closure);
           CLOSURE_MAP.set(shell, closure);
@@ -862,7 +815,7 @@ VM.prototype.run = function () {
           var iter = regs[base + this._operand()];
           var exitTarget = this._operand();
           if (iter.i >= iter._keys.length) {
-            frame._pc = exitTarget;
+            regs[fp + SLOTS.PC] = exitTarget;
           } else {
             regs[base + dst] = iter._keys[iter.i++];
           }
@@ -871,11 +824,14 @@ VM.prototype.run = function () {
 
         // ── Exception handling ────────────────────────────────────────────────
         case OP.TRY_SETUP: {
-          // handlerPc, exceptionReg — push exception handler record onto current frame.
-          frame._handlerStack.push({
+          // handlerPc, exceptionReg — push exception handler record onto current
+          // frame. The handler stack lives in a header slot and is created on
+          // first use, so frames that never try/catch carry nothing.
+          var hs = regs[fp + SLOTS.HANDLERS];
+          if (!hs) regs[fp + SLOTS.HANDLERS] = hs = [];
+          hs.push({
             handlerPc: this._operand(),
             exceptionReg: this._operand(),
-            frameStackDepth: this._frameStack.length,
           });
           break;
         }
@@ -883,7 +839,7 @@ VM.prototype.run = function () {
         case OP.TRY_END: {
           // Normal exit from a try block — disarm the top handler record
           // (works for both catch and finally regions; they share the stack).
-          frame._handlerStack.pop();
+          regs[fp + SLOTS.HANDLERS].pop();
           break;
         }
 
@@ -892,12 +848,13 @@ VM.prototype.run = function () {
           // Arm a finalizer for the current region.  Unlike a catch record this
           // carries no exceptionReg; instead the continuation register (contReg)
           // receives the resume PC and payloadReg carries the in-flight value.
-          frame._handlerStack.push({
+          var hs = regs[fp + SLOTS.HANDLERS];
+          if (!hs) regs[fp + SLOTS.HANDLERS] = hs = [];
+          hs.push({
             finallyPc: this._operand(),
             contReg: this._operand(),
             payloadReg: this._operand(),
             throwPad: this._operand(),
-            frameStackDepth: this._frameStack.length,
           });
           break;
         }
@@ -916,7 +873,7 @@ VM.prototype.run = function () {
 
         case OP.JUMP_REG: {
           // Indirect jump: allows VM to jump based on runtime values.
-          frame._pc = regs[base + this._operand()];
+          regs[fp + SLOTS.PC] = regs[base + this._operand()];
           break;
         }
 
@@ -927,52 +884,52 @@ VM.prototype.run = function () {
 
         default:
           throw new Error(
-            "Unknown opcode: " + op + " at pc " + (frame._pc - 1),
+            "Unknown opcode: " + op + " at pc " + (regs[fp + SLOTS.PC] - 1),
           );
       }
     } catch (err) {
       // Exception handler unwinding
-      // Walk from the current frame upward until we find a frame that has an open exception handler (TRY_SETUP without a matching TRY_END).
-      // For every frame we abandon along the way, close its captured upvalues.
-      var handledFrame = null;
-      var searchFrame = this._currentFrame;
-      while (true) {
-        if (searchFrame._handlerStack.length > 0) {
+      // Walk the CALLER chain from the current frame until we find one holding an open exception handler (TRY_SETUP without a matching TRY_END).
+      // For every frame we abandon along the way, close its captured upvalues and release its block.
+      var handledFrame = 0;
+      var searchFrame = this._f;
+      while (searchFrame) {
+        var handlers = regs[searchFrame + SLOTS.HANDLERS];
+        if (handlers && handlers.length > 0) {
           handledFrame = searchFrame;
           break;
         }
         // No handler in this frame — abandon it and walk up.
         this._closeUpvaluesFor(searchFrame);
-        this._regsTop = searchFrame._base;
-        if (this._frameStack.length === 0) break;
-        searchFrame = this._frameStack.pop();
-        this._currentFrame = searchFrame;
+        this._regsTop = searchFrame;
+        searchFrame = regs[searchFrame + SLOTS.CALLER];
+        this._f = searchFrame;
       }
 
       if (!handledFrame) throw err; // if there's no handler, propagate back to host
 
-      var h = handledFrame._handlerStack.pop();
-      // Discard any call-frames that were pushed inside the protected region.
-      this._frameStack.length = h.frameStackDepth;
-      var hBase = handledFrame._base;
+      var h = regs[handledFrame + SLOTS.HANDLERS].pop();
+      var hBase = regs[handledFrame + SLOTS.REG_BASE];
       if (h.exceptionReg !== undefined) {
         // catch region — deliver the exception to the catch binding and run it.
-        this._regs[hBase + h.exceptionReg] = err;
-        handledFrame._pc = h.handlerPc;
+        regs[hBase + h.exceptionReg] = err;
+        regs[handledFrame + SLOTS.PC] = h.handlerPc;
       } else {
         // finally region: run the finalizer with the exception pending, then
         // resume at its throw pad (which re-raises and continues unwinding).
-        this._regs[hBase + h.contReg] = h.throwPad;
-        this._regs[hBase + h.payloadReg] = err;
-        handledFrame._pc = h.finallyPc;
+        regs[hBase + h.contReg] = h.throwPad;
+        regs[hBase + h.payloadReg] = err;
+        regs[handledFrame + SLOTS.PC] = h.finallyPc;
       }
-      this._regsTop = hBase + handledFrame.closure.fn.regCount;
-      this._currentFrame = handledFrame;
+      // Walking the chain already released every frame pushed inside the
+      // protected region; the handling frame is now the top of the stack again.
+      this._regsTop = handledFrame + regs[handledFrame + SLOTS.FRAME_SIZE];
+      this._f = handledFrame;
     }
 
-    // RETURN of the main frame raised the halt flag — stop the loop and hand
-    // the value back to run()'s caller (host code, or the sub-VM shell).
-    if (this._halt) return this._haltValue;
+    // RETURN of the root frame cleared _f — stop the loop and hand the value
+    // back to run()'s caller (host code, or the sub-VM shell) from slot 0.
+    if (!this._f) return this._regs[0];
   }
 };
 
@@ -987,11 +944,13 @@ if (typeof module !== "undefined") {
   globals.exports = typeof exports !== "undefined" ? exports : undefined;
 }
 
-var vm = new VM(
-  decodeBytecode(BYTECODE),
-  MAIN_START_PC,
-  MAIN_REG_COUNT,
-  CONSTANTS,
-  globals,
+var vm = new VM(decodeBytecode(BYTECODE), CONSTANTS, globals);
+vm.run(
+  new Closure({
+    paramCount: 0,
+    regCount: MAIN_REG_COUNT,
+    startPc: MAIN_START_PC,
+  }),
+  undefined,
+  null, // no arguments object / parameter setup for the root frame
 );
-vm.run();

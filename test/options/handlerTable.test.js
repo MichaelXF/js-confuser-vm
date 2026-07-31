@@ -25,9 +25,13 @@ test("Variant #1: Lifts the opcode switch into a VM.prototype[op] handler table"
   // Ensure the switch itself became a single dynamic dispatch.
   expect(output).toMatch(/this\[op\]\(\)/);
 
-  // Injected vars are scanned per-handler: a body that reads `base` but not
-  // `frame` inlines `this._currentFrame` instead of emitting an unused `frame`.
-  expect(output).toMatch(/var base = this\._currentFrame\._base;/);
+  // Injected vars are scanned per-handler: `base` is the frame's REG_BASE
+  // header slot, and a body that reads `base` but never names `fp` inlines
+  // `this._f` instead of emitting an unused `fp` var.
+  expect(output).toMatch(/var base = regs\[this\._f \+ SLOTS\.REG_BASE\];/);
+
+  // Handlers that do touch header slots (jumps, RETURN, upvalues) get `fp`.
+  expect(output).toMatch(/var fp = this\._f;/);
 
   // The implicit trailing `return;` produced by the break -> return rewrite is
   // dropped, so no handler ends in a bare return.

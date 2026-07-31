@@ -67,11 +67,11 @@ function caseBody(sc: t.SwitchCase): t.Statement[] {
   return raw.map((s) => t.cloneNode(s, true) as t.Statement);
 }
 
-// Only hoist the frame/regs/base locals a given handler body actually reads —
+// Only hoist the fp/regs/base locals a given handler body actually reads —
 // most handlers use one or two, so injecting all three bloats the output. We
-// pre-scan the body's identifiers for those exact names. `base` derives from
-// `frame`; when a body uses `base` but not `frame` we inline `this._currentFrame`
-// rather than emit an otherwise-unused `frame` var.
+// pre-scan the body's identifiers for those exact names. `base` is the frame's
+// REG_BASE header slot, so it needs both `fp` and `regs`; when a body reads
+// `base` alone we inline those two reads rather than emit unused vars.
 function buildInjectedVars(body: t.Statement[]): t.Statement[] {
   const used = new Set<string>();
   t.traverseFast(t.blockStatement(body), (node) => {
@@ -79,17 +79,18 @@ function buildInjectedVars(body: t.Statement[]): t.Statement[] {
   });
 
   const injected: t.Statement[] = [];
-  if (used.has("frame"))
-    injected.push(parseStatement("var frame = this._currentFrame;"));
-  if (used.has("regs")) injected.push(parseStatement("var regs = this._regs;"));
+  const needFp = used.has("fp");
+  const needRegs = used.has("regs");
+
+  if (needFp) injected.push(parseStatement("var fp = this._f;"));
+  if (needRegs) injected.push(parseStatement("var regs = this._regs;"));
   if (used.has("base")) {
-    injected.push(
-      parseStatement(
-        used.has("frame")
-          ? "var base = frame._base;"
-          : "var base = this._currentFrame._base;",
-      ),
-    );
+    // Read through whichever locals already exist; a body that wants `base`
+    // but never names `fp`/`regs` inlines those reads instead of declaring
+    // vars it would use exactly once.
+    const arr = needRegs ? "regs" : "this._regs";
+    const frame = needFp ? "fp" : "this._f";
+    injected.push(parseStatement(`var base = ${arr}[${frame} + SLOTS.REG_BASE];`));
   }
   return injected;
 }

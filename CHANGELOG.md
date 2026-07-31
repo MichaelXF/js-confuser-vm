@@ -1,6 +1,18 @@
-Ideas: Claude Opus 5 vs. JS-Confuser, Different types of VMs
+Ideas: 
+- Claude Opus 5 vs. JS-Confuser. Generate a few different types of VMs and compare how resistant to deobfuscation they are
+- Wrap output in an IIFE: Protect globals from DevTools
+- Non-contiguous frame windows: Use scattered offsets instead of bump-allocating for frames
+- Removal of class properties in favor of closure variables: `bytecode`, `constants`, `globals` should not be exposed
+- Handler records as reserved slots: Removal of handler stack object `{handlerPc,exceptionReg}`
+- Flat upvalue records: replace the Upvalue object with a 2-element `[absSlot, value]` array
+- Removal of `Upvalue._regs`
 
-## `0.1.4` 
+## `0.1.4` Flat Frame Layout
+
+- Improved the VM's frame layout 
+- - The frame layout is now stored as headers slots in registers 
+- - The `Frame` class is now removed and the PC lives in a header slot, making debugging through DevTools harder
+- - When you have `randomizeOpcodes` enabled, this layout is also randomized each build
 
 - Improved `Dispatcher`
 - - Added arithmetic conditional jumps so it encodes both edges of a branch (before the fall-through jump wasn't encoded) 

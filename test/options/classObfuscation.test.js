@@ -26,7 +26,7 @@ test("Variant #1: Renames internal VM classes' fields/methods and stays correct"
   const defaultNames = [
     "captureUpvalue",
     "_closeUpvaluesFor",
-    "_ensureRegisterWindow",
+    "_pushFrame",
     "_absSlot",
     "_openUpvalues",
   ];
