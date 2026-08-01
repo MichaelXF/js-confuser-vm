@@ -50,7 +50,7 @@ test("Variant #1: Profile option enabled", async () => {
     typeof profileData.transforms["macroOpcodes"].transformTime,
   ).toStrictEqual("number");
 
-  const TEST_OUTPUT = await evalCode(sourceCode);
+  const TEST_OUTPUT = await evalCode(code);
 
   expect(TEST_OUTPUT).toStrictEqual(60);
 });
