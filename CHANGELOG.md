@@ -18,6 +18,8 @@ Ideas:
 - - Added arithmetic conditional jumps so it encodes both edges of a branch (before the fall-through jump wasn't encoded) 
 - - Added randomness to each generated decoder function with random arithmetic, parameter passing, and how the result is returned
 
+- Added new option `profile` which captures a more detailed `profileData` object (slower)
+
 ## `0.1.3` Anti Opcode Instrumentation, Handler Table, and more
 
 - Added new option `antiInstrumentation`

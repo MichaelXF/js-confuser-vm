@@ -183,6 +183,8 @@ VM.prototype._constant = function (idxIn, keyIn) {
   var v = this.constants[idx];
   if (!key) return v;
   if (typeof v === "number") return v ^ key;
+  if (typeof v !== "string") return v;
+
   // String: base64-decode to u16 LE byte pairs, then XOR each code with a
   // 16-bit keystream word derived from the full 32-bit key + position.
   var b = base64ToBytes(v);
@@ -634,7 +636,7 @@ VM.prototype.run = function (closure, thisVal, args) {
           var retDst = regs[fp + SLOTS.RET_DST];
 
           // NewExpression: When invoking from the 'new' keyword, the newly constructed object is returned instead (if the original function doesn't return an object)
-          if ((retDst & 1) && (typeof retVal !== "object" || retVal === null))
+          if (retDst & 1 && (typeof retVal !== "object" || retVal === null))
             retVal = regs[fp + SLOTS.THIS];
 
           // Zero out the callee's whole block (header included) to limit

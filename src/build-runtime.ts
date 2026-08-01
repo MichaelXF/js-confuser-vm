@@ -34,7 +34,6 @@ export async function buildRuntime(
     return switchStatement.cases.length;
   };
 
-  const timings: { [name: string]: number } = {};
   function runAndTime(pass: b.RuntimePass, name: string) {
     const startedAt = now();
 
@@ -44,10 +43,9 @@ export async function buildRuntime(
 
     const endedAt = now();
     const elapsedMs = endedAt - startedAt;
-    timings[name] = elapsedMs;
 
     compiler.profileData.transforms[name] = {
-      fileSize: null, // TODO: Add option as doing 'generate(ast).code.length' is slow
+      fileSize: options.profile ? generate(ast).code.length : null, // 'generate(ast).code.length' is slow
       transformTime: elapsedMs,
       handlerCount: getHandlerCount(),
     };
@@ -93,12 +91,14 @@ export async function buildRuntime(
 
   compiler.profileData.handlerCount = getHandlerCount();
 
+  let startedGenerateAt = now();
   let generated: string;
   try {
     generated = generate(ast).code;
   } catch (error) {
     throw new Error("VM-Runtime final generation failed", { cause: error });
   }
+  compiler.profileData.generateTime = now() - startedGenerateAt;
 
   // Add comment here for more accurate opcode names
   generated = generateBytecodeComment() + "\n" + generated;
@@ -112,7 +112,7 @@ export async function buildRuntime(
       let elapsedMs = now() - startedAt;
       compiler.log(`Minify completed in ${Math.floor(elapsedMs)}ms`);
 
-      compiler.profileData.transforms["minify"] = {
+      compiler.profileData.transforms["applyMinify"] = {
         transformTime: elapsedMs,
       };
     } catch (error) {

@@ -98,7 +98,7 @@ export class Template {
   private _collectInnerFunctions(
     parentCompiler: Compiler,
     startIdx: number,
-  ): { innerFns: any[]; innerBytecode: Bytecode } {
+  ): { innerFns: Compiler["fnDescriptors"]; innerBytecode: Bytecode } {
     const innerFns = parentCompiler.fnDescriptors.slice(startIdx + 1);
 
     const innerBytecode: Bytecode = [];
@@ -154,7 +154,7 @@ export class Template {
   compile(
     variables: Record<string, string | number>,
     parentCompiler: Compiler,
-  ): { functions: any[]; bytecode: Bytecode } {
+  ): { functions: Compiler["fnDescriptors"]; bytecode: Bytecode } {
     const code = this._interpolate(variables);
     const { startIdx } = this._setupChild(code, parentCompiler);
     const { innerFns, innerBytecode } = this._collectInnerFunctions(
@@ -200,7 +200,7 @@ export class Template {
   ): {
     bytecode: Bytecode;
     registers: Map<string, RegisterOperand>;
-    functions: any[];
+    functions: Compiler["fnDescriptors"];
     innerBytecode: Bytecode;
   } {
     const code = this._interpolate(variables);

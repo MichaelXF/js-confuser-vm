@@ -72,6 +72,8 @@ type Op<T extends object> = Operand & T;
 
 export type Instruction = [number | null, ...InstrOperand[]];
 
+export type Constant = string | number | undefined | null;
+
 export type Bytecode = Instruction[];
 
 export type BytecodePass = (
@@ -134,12 +136,29 @@ export interface ObfuscationResult {
 
     transforms: {
       [transformName: string]: {
-        fileSize?: number;
         bytecodeSize?: number;
-        flatBytecodeSize?: number;
+        /**
+         * Only captured when option 'profile' is enabled
+         */
+        bytecodeCounts?: {
+          [operandType: string]: number;
+        };
         transformTime?: number;
+
+        /**
+         * Runtime only.
+         */
         handlerCount?: number;
+
+        /**
+         * Runtime only.
+         * Only captured when option 'profile' is enabled
+         */
+        fileSize?: number;
       };
     };
+
+    inputFileSize?: number;
+    outputFileSize?: number;
   };
 }

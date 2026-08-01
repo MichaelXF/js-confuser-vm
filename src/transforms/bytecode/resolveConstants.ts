@@ -49,7 +49,7 @@ export function resolveConstants(
 ): {
   bytecode: b.Bytecode;
 } {
-  const constants: any[] = [];
+  const constants: b.Constant[] = [];
   const constantsMap = new Map<any, number>(); // original value → pool index
   const keyMap = new Map<number, number>(); // pool index → conceal key
 

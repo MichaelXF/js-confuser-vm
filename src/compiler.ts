@@ -281,7 +281,7 @@ interface FnDescriptor {
   bytecode?: b.Bytecode;
   paramCount?: number;
   regCount?: number;
-  upvalues?: any[];
+  upvalues?: FnContext["upvalues"];
   _fnIdx?: number;
 
   // Number of leading local-pool registers (params + `arguments` + `this`)
@@ -350,7 +350,7 @@ export class Compiler {
   OP_NAME: Record<number, string>;
   JUMP_OPS: Set<number>;
 
-  constants: any[];
+  constants: b.Constant[];
 
   log(...messages: any[]) {
     if (this.options.verbose) {
@@ -2873,7 +2873,7 @@ class Serializer {
 
   // Reverse the concealment applied by resolveConstants so disassembly comments
   // always show the plaintext value regardless of the concealConstants option.
-  _decryptConst(constants: any[], idx: number, key: number): any {
+  _decryptConst(constants: b.Constant[], idx: number, key: number): any {
     const v = constants[idx];
     if (!key) return v;
     if (typeof v === "number") return v ^ key;
@@ -3039,7 +3039,7 @@ class Serializer {
     return text;
   }
 
-  _serializeConstants(constants: any[]) {
+  _serializeConstants(constants: b.Constant[]) {
     const lines = ["var CONSTANTS = ["];
     constants.forEach((val, idx) => {
       lines.push(`  /* ${idx} */  ${this._serializeConst(val)},`);
@@ -3238,9 +3238,31 @@ export async function compileAndSerialize(
     });
   }
 
-  const timings = {};
+  function getBytecodeCounts() {
+    const counts: b.ObfuscationResult["profileData"]["transforms"][string]["bytecodeCounts"] =
+      {};
 
-  function runAndTime(pass, name) {
+    for (const instr of bytecode) {
+      if (!instr) continue;
+      for (const operand of instr) {
+        let key;
+
+        if (typeof operand === "object" && operand) {
+          key = "object:" + operand?.type;
+        } else if (operand === null) {
+          key = "null";
+        } else {
+          key = typeof operand;
+        }
+
+        counts[key] = (counts[key] || 0) + 1;
+      }
+    }
+
+    return counts;
+  }
+
+  function runAndTime(pass: b.BytecodePass, name: string) {
     const startedAt = now();
 
     compiler.log(`Running bytecode pass ${name}...`);
@@ -3250,12 +3272,11 @@ export async function compileAndSerialize(
 
     const endedAt = now();
     const elapsedMs = endedAt - startedAt;
-    timings[name] = elapsedMs;
 
     compiler.profileData.transforms[name] = {
       transformTime: elapsedMs,
       bytecodeSize: bytecode.length,
-      flatBytecodeSize: bytecode.flat().length,
+      bytecodeCounts: options.profile ? getBytecodeCounts() : null,
     };
 
     compiler.log(
@@ -3312,10 +3333,16 @@ export async function compileAndSerialize(
     generateBytecodeComment,
   );
 
-  compiler.profileData.obfuscationTime = now() - obfuscationStartedAt;
+  const profileData =
+    compiler.profileData as b.ObfuscationResult["profileData"];
+
+  profileData.inputFileSize = sourceCode.length;
+  profileData.outputFileSize = code.length;
+
+  profileData.obfuscationTime = now() - obfuscationStartedAt;
 
   return {
     code,
-    profileData: compiler.profileData as b.ObfuscationResult["profileData"],
+    profileData: profileData,
   };
 }

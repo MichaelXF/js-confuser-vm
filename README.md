@@ -702,6 +702,10 @@ Minifies the final code with Google Closure Compiler. Renames the VM class prope
 
 Prints obfuscator info useful for debugging purposes.
 
+#### `profile` (true/false)
+
+Captures a more detailed `profileData` object (slower)
+
 ### Methods
 
 #### `JSConfuserVM.obfuscate(sourceCode, options)`
