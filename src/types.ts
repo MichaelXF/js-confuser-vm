@@ -103,10 +103,13 @@ export function fnRegCountOperand(fnId: number): FnRegCountOperand {
 }
 
 export function freeRegOperand(reg: RegisterOperand): FreeRegOperand {
-  const op: FreeRegOperand = { type: "freeReg", fnId: reg.fnId, id: reg.id };
-  if (reg.kind !== undefined) op.kind = reg.kind;
-  if (reg.scopeId !== undefined) op.scopeId = reg.scopeId;
-  return op;
+  return {
+    type: "freeReg",
+    fnId: reg.fnId,
+    id: reg.id,
+    kind: reg.kind,
+    scopeId: reg.scopeId,
+  };
 }
 
 export interface ObfuscationResult {

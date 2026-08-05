@@ -102,8 +102,7 @@ export function resolveLabels(
 
   // Patch each function descriptor's startPc now that labels are resolved.
   for (const desc of compiler.fnDescriptors) {
-    desc.startPc =
-      labelToPc.get(desc.startLabel) ?? labelToPc.get(desc.entryLabel);
+    desc.startPc = labelToPc.get(desc.entryLabel);
   }
 
   return {

@@ -66,8 +66,10 @@ export interface Options {
 
   /**
    * Detects the use of debuggers by checking for >1second pauses.
+   * - May break code with slow sync tasks.
+   * - Provide a number of milliseconds to change the duration.
    */
-  timingChecks?: boolean;
+  timingChecks?: boolean | number;
 
   /**
    * Obfuscates the VM runtime classes by shuffling the order of declarations and methods.

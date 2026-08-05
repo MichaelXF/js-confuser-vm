@@ -90,7 +90,9 @@ function buildInjectedVars(body: t.Statement[]): t.Statement[] {
     // vars it would use exactly once.
     const arr = needRegs ? "regs" : "this._regs";
     const frame = needFp ? "fp" : "this._f";
-    injected.push(parseStatement(`var base = ${arr}[${frame} + SLOTS.REG_BASE];`));
+    injected.push(
+      parseStatement(`var base = ${arr}[${frame} + SLOTS.REG_BASE];`),
+    );
   }
   return injected;
 }
@@ -164,7 +166,9 @@ export function applyHandlerTable(ast: t.File, _compiler: Compiler): void {
 
   ok(handlers, "Could not find @SWITCH statement for handler table");
 
-  shuffle(handlers);
+  if (_compiler.options.shuffleOpcodes) {
+    shuffle(handlers);
+  }
 
   // Append: var VMPrototype = VM.prototype; for minification reasons
   var initStatement = parse("var VMPrototype=VM.prototype;", {

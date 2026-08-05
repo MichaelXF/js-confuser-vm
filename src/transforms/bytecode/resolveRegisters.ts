@@ -223,8 +223,6 @@ export function resolveRegisters(
     desc.regCount = regCount;
   }
 
-  compiler.mainRegCount = compiler.mainFn?.regCount ?? 0;
-
   // ── Pass 5: patch fnRegCount operands ────────────────────────────────────
   for (const instr of bc) {
     for (let i = 1; i < instr.length; i++) {

@@ -127,6 +127,9 @@ export function applyMacroOpcodes(ast: t.File, compiler: Compiler): void {
       }
     }
 
+    // Add leading comment
+    t.addComment(bodyStmts[0], "leading", ` ${newName} (macro)`, true);
+
     bodyStmts.push(t.breakStatement());
 
     (switchStatement as t.SwitchStatement).cases.push(
