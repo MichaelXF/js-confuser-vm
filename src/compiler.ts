@@ -13,6 +13,7 @@ import { resolveLabels } from "./transforms/bytecode/resolveLabels.ts";
 import { resolveRegisters } from "./transforms/bytecode/resolveRegisters.ts";
 import { resolveConstants } from "./transforms/bytecode/resolveConstants.ts";
 import { selfModifying } from "./transforms/bytecode/selfModifying.ts";
+import { encryptPatches } from "./transforms/bytecode/encryptPatches.ts";
 import { macroOpcodes } from "./transforms/bytecode/macroOpcodes.ts";
 import { specializedOpcodes } from "./transforms/bytecode/specializedOpcodes.ts";
 import { aliasedOpcodes } from "./transforms/bytecode/aliasedOpcodes.ts";
@@ -378,7 +379,6 @@ export class Compiler {
     this._pendingLabel = null;
     this._labelCount = 0;
 
-    this.serializer = new Serializer(this);
     this.MACRO_OPS = {};
     this.MICRO_OPS = {};
     this.SPECIALIZED_OPS = {};
@@ -398,6 +398,8 @@ export class Compiler {
         this.OP[key] = val;
       }
     }
+
+    this.serializer = new Serializer(this);
 
     // SENTINELS: magic values placed in argc slots to signal special call modes.
     // Default to U16_MAX (safely above any valid arg count).
@@ -2846,9 +2848,45 @@ export class Compiler {
 // Serializer
 class Serializer {
   compiler: Compiler;
+  binaryOpSymbols: Record<string, string>;
+  unaryOpSymbols: Record<string, string>;
 
   constructor(compiler: Compiler) {
     this.compiler = compiler;
+
+    // reg[dst] = reg[src1] <symbol> reg[src2]
+    this.binaryOpSymbols = {
+      ADD: "+",
+      SUB: "-",
+      MUL: "*",
+      DIV: "/",
+      MOD: "%",
+      EXP: "**",
+      BAND: "&",
+      BOR: "|",
+      BXOR: "^",
+      SHL: "<<",
+      SHR: ">>",
+      USHR: ">>>",
+      LT: "<",
+      GT: ">",
+      LTE: "<=",
+      GTE: ">=",
+      EQ: "===",
+      NEQ: "!==",
+      LOOSE_EQ: "==",
+      LOOSE_NEQ: "!=",
+      IN: "in",
+      INSTANCEOF: "instanceof",
+    };
+
+    // reg[dst] = <symbol>reg[src]
+    this.unaryOpSymbols = {
+      UNARY_NEG: "-",
+      UNARY_POS: "+",
+      UNARY_NOT: "!",
+      UNARY_BITNOT: "~",
+    };
   }
 
   get options() {
@@ -2864,10 +2902,18 @@ class Serializer {
     return this.compiler.JUMP_OPS;
   }
 
+  // Strings go through Babel so they come back as a properly escaped literal.
   _serializeConst(val: any) {
     if (val === null) return "null";
     if (val === undefined) return "undefined";
-    return JSON.stringify(val);
+    if (typeof val !== "string") return JSON.stringify(val);
+    return generate(t.stringLiteral(val)).code;
+  }
+
+  // Same escaping
+  _serializeName(val: any) {
+    const quoted = this._serializeConst(String(val));
+    return quoted.slice(1, -1);
   }
 
   // Reverse the concealment applied by resolveConstants so disassembly comments
@@ -2892,8 +2938,8 @@ class Serializer {
   }
 
   _generateComment(instr: b.Instruction) {
-    const op = instr[0] as number;
-    const operands = instr.slice(1) as number[];
+    const op = instr[0];
+    const operands = instr.slice(1);
 
     if (op === null && (operands[0] as any)?.type === "defineLabel") {
       const label = (operands[0] as any).label;
@@ -2970,12 +3016,12 @@ class Serializer {
 
         case this.OP.LOAD_GLOBAL:
           // resolvedOperands: [dst, constIdx, concealKey]
-          comment += `  reg[${dst}] = ${this._decryptConst(constants, displayOperands[1], displayOperands[2])}`;
+          comment += `  reg[${dst}] = ${this._serializeName(this._decryptConst(constants, displayOperands[1], displayOperands[2]))}`;
           break;
 
         case this.OP.STORE_GLOBAL:
           // resolvedOperands: [constIdx, concealKey, srcReg]
-          comment += `  ${this._decryptConst(constants, displayOperands[0], displayOperands[1])} = reg[${displayOperands[2]}]`;
+          comment += `  ${this._serializeName(this._decryptConst(constants, displayOperands[0], displayOperands[1]))} = reg[${displayOperands[2]}]`;
           break;
         case this.OP.LOAD_UPVALUE:
           comment += `  reg[${dst}] = upvalue[${displayOperands[1]}]`;
@@ -3017,19 +3063,76 @@ class Serializer {
           comment += `  reg[${displayOperands[0]}][reg[${displayOperands[1]}]] = reg[${displayOperands[2]}]`;
           break;
 
+        case this.OP.DELETE_PROP:
+          comment += `  reg[${dst}] = delete reg[${displayOperands[1]}][reg[${displayOperands[2]}]]`;
+          break;
+
+        case this.OP.TYPEOF:
+          comment += `  reg[${dst}] = typeof reg[${displayOperands[1]}]`;
+          break;
+        case this.OP.VOID:
+          comment += `  reg[${dst}] = void reg[${displayOperands[1]}]`;
+          break;
+        case this.OP.TYPEOF_SAFE:
+          // resolvedOperands: [dst, nameConstIdx, concealKey]
+          comment += `  reg[${dst}] = typeof ${this._serializeName(this._decryptConst(constants, displayOperands[1], displayOperands[2]))}`;
+          break;
+
+        case this.OP.THROW:
+          comment += `  reg[${displayOperands[0]}]`;
+          break;
+
+        case this.OP.JUMP:
+          comment += `  goto ${displayOperands[0]}`;
+          break;
+        case this.OP.JUMP_IF_FALSE:
+          comment += `  if (!reg[${displayOperands[0]}]) goto ${displayOperands[1]}`;
+          break;
+        case this.OP.JUMP_IF_TRUE:
+          comment += `  if (reg[${displayOperands[0]}]) goto ${displayOperands[1]}`;
+          break;
         case this.OP.JUMP_REG:
           comment += `  PC = reg[${displayOperands[0]}]`;
           break;
 
-        default:
+        case this.OP.FOR_IN_SETUP:
+          comment += `  reg[${dst}] = ForInSetup(reg[${displayOperands[1]}])`;
+          break;
+        case this.OP.FOR_IN_NEXT:
+          // resolvedOperands: [dst, iter, exitTarget]
+          comment += `  reg[${dst}] = ForInNext(reg[${displayOperands[1]}]) else goto ${displayOperands[2]}`;
+          break;
+
+        case this.OP.DEFINE_GETTER:
+        case this.OP.DEFINE_SETTER:
+          // resolvedOperands: [obj, key, fn]
+          comment += `  reg[${displayOperands[0]}][reg[${displayOperands[1]}]] = ${
+            op === this.OP.DEFINE_GETTER ? "get" : "set"
+          } reg[${displayOperands[2]}]`;
+          break;
+
+        default: {
+          const binarySymbol = this.binaryOpSymbols[name];
+          if (binarySymbol) {
+            comment += `  reg[${dst}] = reg[${displayOperands[1]}] ${binarySymbol} reg[${displayOperands[2]}]`;
+            break;
+          }
+
+          const unarySymbol = this.unaryOpSymbols[name];
+          if (unarySymbol) {
+            comment += `  reg[${dst}] = ${unarySymbol}reg[${displayOperands[1]}]`;
+            break;
+          }
+
           comment +=
             displayOperands.length === 1
               ? `  ${displayOperands[0]}`
               : `  [${displayOperands.join(", ")}]`;
+        }
       }
     }
 
-    comment = comment.padEnd(50) + sourceLocation;
+    comment = comment.padEnd(49) + " " + sourceLocation;
 
     const values = [op, ...resolvedOperands];
     const instrText = `[${values.join(", ")}]`;
@@ -3062,7 +3165,11 @@ class Serializer {
         (o) => (o as any)?.resolvedValue ?? o,
       );
 
-      const specializedOpInfo = compiler.SPECIALIZED_OPS[instr[0]];
+      // Encrypted patch regions are opaque words, not instructions — a cipher
+      // word colliding with a specialized opcode must not rename it.
+      const specializedOpInfo = (instr as any).opaque
+        ? undefined
+        : compiler.SPECIALIZED_OPS[instr[0]];
       if (specializedOpInfo) {
         const originalName = compiler.OP_NAME[specializedOpInfo.originalOp];
         compiler.OP_NAME[instr[0]] =
@@ -3304,6 +3411,13 @@ export async function compileAndSerialize(
 
   // Resolve constant references to pool indices (+ conceal key operand).
   runAndTime(resolveConstants, "resolveConstants");
+
+  // Encrypt the moved-out patch regions. Only selfModifying emits PATCH, so
+  // there is nothing to encrypt when it is off. Runs last — it needs every
+  // operand's final value.
+  if (options.selfModifying) {
+    runAndTime(encryptPatches, "encryptPatches");
+  }
 
   // Build and obfuscate the runtime.
   const runtimeSource = compiler.serializer.serialize(bytecode, compiler);
