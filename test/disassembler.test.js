@@ -42,6 +42,55 @@ test("Variant #2: Instructions without source location have no trailing loc comm
   }
 });
 
+// PC ranges
+
+test("Variant #10: Every instruction has a [startPC,endPC] range, contiguous from 0", () => {
+  var output = disassembleCommentBlock(HELLO_WORLD_BYTECODE);
+  var ranges = [...output.matchAll(/\[(\d+),(\d+)\]$/gm)].map((m) => [
+    Number(m[1]),
+    Number(m[2]),
+  ]);
+
+  expect(ranges).toHaveLength(15); // every instruction line in the block
+  expect(ranges[0][0]).toBe(0);
+  for (var i = 1; i < ranges.length; i++) {
+    expect(ranges[i][0]).toBe(ranges[i - 1][1] + 1);
+  }
+});
+
+test("Variant #11: Range width matches the instruction's slot count", () => {
+  var output = disassembleCommentBlock(HELLO_WORLD_BYTECODE);
+
+  // [47, 0, 45, 1, 3, 0, 0] MAKE_CLOSURE occupies slots 0..6
+  expect(output).toContain("[0,6]");
+  // [2, 1, 0, 0] LOAD_GLOBAL — slots 7..10, and it carries a source location
+  expect(output).toContain("// 1:0-1:7 [7,10]");
+});
+
+test("Variant #12: Derived PC of a function label matches MAKE_CLOSURE's startPc", () => {
+  var output = disassembleCommentBlock(HELLO_WORLD_BYTECODE);
+  var lines = output.split("\n");
+
+  // MAKE_CLOSURE's startPc operand for fn_2_2 is 45 in the bytecode above
+  var entryIndex = lines.findIndex((l) => l.startsWith("// fn_2_2"));
+  expect(lines[entryIndex + 1]).toContain("[45,48]");
+});
+
+test("Variant #13: Instructions with comma-named opcodes or no annotation still count toward PC", () => {
+  var block = `
+// fn_0_0:
+// [33],               UNARY_POS
+// [76, 10, 7, 0, 11], LOAD_GLOBAL,CALL  [10, 7, 0, 11]                 5:59-5:63
+// [45, 1],            RETURN  reg[1]
+`;
+  var output = disassembleCommentBlock(block);
+
+  expect(output).toContain("[0,0]"); // UNARY_POS, no annotation at all
+  expect(output).toContain("// 5:59-5:63 [1,5]"); // macro opcode, 5 slots
+  expect(output).toContain("return r1"); // and the RETURN is still placed after
+  expect(output).toContain("[6,7]");
+});
+
 // Function metadata comments
 
 test("Variant #3: Function labels referenced by MAKE_CLOSURE show parameter registers", () => {
