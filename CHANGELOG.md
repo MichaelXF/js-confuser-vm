@@ -8,16 +8,21 @@ Ideas:
 - Removal of `Upvalue._regs`
 - Header slot for PC should be XOR'ed and possibly fake header slots as an incrementing PC/only 1 register changing is easy to identity the PC (noisy registers)
 - Better reporting for transforms changes apply (such as "3 Macro Opcodes created")
-- Patch should include XOR with position dependant decryption and include fake dead patch opcodes to make static analysis fail
 
 Website Ideas:
 - Measure options for file size and performance individually and together to provide insights for docs:
 - - How much the file size increase and performance decrease will be
-- Debugger should show all registers
 - Better visualization for options bytecode and file size
 
 
 ## `0.1.5`
+
+- Improved `Self Modifying`
+- - Self Modifying `PATCH` regions now use XOR decryption to conceal the original bytecode
+- - Added fake `PATCH` regions to make static analysis harder to reconstruct the original bytecode
+
+- Added PC ranges to `JSConfuserVM.disassemble(sourceCode)`'s output
+
 
 ## `0.1.4` Flat Frame Layout
 

@@ -863,12 +863,16 @@ VM.prototype.run = function (closure, thisVal, args) {
 
         // Self-modifying bytecode
         case OP.PATCH: {
-          // destPc, sliceStart, sliceEnd
+          // destPc, sliceStart, sliceEnd, key
           var destPc = this._operand();
           var sliceStart = this._operand();
           var sliceEnd = this._operand();
+          var pk = (this._operand() ^ destPc) | 0;
           for (var pi = sliceStart; pi < sliceEnd; pi++) {
-            this.bytecode[destPc + (pi - sliceStart)] = this.bytecode[pi];
+            pk = (pk + 0x9e3779b9) | 0;
+            // >>> 0: a negative slot would never match a case in the switch.
+            this.bytecode[destPc + (pi - sliceStart)] =
+              (this.bytecode[pi] ^ (pk ^ (pk >>> 13))) >>> 0;
           }
           break;
         }
