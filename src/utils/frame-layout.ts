@@ -53,6 +53,8 @@ export interface FrameLayout {
 // Only a random subset is provisioned per build. A decoy that wasn't picked is
 // simply missing from SLOTS, so its runtime block reads `typeof undefined ===
 // "number"` and classObfuscation / minify drop it.
+export const NOISE_SLOT_PREFIX = "NOISE_";
+
 const PUSH_NOISE_SLOT_NAMES = ["NOISE_END", "NOISE_PARAMS", "NOISE_ARGS"];
 const DISPATCH_NOISE_SLOT_NAMES = [
   "NOISE_PC",

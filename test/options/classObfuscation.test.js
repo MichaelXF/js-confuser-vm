@@ -1,3 +1,7 @@
+import { parse } from "@babel/parser";
+import { generate } from "@babel/generator";
+import { Compiler } from "../../src/compiler.ts";
+import { applyClassObfuscation } from "../../src/transforms/runtime/classObfuscation.ts";
 import { evalCode, obfuscate } from "../test-utils.js";
 
 // Strips `//` line comments so assertions only see real code
@@ -99,7 +103,48 @@ test("Variant #3: Combined with encodeBytecode, still inlines and executes corre
   expect(result).toEqual("Correct Value");
 });
 
-test("Variant #4: Works with the full opcode-obfuscation stack", async () => {
+test("Variant #4: Statement shuffling keeps a prototype alias ahead of its uses", () => {
+  // handlerTable's shape: an alias declaration followed by assignments through
+  // it. Shuffling one of those assignments above the declaration would produce
+  // `undefined[0] = ...` at load time.
+  const source = `
+    function VM(a) { this.x = a; }
+    VM.prototype.run = function () { return this.x; };
+    var VMPrototype = VM.prototype;
+    ${Array.from(
+      { length: 12 },
+      (_, i) => `VMPrototype[${i}] = function () { return ${i}; };`,
+    ).join("\n")}
+    /* @BOOT */
+    var vm = new VM(1);
+  `;
+
+  for (let round = 0; round < 10; round++) {
+    const ast = parse(source, { sourceType: "unambiguous" });
+    applyClassObfuscation(ast, new Compiler());
+
+    const code = generate(ast).code;
+    const declAt = code.indexOf("var VMPrototype =");
+    const firstUseAt = code.indexOf("VMPrototype[");
+
+    expect(declAt).toBeGreaterThanOrEqual(0);
+    expect(firstUseAt).toBeGreaterThan(declAt);
+  }
+});
+
+test("Variant #5: handlerTable's handler table is assigned after its alias", async () => {
+  const { code } = await obfuscate(`window.TEST_OUTPUT = 6 * 7;`, {
+    classObfuscation: true,
+    handlerTable: true,
+  });
+
+  expect(code.indexOf("VMPrototype[")).toBeGreaterThan(
+    code.indexOf("var VMPrototype ="),
+  );
+  expect(await evalCode(code)).toEqual(42);
+});
+
+test("Variant #6: Works with the full opcode-obfuscation stack", async () => {
   const sourceCode = `
     function fib(n) {
       var a = 0, b = 1, c = n;

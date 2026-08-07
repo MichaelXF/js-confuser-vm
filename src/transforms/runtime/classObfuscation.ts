@@ -9,6 +9,7 @@ import {
   chance,
 } from "../../utils/random-utils.ts";
 import { createNameGenerator } from "../../utils/name-utilts.ts";
+import { NOISE_SLOT_PREFIX } from "../../utils/frame-layout.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -25,9 +26,9 @@ const traverse = (traverseImport.default ||
 // reference that doesn't provably satisfy this aborts inlining for that
 // object entirely; nothing is partially rewritten.
 //
-// A statically-known key the object doesn't have reads as `undefined`, so it
-// inlines to `void 0` rather than aborting — that is how the optional NOISE_*
-// frame slots switch their runtime blocks off.
+// The one exception is a missing NOISE_* key: those frame slots are optional by
+// design, so they inline to `void 0` instead of aborting, which is what switches
+// their runtime blocks off. Any other missing key is a typo, and still aborts.
 
 type LiteralNode =
   | t.NumericLiteral
@@ -114,6 +115,8 @@ function inlineObjectBinding(
           ? member.property.value
           : null;
     if (propName === null) return; // computed key — the property read is unknowable
+    if (!propMap.has(propName) && !propName.startsWith(NOISE_SLOT_PREFIX))
+      return; // missing key that isn't an optional frame slot — abort
 
     const parent = memberPath.parentPath;
     if (
@@ -696,17 +699,42 @@ function hasComment(node: t.Node, text: string): boolean {
   return all.some((c) => c.value.includes(text));
 }
 
-function isPrototypeAssignment(stmt: t.Statement): boolean {
+// Names bound by `var VMPrototype = VM.prototype;` — handlerTable writes its
+// handler table through an alias like this, so assignments through one have to
+// be grouped with the other prototype methods (below) rather than left in the
+// declaration group alongside the alias they depend on.
+function collectPrototypeAliases(body: t.Statement[]): Set<string> {
+  const aliases = new Set<string>();
+  for (const stmt of body) {
+    if (!t.isVariableDeclaration(stmt)) continue;
+    for (const decl of stmt.declarations) {
+      const init = decl.init;
+      if (
+        t.isIdentifier(decl.id) &&
+        t.isMemberExpression(init) &&
+        !init.computed &&
+        t.isIdentifier(init.property, { name: "prototype" })
+      ) {
+        aliases.add(decl.id.name);
+      }
+    }
+  }
+  return aliases;
+}
+
+function isPrototypeAssignment(
+  stmt: t.Statement,
+  aliases: Set<string>,
+): boolean {
   if (!t.isExpressionStatement(stmt)) return false;
   const expr = stmt.expression;
   if (!t.isAssignmentExpression(expr)) return false;
   const left = expr.left;
+  if (!t.isMemberExpression(left)) return false;
+  if (t.isIdentifier(left.object) && aliases.has(left.object.name)) return true;
   return (
-    t.isMemberExpression(left) &&
     t.isMemberExpression(left.object) &&
-    t.isIdentifier((left.object as t.MemberExpression).property, {
-      name: "prototype",
-    })
+    t.isIdentifier(left.object.property, { name: "prototype" })
   );
 }
 
@@ -723,14 +751,15 @@ function shuffleStatementOrder(ast: t.File): void {
 
   // Partition the shufflable section into two independent groups.
   // Group A: variable/function declarations (constructors, standalone vars).
-  // Group B: prototype method assignments (X.prototype.Y = ...).
+  // Group B: prototype method assignments (X.prototype.Y = ..., alias[K] = ...).
   // Both groups are shuffled independently; A always precedes B so that
-  // constructors are defined before methods reference them.
+  // constructors and prototype aliases are defined before methods reference them.
+  const aliases = collectPrototypeAliases(body);
   const varDecls: t.Statement[] = [];
   const methodDefs: t.Statement[] = [];
 
   for (const stmt of shufflable) {
-    if (isPrototypeAssignment(stmt)) {
+    if (isPrototypeAssignment(stmt, aliases)) {
       methodDefs.push(stmt);
     } else {
       varDecls.push(stmt);
