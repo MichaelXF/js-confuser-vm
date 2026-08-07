@@ -15,7 +15,7 @@ Website Ideas:
 - Better visualization for options bytecode and file size
 
 
-## `0.1.5`
+## `0.1.5` Updates
 
 - Improved `Self Modifying`
 - - Self Modifying `PATCH` regions now use XOR decryption to conceal the original bytecode

@@ -13,7 +13,7 @@ import { applyClassObfuscation } from "./transforms/runtime/classObfuscation.ts"
 import { applyHandlerTable } from "./transforms/runtime/handlerTable.ts";
 import type * as b from "./types.ts";
 import { getSwitchStatement } from "./utils/ast-utils.ts";
-import { now } from "./utils/profile-utils.ts";
+import { getByteSize, now } from "./utils/profile-utils.ts";
 
 export async function buildRuntime(
   runtime: string,
@@ -45,7 +45,7 @@ export async function buildRuntime(
     const elapsedMs = endedAt - startedAt;
 
     compiler.profileData.transforms[name] = {
-      fileSize: options.profile ? generate(ast).code.length : null, // 'generate(ast).code.length' is slow
+      fileSize: options.profile ? getByteSize(generate(ast).code) : null, // 'generate(ast).code' is slow
       transformTime: elapsedMs,
       handlerCount: getHandlerCount(),
     };

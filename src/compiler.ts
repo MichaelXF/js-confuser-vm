@@ -24,7 +24,7 @@ import { concealConstants } from "./transforms/bytecode/concealConstants.ts";
 import { dispatcher } from "./transforms/bytecode/dispatcher.ts";
 import { controlFlowFlattening } from "./transforms/bytecode/controlFlowFlattening.ts";
 import { stringConcealing } from "./transforms/bytecode/stringConcealing.ts";
-import { now } from "./utils/profile-utils.ts";
+import { getByteSize, now } from "./utils/profile-utils.ts";
 import { walkHoistScope } from "./utils/ast-utils.ts";
 import { createFrameLayout, type FrameLayout } from "./utils/frame-layout.ts";
 
@@ -3446,8 +3446,8 @@ export async function compileAndSerialize(
   const profileData =
     compiler.profileData as b.ObfuscationResult["profileData"];
 
-  profileData.inputFileSize = sourceCode.length;
-  profileData.outputFileSize = code.length;
+  profileData.inputFileSize = getByteSize(sourceCode);
+  profileData.outputFileSize = getByteSize(code);
 
   profileData.obfuscationTime = now() - obfuscationStartedAt;
 
