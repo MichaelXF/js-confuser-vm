@@ -6,7 +6,9 @@ Ideas:
 - Handler records as reserved slots: Removal of handler stack object `{handlerPc,exceptionReg}`
 - Flat upvalue records: replace the Upvalue object with a 2-element `[absSlot, value]` array
 - Removal of `Upvalue._regs`
-- Header slot for PC should be XOR'ed and possibly fake header slots as an incrementing PC/only 1 register changing is easy to identity the PC (noisy registers)
+- Header slot for PC should be XOR'ed
+- Memory protection: Registers should be XOR'ed (strings and numbers) with another register (such as a neighbor or deterministic slot) to conceal the runtime values from debuggers. The data can be decrypted at runtime during the opcode handlers, and re-encrypted upon write.
+
 - Better reporting for transforms changes apply (such as "3 Macro Opcodes created")
 
 Website Ideas:
@@ -19,14 +21,18 @@ Website Ideas:
 
 - Improved `Self Modifying`
 - - Self Modifying `PATCH` regions now use XOR decryption to conceal the original bytecode
-- - Added fake `PATCH` regions to make static analysis harder to reconstruct the original bytecode
+- - Added fake `PATCH` regions to make it harder for static analysis to reconstruct the original bytecode
 
 - Added PC ranges to `JSConfuserVM.disassemble(sourceCode)`'s output
+
+- Improved the VM's frame layout
+- - Added decoy header slots when you have `randomizeOpcodes` enabled
+- - These noisy registers help conceal the meaningful header slots (such as the PC) and change in realistic ways
 
 
 ## `0.1.4` Flat Frame Layout
 
-- Improved the VM's frame layout 
+- Improved the VM's frame layout
 - - The frame layout is now stored as headers slots in registers 
 - - The `Frame` class is now removed and the PC lives in a header slot, making debugging through DevTools harder
 - - When you have `randomizeOpcodes` enabled, this layout is also randomized each build

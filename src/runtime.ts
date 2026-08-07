@@ -6,16 +6,7 @@ const CONSTANTS = [];
 const ENCODE_BYTECODE = false;
 const TIMING_CHECKS = false;
 const SENTINELS = { CALL_SPREAD: 0 };
-const SLOTS = {
-  PC: 0,
-  CALLER: 0,
-  RET_DST: 0,
-  THIS: 0,
-  CLOSURE: 0,
-  HANDLERS: 0,
-  FRAME_SIZE: 0,
-  REG_BASE: 0,
-};
+const SLOTS: Record<string, number> = {};
 const HEADER_SIZE = 0;
 const FRAME_START = 0;
 // The text above is not included in the compiled output - for type intellisense only
@@ -136,6 +127,18 @@ VM.prototype._pushFrame = function (closure, args, thisVal, retDst) {
   regs[fp + SLOTS.CLOSURE] = closure;
   regs[fp + SLOTS.FRAME_SIZE] = size;
   regs[fp + SLOTS.REG_BASE] = base;
+
+  // Seeds for the decoy header slots this build happens to have (see utils/frame-layout.ts)
+  /* @NOISE */
+  if (typeof SLOTS.NOISE_END === "number") regs[fp + SLOTS.NOISE_END] = end;
+  if (typeof SLOTS.NOISE_PARAMS === "number")
+    regs[fp + SLOTS.NOISE_PARAMS] = fn.paramCount;
+  if (typeof SLOTS.NOISE_ARGS === "number") regs[fp + SLOTS.NOISE_ARGS] = args;
+  if (typeof SLOTS.NOISE_PC === "number")
+    regs[fp + SLOTS.NOISE_PC] = fn.startPc;
+  if (typeof SLOTS.NOISE_COUNTER === "number")
+    regs[fp + SLOTS.NOISE_COUNTER] = 0;
+
   this._regsTop = end;
 
   if (args) {
@@ -238,6 +241,17 @@ VM.prototype.run = function (closure, thisVal, args) {
     var op = this.bytecode[pc];
     // var opcode = this.bytecode[pc];
     // console.log(`[run] pc=${pc}, opcode=${opcode}, name=${Object.keys(OP).find((key) => OP[key] === opcode)}`);
+
+    // Churn the decoy header slots so the real PC isn't the only slot moving
+    /* @NOISE */
+    if (typeof SLOTS.NOISE_PC === "number")
+      regs[fp + SLOTS.NOISE_PC] = (regs[fp + SLOTS.NOISE_PC] + 1) % bc.length;
+    if (typeof SLOTS.NOISE_COUNTER === "number")
+      regs[fp + SLOTS.NOISE_COUNTER]++;
+    if (typeof SLOTS.NOISE_MIRROR === "number")
+      regs[fp + SLOTS.NOISE_MIRROR] = op;
+    if (typeof SLOTS.NOISE_ACC === "number")
+      regs[fp + SLOTS.NOISE_ACC] = (regs[fp + SLOTS.NOISE_ACC] ^ pc) | 0;
 
     // Debugging protection: Detects debugger by checking for >1s pauses which can only happen from debugger; or extremely slow sync tasks
     if (TIMING_CHECKS) {

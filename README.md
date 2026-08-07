@@ -146,6 +146,7 @@ new Uint32Array(R.length/4),W=0;W<Ka.length;W++)Ka[W]=(R[W*4]|R[W*4+1]<<8|R[W*4+
 ### Hardening
 
 - [x] opcode randomization per build
+- [x] decoy frame header slots ("noisy registers")
 - [x] property name concealment of vm internals
 - - Google Closure Compiler aggressively renames our class props
 - [x] shuffled handler order

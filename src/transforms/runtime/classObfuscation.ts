@@ -24,6 +24,10 @@ const traverse = (traverseImport.default ||
 // other expression (`Object.keys(OP)`, spread, `typeof OP`, etc.). Any
 // reference that doesn't provably satisfy this aborts inlining for that
 // object entirely; nothing is partially rewritten.
+//
+// A statically-known key the object doesn't have reads as `undefined`, so it
+// inlines to `void 0` rather than aborting — that is how the optional NOISE_*
+// frame slots switch their runtime blocks off.
 
 type LiteralNode =
   | t.NumericLiteral
@@ -109,7 +113,7 @@ function inlineObjectBinding(
         : member.computed && t.isStringLiteral(member.property)
           ? member.property.value
           : null;
-    if (propName === null || !propMap.has(propName)) return; // dynamic/unknown access
+    if (propName === null) return; // computed key — the property read is unknowable
 
     const parent = memberPath.parentPath;
     if (
@@ -122,7 +126,11 @@ function inlineObjectBinding(
       return; // mutated through a member access — unsafe, abort entirely
     }
 
-    replacements.push({ path: memberPath, value: propMap.get(propName)! });
+    replacements.push({
+      path: memberPath,
+      value:
+        propMap.get(propName) ?? t.unaryExpression("void", t.numericLiteral(0)),
+    });
   }
 
   for (const { path, value } of replacements) {
