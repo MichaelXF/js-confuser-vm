@@ -4,16 +4,10 @@ import traverseImport from "@babel/traverse";
 import { ok } from "assert";
 import { Compiler } from "../../compiler.ts";
 import { shuffle } from "../../utils/random-utils.ts";
+import { parseStatement } from "../../utils/ast-utils.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
-
-// Parse a single statement from source. Preferred over hand-building deep AST
-// (t.variableDeclaration([t.variableDeclarator(...)])) — it keeps the injected
-// runtime snippets readable and easy to change. Build-time perf is irrelevant.
-function parseStatement(code: string): t.Statement {
-  return parse(code, { sourceType: "script" }).program.body[0] as t.Statement;
-}
 
 function hasComment(node: t.Node, text: string): boolean {
   return ((node as any).leadingComments ?? []).some((c: t.Comment) =>

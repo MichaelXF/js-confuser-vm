@@ -60,6 +60,30 @@ export interface Options {
   antiInstrumentation?: boolean;
 
   /**
+   * Rewrites integer operations into Mixed Boolean-Arithmetic (MBA) expressions,
+   * so `a + b` becomes a nested mixture of arithmetic and bitwise steps that
+   * static devirtualizers cannot pattern-match back to an operator.
+   *
+   * Applies to two groups:
+   * - Bitwise operations (`& | ^ << >>`, `~`), which JavaScript already defines
+   *   as int32 — always safe, no assumptions about your code.
+   * - Integer `+`, `-`, unary `-` and comparisons, but only where a type
+   *   analysis can prove both operands are integers.
+   *
+   * ⚠️ Assumes int32 wrap-around. The one behavioural difference is that an
+   * integer result beyond ±2^31 wraps instead of staying exact:
+   * `2000000000 + 2000000000` yields `-294967296` rather than `4000000000`.
+   * Everything the analysis cannot prove integral is left untouched.
+   *
+   * Escape hatches, as comments on any function or statement:
+   * ```js
+   * \/* @js-confuser-vm-no-mba *\/  // exclude this subtree entirely
+   * \/* @js-confuser-vm-int *\/     // assert this function's params are integers
+   * ```
+   */
+  mba?: boolean;
+
+  /**
    * Function bodies are replaced upon runtime entry to the real bytecode.
    */
   selfModifying?: boolean;

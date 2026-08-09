@@ -11,6 +11,7 @@ import { applyAliasedOpcodes } from "./transforms/runtime/aliasedOpcodes.ts";
 import { applyAntiInstrumentation } from "./transforms/runtime/antiInstrumentation.ts";
 import { applyClassObfuscation } from "./transforms/runtime/classObfuscation.ts";
 import { applyHandlerTable } from "./transforms/runtime/handlerTable.ts";
+import { applyMBAOpcodes } from "./transforms/runtime/mbaOpcodes.ts";
 import type * as b from "./types.ts";
 import { getSwitchStatement } from "./utils/ast-utils.ts";
 import { getByteSize, now } from "./utils/profile-utils.ts";
@@ -53,6 +54,11 @@ export async function buildRuntime(
     compiler.log(
       `Runtime pass ${name} completed in ${Math.floor(elapsedMs)}ms`,
     );
+  }
+
+  // MBA handler cases must be applied BEFORE shuffleOpcodes
+  if (options.mba) {
+    runAndTime(applyMBAOpcodes, "applyMBAOpcodes");
   }
 
   // Specialized opcode cases must be applied BEFORE shuffleOpcodes

@@ -43,8 +43,13 @@ const OPTIONS_MATRIX = [
     VM_OPTIONS: { handlerTable: true },
   },
   {
+    displayName: "mba",
+    VM_OPTIONS: { mba: true },
+  },
+  {
     displayName: "all",
     VM_OPTIONS: {
+      mba: true,
       randomizeOpcodes: true,
       shuffleOpcodes: true,
       encodeBytecode: true,

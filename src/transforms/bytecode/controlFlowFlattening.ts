@@ -39,6 +39,31 @@
 //    The Template's `state` register is extracted via compileInline() so that
 //    block bodies can write state transitions to it.
 //
+// 3b. Every arithmetic and comparison step above is then rewritten through MBA
+//    (see utils/mba-utils.ts), so what actually reaches the bytecode is closer
+//    to:
+//
+//      while (!(((state ^ E) | -(state ^ E)) >>> 31)) { ... }   // state !== E
+//      c = ((c & ~state) | (c & state)) ...                     // c = s0
+//      if (!((state ^ c) | -(state ^ c))) _VM_JUMP_(...)        // state === c
+//
+//    Two properties are being bought here, and the second is the point:
+//
+//      • no EQ / NEQ instruction is left anywhere in the dispatch loop.  A
+//        static devirtualizer dissolves flattening by collecting the registers
+//        that get compared for equality and specialising each program point per
+//        constant value of those registers.  With no equality operator to key
+//        on, every incoming edge merges instead, `state` widens to UNKNOWN, and
+//        the dispatch loop is reproduced verbatim rather than unflattened.
+//
+//      • state constants stop being readable.  `c = s0` becomes an identity
+//        expansion of s0 over a LIVE register, so constant propagation widens
+//        it instead of recovering the block's state value.
+//
+//    All of this is exact: every state, sentinel and delta is a compiler-chosen
+//    u16, so the int32 precondition mba-utils documents holds by construction —
+//    no type analysis of user code is involved.
+//
 // 4. Block bodies are emitted with their original instructions.  Terminators
 //    are rewritten.  Each transition is RELATIVE: when a block runs, the state
 //    register still holds that block's own dispatch value, so the target is
@@ -86,11 +111,48 @@ import { U16_MAX } from "../../utils/op-utils.ts";
 import { Template } from "../../template.ts";
 import {
   ref,
-  allocReg,
   buildMaxIdMap,
   forEachFunction,
   extractLabel,
 } from "../../utils/pass-utils.ts";
+import {
+  createMBAEmitContext,
+  emitMBA,
+  mNum,
+  mVar,
+  mbaAddExpr,
+  mbaConstExpr,
+  mbaEqExpr,
+  mbaNeExpr,
+  mbaOpaqueFalse,
+  mbaOpaqueTrue,
+  mbaSubExpr,
+  printMBA,
+  type MBAEmitContext,
+  type MBAOptions,
+} from "../../utils/mba-utils.ts";
+
+// ── MBA configuration ────────────────────────────────────────────────────────
+// Every value the state machine touches (block states, the endState sentinel,
+// every delta) is a compiler-chosen u16, so the whole state layer is int32 by
+// construction and satisfies mba-utils' correctness contract with no analysis.
+//
+// Depth is the one knob with a real cost: each level multiplies the node count,
+// and the dispatch chain expands two expressions per arm through Template —
+// whose registers this pass pins wholesale, so they never share slots.  Depth 2
+// already puts a nested mixture in front of every comparison; going deeper buys
+// far less than entangling more registers does (see mba-utils' header).
+
+// `state` and `c` are the dispatch loop's own registers.  Using them as noise
+// operands is what makes the expansion bite: the result carries a manufactured
+// data dependency on a live register, so a lifter cannot fold the arm away
+// without first proving that dependency irrelevant.
+const MBA_DISPATCH: MBAOptions = { depth: 2, noise: ["state", "c"] };
+
+// Per-transition MBA, emitted straight to bytecode.  The scratch pool is
+// indexed by tree HEIGHT and shared across every transition in a function, so
+// this costs a handful of registers no matter how many blocks there are.
+const MBA_TRANSITION: MBAOptions = { depth: 2, noise: ["state"] };
 
 // ── Basic block splitting ────────────────────────────────────────────────────
 
@@ -342,21 +404,46 @@ function buildDispatchTemplate(
     [chainOrder[i], chainOrder[j]] = [chainOrder[j], chainOrder[i]];
   }
 
+  // Every arm is emitted through MBA (see MBA_DISPATCH above):
+  //
+  //   • the accumulator seed `c = s0`   → an identity expansion of s0 over a
+  //     live register, so the literal never appears and a lifter widens it to
+  //     UNKNOWN instead of reading the block's state value straight off;
+  //   • each `c += delta`               → an add identity;
+  //   • each `state === c` test         → a difference (`^` or `-`) fed to a
+  //     zero test built from `>>> 31` / logical `!`.
+  //
+  // The comparison rewrite is the one that matters most.  A static lifter
+  // dissolves flattening by noticing which registers are compared for equality
+  // and then specialising each program point per constant value of those
+  // registers — with no equality/inequality operator left anywhere in the
+  // dispatch loop there is nothing to key that specialisation on, every
+  // incoming edge merges, `state` widens to UNKNOWN, and the flattened state
+  // machine survives devirtualization intact.
   const cases: string[] = [];
   let prevState = chainOrder[0].stateValue;
-  cases.push(`c = ${prevState};`);
-  cases.push(`if (state === c) _VM_JUMP_("${chainOrder[0].label}");`);
+  const armTest = (label: string) =>
+    `if (${printMBA(mbaEqExpr(mVar("state"), mVar("c"), MBA_DISPATCH))}) _VM_JUMP_("${label}");`;
+
+  cases.push(`c = ${printMBA(mbaConstExpr(prevState, MBA_DISPATCH))};`);
+  cases.push(armTest(chainOrder[0].label));
   for (let i = 1; i < chainOrder.length; i++) {
     const delta = chainOrder[i].stateValue - prevState;
-    cases.push(delta >= 0 ? `c += ${delta};` : `c -= ${-delta};`);
-    cases.push(`if (state === c) _VM_JUMP_("${chainOrder[i].label}");`);
+    // Deltas stay non-negative in the emitted literal (ADD vs SUB) exactly as
+    // before — LOAD_INT operands are unsigned and every magnitude is <= U16_MAX.
+    const step =
+      delta >= 0
+        ? mbaAddExpr(mVar("c"), mNum(delta), MBA_DISPATCH)
+        : mbaSubExpr(mVar("c"), mNum(-delta), MBA_DISPATCH);
+    cases.push(`c = ${printMBA(step)};`);
+    cases.push(armTest(chainOrder[i].label));
     prevState = chainOrder[i].stateValue;
   }
 
   const source = `
     var state = ${startState};
     var c = 0;
-    while (state !== ${endState}) {
+    while (${printMBA(mbaNeExpr(mVar("state"), mNum(endState), MBA_DISPATCH))}) {
       ${cases.join("\n      ")}
     }
   `;
@@ -422,24 +509,33 @@ function buildDispatchTemplate(
 // the CFG.  The delta is applied with additive operators only: a non-negative
 // delta is an ADD, a negative one a SUB of its magnitude (so the loaded operand
 // always stays within the unsigned u16 range LOAD_INT requires — no masking).
+//
+// The add/sub is then expanded through MBA over `state` itself, so the update
+// reads as a mixture of bitwise and arithmetic steps on a register rather than
+// a legible `state = state + <literal>`.  mba-utils truncates the result back
+// to int32, which is exact here because every state and delta is a u16.
 function emitStateTransition(
   out: Bytecode,
   rState: RegisterOperand,
-  rDelta: RegisterOperand,
   currentState: number,
   targetState: number,
   loopTopLabel: string,
   compiler: Compiler,
+  mba: MBAEmitContext,
 ): void {
   const OP = compiler.OP;
   const delta = targetState - currentState;
-  out.push([OP.LOAD_INT!, ref(rDelta), Math.abs(delta)]);
-  out.push([
-    delta >= 0 ? OP.ADD! : OP.SUB!,
-    ref(rState),
-    ref(rState),
-    ref(rDelta),
-  ]);
+  const env = new Map([["state", rState]]);
+  const expr =
+    delta >= 0
+      ? mbaAddExpr(mVar("state"), mNum(delta), MBA_TRANSITION)
+      : mbaSubExpr(mVar("state"), mNum(-delta), MBA_TRANSITION);
+
+  // emitMBA reads `state` while computing into scratch; the write lands only
+  // once the whole expression has been evaluated, so using `state` as its own
+  // noise operand is safe.
+  const result = emitMBA(out, expr, env, mba);
+  out.push([OP.MOVE!, ref(rState), ref(result)]);
   out.push([OP.JUMP!, { type: "label", label: loopTopLabel }]);
 }
 
@@ -487,10 +583,10 @@ function emitFakeBlock(
   out: Bytecode,
   block: BasicBlock,
   rState: RegisterOperand,
-  rDelta: RegisterOperand,
   targetStates: number[],
   loopTopLabel: string,
   compiler: Compiler,
+  mba: MBAEmitContext,
 ): void {
   const OP = compiler.OP;
 
@@ -499,42 +595,57 @@ function emitFakeBlock(
     emitStateTransition(
       out,
       rState,
-      rDelta,
       block.stateValue,
       choice(targetStates),
       loopTopLabel,
       compiler,
+      mba,
     );
     return;
   }
 
-  // Two-way fork
+  // Two-way fork, gated on an OPAQUE PREDICATE.
+  //
+  // The predicate's value is fixed — it is an MBA identity that evaluates the
+  // same for every possible input — but it is computed FROM `state`, so its
+  // value cannot be read off statically.  A lifter's constant propagation
+  // widens it to UNKNOWN and has to emit both arms, which is the point: a fake
+  // block stops being distinguishable from a real branch.
+  //
+  // Correctness is trivial here regardless of which arm runs: this is a dead
+  // block, and both arms are ordinary state transitions.
   const skipLabel = compiler._makeLabel("cff_skip");
-  out.push([OP.LOAD_INT!, ref(rDelta), getRandomInt(0, U16_MAX)]);
-  out.push([OP.LT!, ref(rDelta), ref(rState), ref(rDelta)]);
+  const predicate = emitMBA(
+    out,
+    chance(50)
+      ? mbaOpaqueTrue(mVar("state"), MBA_TRANSITION)
+      : mbaOpaqueFalse(mVar("state"), MBA_TRANSITION),
+    new Map([["state", rState]]),
+    mba,
+  );
   out.push([
     OP.JUMP_IF_TRUE!,
-    ref(rDelta),
+    ref(predicate),
     { type: "label", label: skipLabel },
   ]);
   emitStateTransition(
     out,
     rState,
-    rDelta,
     block.stateValue,
     choice(targetStates),
     loopTopLabel,
     compiler,
+    mba,
   );
   out.push([null, { type: "defineLabel", label: skipLabel }]);
   emitStateTransition(
     out,
     rState,
-    rDelta,
     block.stateValue,
     choice(targetStates),
     loopTopLabel,
     compiler,
+    mba,
   );
 }
 
@@ -601,11 +712,12 @@ function processFunctionBlock(
   );
   const { rState, loopTopLabel, loopExitLabel } = dispatch;
 
-  // Scratch register holding the per-transition delta.  allocReg yields a
-  // "local::" register (the same pool pinned dispatch registers use), so it is
-  // never slot-reused across blocks.  It is rewritten before every use, so a
-  // single register is safely shared by all transitions.
-  const rDelta = allocReg(fnId, maxId);
+  // Shared MBA scratch pool for every transition in this function.  Registers
+  // are indexed by expression HEIGHT and rewritten before each read, so the
+  // whole function needs only a handful regardless of block count.  Pinned for
+  // the same reason the dispatch registers are: resolveRegisters' linear scan
+  // cannot see the loop back-edges this pass introduces.
+  const mba = createMBAEmitContext(compiler, fnId, maxId, true);
 
   // 3. Pre-compute all state mappings BEFORE shuffle
   // These maps capture the correct stateValues while the blocks array is
@@ -654,10 +766,10 @@ function processFunctionBlock(
         out,
         block,
         rState,
-        rDelta,
         fakeTargetStates,
         loopTopLabel,
         compiler,
+        mba,
       );
       continue;
     }
@@ -670,8 +782,21 @@ function processFunctionBlock(
     // the jump target, so seeding it is sufficient.)  When the block is instead
     // reached through the dispatcher, state already equals blockState and this
     // write is a harmless no-op.
+    //
+    // The seed is emitted as an identity expansion of the block's state value
+    // over the CURRENT contents of `state` (always a valid u16 — the dispatch
+    // template seeds it at function entry and every transition truncates back
+    // to int32).  The value is the same for any input, but it now depends on a
+    // runtime register, so the literal never appears in the instruction stream
+    // and a lifter's constant propagation widens it to UNKNOWN.
     if (directEntryLabels.has(block.label)) {
-      out.push([OP.LOAD_INT!, ref(rState), block.stateValue]);
+      const seed = emitMBA(
+        out,
+        mbaConstExpr(block.stateValue, MBA_TRANSITION),
+        new Map([["state", rState]]),
+        mba,
+      );
+      out.push([OP.MOVE!, ref(rState), ref(seed)]);
     }
 
     // Block body
@@ -685,11 +810,11 @@ function processFunctionBlock(
       emitStateTransition(
         out,
         rState,
-        rDelta,
         block.stateValue,
         fallthroughStateMap.get(origIdx)!,
         loopTopLabel,
         compiler,
+        mba,
       );
     } else if (term[0] === OP.RETURN || term[0] === OP.THROW) {
       // Exits the frame — emit as-is
@@ -702,11 +827,11 @@ function processFunctionBlock(
           emitStateTransition(
             out,
             rState,
-            rDelta,
             block.stateValue,
             targetState,
             loopTopLabel,
             compiler,
+            mba,
           );
         } else {
           // Target outside this function's blocks — keep original
@@ -737,21 +862,21 @@ function processFunctionBlock(
           emitStateTransition(
             out,
             rState,
-            rDelta,
             block.stateValue,
             targetState,
             loopTopLabel,
             compiler,
+            mba,
           );
           out.push([null, { type: "defineLabel", label: skipLabel }]);
           emitStateTransition(
             out,
             rState,
-            rDelta,
             block.stateValue,
             fallthroughStateMap.get(origIdx)!,
             loopTopLabel,
             compiler,
+            mba,
           );
         } else {
           out.push(term);
@@ -781,21 +906,21 @@ function processFunctionBlock(
           emitStateTransition(
             out,
             rState,
-            rDelta,
             block.stateValue,
             targetState,
             loopTopLabel,
             compiler,
+            mba,
           );
           out.push([null, { type: "defineLabel", label: skipLabel }]);
           emitStateTransition(
             out,
             rState,
-            rDelta,
             block.stateValue,
             fallthroughStateMap.get(origIdx)!,
             loopTopLabel,
             compiler,
+            mba,
           );
         } else {
           out.push(term);

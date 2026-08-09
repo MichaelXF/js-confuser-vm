@@ -1,8 +1,16 @@
 import * as t from "@babel/types";
+import { parse } from "@babel/parser";
 import traverseImport from "@babel/traverse";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
+
+// Parse a single statement from source. Preferred over hand-building deep AST
+// (t.variableDeclaration([t.variableDeclarator(...)])) — it keeps the injected
+// runtime snippets readable and easy to change. Build-time perf is irrelevant.
+export function parseStatement(code: string): t.Statement {
+  return parse(code, { sourceType: "script" }).program.body[0] as t.Statement;
+}
 
 // Recursively visits every statement reachable from `stmts` within the current
 // function scope — traversing into blocks, if branches, loop bodies, switch

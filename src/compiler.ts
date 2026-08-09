@@ -22,6 +22,9 @@ import { getRandomInt } from "./utils/random-utils.ts";
 import { U16_MAX, U32_MAX } from "./utils/op-utils.ts";
 import { concealConstants } from "./transforms/bytecode/concealConstants.ts";
 import { dispatcher } from "./transforms/bytecode/dispatcher.ts";
+import { mbaExpand } from "./transforms/bytecode/mbaExpand.ts";
+import { analyzeIntTypes } from "./analysis/int-types.ts";
+import type { MBAExpr } from "./utils/mba-utils.ts";
 import { controlFlowFlattening } from "./transforms/bytecode/controlFlowFlattening.ts";
 import { stringConcealing } from "./transforms/bytecode/stringConcealing.ts";
 import { getByteSize, now } from "./utils/profile-utils.ts";
@@ -344,6 +347,26 @@ export class Compiler {
     number,
     { originalOp: number; stmtIndex: number; irOperandCount: number }
   >;
+  // Generated MBA handler opcodes. The expression is built by the mbaExpand
+  // bytecode pass and lowered to a handler body by the mbaOpcodes runtime pass;
+  // this is only the registry the two halves meet in, exactly like MACRO_OPS.
+  MBA_OPS: Record<
+    number,
+    {
+      originalOp: number;
+      arity: number;
+      expr: MBAExpr;
+      /** Tier 0: coerce operands with `~~` before the identity runs. */
+      normalize: boolean;
+      /**
+       * When non-null, this handler is FRAME-BOUND: the runtime pass bakes in
+       * the modular inverse of this function's register count, so the handler
+       * only computes the right answer inside a frame with that count. Null
+       * means a generic handler, correct in any frame.
+       */
+      fnId: number | null;
+    }
+  >;
 
   OP_NAME: Record<number, string>;
   JUMP_OPS: Set<number>;
@@ -384,6 +407,7 @@ export class Compiler {
     this.SPECIALIZED_OPS = {};
     this.ALIASED_OPS = {};
     this.ANTI_OPS = {};
+    this.MBA_OPS = {};
 
     this.OP = { ...OP_ORIGINAL };
 
@@ -3280,12 +3304,43 @@ export async function compileAndSerialize(
   let obfuscationStartedAt = now();
 
   const compiler = new Compiler(options);
-  let bytecode = compiler.compile(sourceCode);
+
+  // The MBA type analysis runs on the AST, entirely outside the Compiler, and
+  // is joined back onto instructions later via SOURCE_NODE_SYM. Parsing here
+  // (rather than inside compile()) is what lets both see the same node objects.
+  const parseStartedAt = now();
+  const ast = parse(sourceCode, {
+    sourceType: "script",
+    allowReturnOutsideFunction: true,
+  });
+  compiler.profileData.parseTime = now() - parseStartedAt;
+
+  const intFacts = options.mba ? analyzeIntTypes(ast) : null;
+  if (intFacts) {
+    compiler.log(
+      `analyzeIntTypes: ${intFacts.stats.tier0} tier-0, ` +
+        `${intFacts.stats.tier1} tier-1 eligible, ` +
+        `${intFacts.stats.rejected} rejected, ` +
+        `${intFacts.stats.excluded} excluded by directive`,
+    );
+  }
+
+  let bytecode = compiler.compileAST(ast);
 
   const passes: {
     pass: b.BytecodePass;
     name: string;
   }[] = [];
+
+  // Runs first: before controlFlowFlattening so CFF scatters each expansion
+  // across its dispatch state machine, and before resolveRegisters so the
+  // temporaries it allocates take part in normal slot assignment.
+  if (intFacts) {
+    passes.push({
+      pass: (bc, c) => mbaExpand(bc, c, intFacts),
+      name: "mbaExpand",
+    });
+  }
 
   if (options.stringConcealing) {
     passes.push({

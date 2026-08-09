@@ -16,6 +16,14 @@ Website Ideas:
 - - How much the file size increase and performance decrease will be
 - Better visualization for options bytecode and file size
 
+```
+2. Entangle the flattening state with a loop induction variable. I have empirical proof this works: at the bytecode layer the state register was threaded through a loop, my per-state splitting exploded, and I had to add widening — which leaves the dispatch standing. I only recovered it by noticing the state was always compared with ===/!== and splitting on exactly those registers. That heuristic is one line and it's defeatable: dispatch on ranges (state < K), or mix the counter into the state (state += (i & 0) + delta), and the same code comes out as a switch (_pc) loop.
+
+4. Handler polymorphism. I reduced each handler to a canonical one-liner (M[B+@0]=M[B+@1]===M[B+@2];) and matched ~30 templates — 128 opcodes, none left over. That works because one handler = one operation with a stable shape. A handler that branches on a mode register, or fused superoperators generated per build, forces per-handler symbolic execution instead of pattern matching. Real work, and it doesn't generalize across builds.
+
+Related and cheap: don't compute the register base the same way in every handler. I normalized this.k[this.y+8] → B by pattern; a per-handler derivation breaks the canonicalization my matcher depends on.
+```
+
 
 ## `0.1.5` Updates
 

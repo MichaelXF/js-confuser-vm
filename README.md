@@ -45,6 +45,7 @@ JsConfuserVM.obfuscate(`
   specializedOpcodes: true, // create specialized opcodes for commonly used opcode+operand pairs?
   aliasedOpcodes: true, // create duplicate opcodes for commonly used opcodes?
   antiInstrumentation: true, // add fake opcode effects to hinder opcode instrumentation?
+  mba: true, // rewrite integer math as Mixed Boolean-Arithmetic? (assumes int32 wrap-around)
   timingChecks: true, // add timing checks to detect debuggers?
   concealConstants: true, // conceal strings and integers in the constant pool?
   classObfuscation: true, // obfuscate the VM runtime classes?
@@ -160,6 +161,11 @@ new Uint32Array(R.length/4),W=0;W<Ka.length;W++)Ka[W]=(R[W*4]|R[W*4+1]<<8|R[W*4+
 - [x] timing checks
 - [ ] low-level bytecode obfuscations
 - [x] dispatcher (Encoded jumps)
+- [x] Mixed Boolean-Arithmetic on integer operations (`mba` option)
+- [x] Mixed Boolean-Arithmetic on the control-flow-flattening state machine
+- - No equality opcode is left in the dispatch loop, so a devirtualizer has
+    nothing to key its state-specialization on and the flattening survives
+- [x] opaque predicates (MBA identities that are constant but not foldable)
 - [ ] stack protection
 - [ ] control flow integrity
 
@@ -630,6 +636,120 @@ case 61:
       regs[base + dst] = a + regs[base + _operands[8]]; }      // fake
     break;
 ```
+
+#### `mba` (true/false)
+
+Rewrites integer operations into Mixed Boolean-Arithmetic — expressions that
+blend arithmetic (`+ - *`) with bitwise (`& | ^ ~ >>>`) operators. Neither
+arithmetic nor boolean laws apply to the mixture, so nothing in the bytecode
+still pattern-matches back to an operator.
+
+Two groups are eligible:
+
+- **Bitwise** `& | ^` and `~`, which JavaScript already defines as int32. Always
+  safe, no assumptions about your code.
+- **Integer** `+`, `-`, unary `-`, and comparisons, but only where a type
+  analysis proves both operands are integers. Strings, floats, and anything the
+  analysis cannot prove integral are left untouched.
+
+> ⚠️ **Assumes int32 wrap-around.** The one behavioural difference is that an
+> integer result beyond ±2^31 wraps instead of staying exact:
+> `2000000000 + 2000000000` yields `-294967296` rather than `4000000000`.
+
+Two comment directives control it per subtree — useful when you bundle a library
+that does its own float or crypto math, or when the analysis is too conservative
+about a function's parameters:
+
+```js
+/* @js-confuser-vm-no-mba */
+function untouched(a, b) { return a + b; }   // excluded entirely
+
+/* @js-confuser-vm-int */
+function hot(a, b) { return (a + b) ^ (a & b); }  // params asserted integral
+```
+
+Each site independently becomes either an inline expansion (a run of ordinary
+opcodes, so there is no new handler to fingerprint and every site differs) or a
+generated `MBA_*` opcode (no bytecode growth, and nothing for a template-matching
+devirtualizer to classify).
+
+```js
+// Input Code
+var acc = 0;
+acc = acc + 7;
+acc = acc & 65535;
+
+// Before
+// [0, 6, 0, 0],        LOAD_CONST  reg[6] = 0                            1:10-1:11
+// [5, 2, 6],           MOVE  reg[2] = reg[6]                             1:0-1:12
+// [0, 6, 1, 0],        LOAD_CONST  reg[6] = 7                            2:12-2:13
+// [11, 3, 2, 6],       ADD  reg[3] = reg[2] + reg[6]                     2:6-2:13
+// [5, 2, 3],           MOVE  reg[2] = reg[3]                             2:0-2:13
+// [0, 6, 2, 0],        LOAD_CONST  reg[6] = 65535                        3:12-3:17
+// [16, 3, 2, 6],       BAND  reg[3] = reg[2] & reg[6]                    3:6-3:17
+// [5, 2, 3],           MOVE  reg[2] = reg[3]                             3:0-3:17
+
+// After  (`acc + 7` expanded inline; `acc & 65535` sent to a generated handler)
+// [0, 6, 0, 0],        LOAD_CONST  reg[6] = 0                            1:10-1:11
+// [5, 2, 6],           MOVE  reg[2] = reg[6]                             1:0-1:12
+// [0, 6, 1, 0],        LOAD_CONST  reg[6] = 7                            2:12-2:13
+// [35, 4, 6],          UNARY_BITNOT  reg[4] = ~reg[6]                    2:6-2:13
+// [16, 3, 2, 4],       BAND  reg[3] = reg[2] & reg[4]                    2:6-2:13
+// [35, 4, 2],          UNARY_BITNOT  reg[4] = ~reg[2]                    2:6-2:13
+// [16, 4, 4, 6],       BAND  reg[4] = reg[4] & reg[6]                    2:6-2:13
+// [17, 3, 3, 4],       BOR  reg[3] = reg[3] | reg[4]                     2:6-2:13
+// [16, 4, 2, 6],       BAND  reg[4] = reg[2] & reg[6]                    2:6-2:13
+// [1, 5, 1],           LOAD_INT  reg[5] = 1                              2:6-2:13
+// [19, 4, 4, 5],       SHL  reg[4] = reg[4] << reg[5]                    2:6-2:13
+// [11, 3, 3, 4],       ADD  reg[3] = reg[3] + reg[4]                     2:6-2:13
+// [1, 4, 0],           LOAD_INT  reg[4] = 0                              2:6-2:13
+// [17, 3, 3, 4],       BOR  reg[3] = reg[3] | reg[4]                     2:6-2:13
+// [5, 6, 3],           MOVE  reg[6] = reg[3]                             2:6-2:13
+// [5, 2, 6],           MOVE  reg[2] = reg[6]                             2:0-2:13
+// [0, 6, 2, 0],        LOAD_CONST  reg[6] = 65535                        3:12-3:17
+// [62, 7, 2, 6],       MBA_BAND_1  [7, 2, 6]                             3:6-3:17
+// [5, 2, 7],           MOVE  reg[2] = reg[7]                             3:0-3:17
+```
+
+The expansion above is `a + b  ->  (a ^ b) + ((a & b) << 1)`, with the `a ^ b`
+term *itself* expanded again into `(a & ~b) | (~a & b)` — identities compose, and
+each site draws its own.
+
+A generated handler reaches something the inline expansion cannot: the VM's own
+execution state. It spends that on a **frame key** — `k` below — rather than on
+another noise operand, and the distinction is the whole point.
+
+An operand fed to an ordinary MBA identity cancels for *whatever* value it
+holds, so a reader deletes it by inspection without caring where it came from;
+the state dependency is decoration. A frame key is different. `_pushFrame` lays
+every frame out as `base = fp + HEADER_SIZE`, so `base - 8 ^ fp` is exactly `0`
+for every live frame — while being built from two independent-looking runtime
+reads. The identities that use it are **wrong for any other value**, so it has
+to be *evaluated*, not cancelled, and recovering it means reading the frame
+layout in `_pushFrame` rather than the handler.
+
+```js
+// What the opcode "MBA_ADD_0" looks like:
+case 61:
+  // MBA_ADD_0
+  var dst = this._operand();
+  var a = regs[base + this._operand()];
+  var b = regs[base + this._operand()];
+  var k = base - 8 ^ fp;
+  regs[base + dst] = ~~((a * (k + 1) | (0 | 0) * (a & 65535 & 1) +
+    (0 | 0) * (a & 65535 & 1 ^ 1)) * ~(~((a & ~b) + (a & b) & 65535) &
+    ~(1 * (1 - k))) - (a + k * a | 0 * (1 - k)) * ~(~(a - k &
+    (65535 & ~b) + (65535 & b)) | ~~(1 + k)) + (b + k - (k + k * k)));
+  break;
+```
+
+Some terms also multiply by a **variable**, which takes the expression out of
+the linear MBA class — linear MBA is decided by evaluating across the 2^k
+bit-patterns at one bit position, and a variable coefficient is not a per-bit
+property. The `& 65535` masks are what make that safe rather than cosmetic:
+float64 only holds integers exactly to 2^53, and an unbounded int32 product
+reaches 2^62. Truncating one multiplicand to int32 and masking the other to 16
+bits caps the product at 2^47, leaving 64x headroom.
 
 #### `selfModifying` (true/false)
 
