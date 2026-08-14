@@ -165,6 +165,22 @@ new Uint32Array(R.length/4),W=0;W<Ka.length;W++)Ka[W]=(R[W*4]|R[W*4+1]<<8|R[W*4+
 - [x] Mixed Boolean-Arithmetic on the control-flow-flattening state machine
 - - No equality opcode is left in the dispatch loop, so a devirtualizer has
     nothing to key its state-specialization on and the flattening survives
+- [x] domain-restricted MBA identities (handlers that are equivalent to their
+  operator only on the values the compiler actually produces, so a sampling
+  simplifier measures the wrong function and refuses every rewrite)
+- [x] domains that fire on the probes a classifier actually decides on, folded
+  into the operands rather than around the result
+- [x] per-function frame salt (a handler is bound to one function by a value
+  that appears nowhere the interpreter recomputes it, so it cannot be lifted out
+  and probed against fabricated state)
+- [x] taint operands (a register the handler reads and does not depend on,
+  aimed at the devirtualizer that recovers the CFG by executing handlers and
+  propagating constants rather than by simplifying them)
+- [x] build-time fit check (`mbaFitCheck`: runs the attacker's own probe-and-
+  match on every generated handler, and fails the build on one that miscompiles)
+- [x] encoded-domain state register (per-function bijection built from a
+  degree-3 permutation polynomial mod 2^32 plus rotate/xorshift rounds; the
+  state alphabet and every transition delta become full-entropy 32-bit words)
 - [x] opaque predicates (MBA identities that are constant but not foldable)
 - [ ] stack protection
 - [ ] control flow integrity
@@ -716,32 +732,47 @@ term *itself* expanded again into `(a & ~b) | (~a & b)` — identities compose, 
 each site draws its own.
 
 A generated handler reaches something the inline expansion cannot: the VM's own
-execution state. It spends that on a **frame key** — `k` below — rather than on
-another noise operand, and the distinction is the whole point.
+execution state. It spends that on a **frame binding** rather than on another
+noise operand, and the distinction is the whole point.
 
 An operand fed to an ordinary MBA identity cancels for *whatever* value it
 holds, so a reader deletes it by inspection without caring where it came from;
-the state dependency is decoration. A frame key is different. `_pushFrame` lays
-every frame out as `base = fp + HEADER_SIZE`, so `base - 8 ^ fp` is exactly `0`
-for every live frame — while being built from two independent-looking runtime
-reads. The identities that use it are **wrong for any other value**, so it has
-to be *evaluated*, not cancelled, and recovering it means reading the frame
-layout in `_pushFrame` rather than the handler.
+the state dependency is decoration. A frame binding is different. Every function
+carries a random 32-bit **salt**, laid into one slot of its frame by
+`_pushFrame`. The handler scrambles the running frame's salt into an odd word
+`v` and multiplies by a baked `c = modInverse32(v_expected)`:
 
 ```js
-// What the opcode "MBA_ADD_0" looks like:
+imul(imul(x, v), c) === x        // exactly — but only inside one function
+```
+
+So the term is *wrong for any other value*: it has to be evaluated, not
+cancelled. Run the same handler in a different frame and `imul(v, c)` stops
+being 1 and the result is garbage — the handler is bound to one **function**,
+not merely to a frame shape. That also breaks lifting it out and probing it
+against fabricated state, since fabricated state has no salt to supply.
+
+```js
+// What the opcode "MBA_ADD_f0" looks like:
 case 61:
-  // MBA_ADD_0
+  // MBA_ADD_f0
   var dst = this._operand();
   var a = regs[base + this._operand()];
+  var _khgs = regs[fp + SLOTS.SALT];
   var b = regs[base + this._operand()];
-  var k = base - 8 ^ fp;
-  regs[base + dst] = ~~((a * (k + 1) | (0 | 0) * (a & 65535 & 1) +
-    (0 | 0) * (a & 65535 & 1 ^ 1)) * ~(~((a & ~b) + (a & b) & 65535) &
-    ~(1 * (1 - k))) - (a + k * a | 0 * (1 - k)) * ~(~(a - k &
-    (65535 & ~b) + (65535 & b)) | ~~(1 + k)) + (b + k - (k + k * k)));
+  var _nzfa = Math.imul(_khgs, -1695595811) ^ 337994089 | 1;
+  regs[base + dst] = (a ^ Math.imul(Math.imul(b, 1129303267), _nzfa)) +
+    (a & b) + (a & Math.imul(b, Math.imul(_nzfa, 1129303267))) | 0;
   break;
 ```
+
+Neither literal resembles the salt or each other, and nothing in the interpreter
+recomputes it — it appears in exactly one `MAKE_CLOSURE` operand and one slot of
+a live frame. An attacker holding the body can always invert `c` back to `v`
+with the same Newton iteration that built it; what they cannot do is *supply*
+it. (An earlier version bound to the frame's register count instead, which is a
+small integer, derivable from the frame itself, and handed over on request by an
+interpreter oracle.)
 
 Some terms also multiply by a **variable**, which takes the expression out of
 the linear MBA class — linear MBA is decided by evaluating across the 2^k
@@ -750,6 +781,170 @@ property. The `& 65535` masks are what make that safe rather than cosmetic:
 float64 only holds integers exactly to 2^53, and an unbounded int32 product
 reaches 2^62. Truncating one multiplicand to int32 and masking the other to 16
 bits caps the product at 2^47, leaving 64x headroom.
+
+##### Domain-restricted identities
+
+Every identity above is *total*: it holds for all of `Z/2^32`. That is a
+stronger promise than this obfuscator has to make, and the surplus is what an
+attacker's simplifier runs on. SiMBA, MBA-Blast, GAMBA and JS-Confuser's own
+`simplifyMBA` all share one method — evaluate the candidate and the rewrite over
+a sample of the full input space, and accept only where they agree everywhere.
+Their soundness rule is total equivalence.
+
+So the generated handlers stop being totally equivalent. Where the compiler
+*chooses* every value a variable can hold, a term that vanishes on exactly that
+set can be folded in with any coefficient:
+
+```js
+handler = core(a, b) + Z(a) - Z(b)
+```
+
+On the real domain this is exactly `core`. Off it, it is a different function —
+so a sampler matches no candidate operator and refuses every rewrite. Each
+domain is one the compiler *establishes*, never one an analysis inferred:
+
+| Domain | Established by | Vector | |
+| --- | --- | --- | --- |
+| `x ≡ tag (mod 2^b)` | flattening draws its state alphabet, its deltas and its selector keys from one residue class | `imul((x & mask) ^ tag, K)` | **firing** |
+| `x` is 0 or 1 | the value is a comparison result narrowed to a bit | `imul(x & ~1, K)` | **firing** |
+| `x` is 0 or -1 | the value is a branchless select mask | `imul(x ^ (x >> 31), K)` | **firing** |
+| `x` is int32 | `MBA_SAFE_SYM` — compiler-chosen state words | `imul((x - (x\|0)) * 65536, K)` | weak |
+
+The **firing / weak** split is the part that decides whether a vector is worth
+its size, and it was measured rather than assumed. A black-box classifier sorts
+its probes into two populations: integers, which decide the fit, and everything
+else — floats, strings, `NaN` — which only *narrow* an already-passing candidate
+set, and which it discards outright if narrowing empties it. So a vector that
+can only fire on a non-integer changes nothing at all. In one analysed build the
+`int32` vector shipped in 175 places and cost an attacker exactly zero: it is
+zero for every integer by construction. It survives as filler because it is
+free; the three firing domains are the ones anything is spent on.
+
+Where a vector lands matters as much as which one. They are folded into the
+**operands**, before the identity is built around them, rather than around the
+finished result. A comparison cannot be poisoned at the root at all — `!!(true +
+Z)` is `true` for every `Z` but -1, so the handler would still answer exactly
+like `===` on every probe drawn — and for everything else an operand-level term
+is entangled with the whole body instead of sitting outside every truncation
+where a substitute-simplify-reinsert loop can lift it back off.
+
+> No domain at all is claimed for **user** operands, int32 included. Tier 1 rests
+> on `analysis/int-types.ts`, which performs no range analysis by design — `a +
+> b` is eligible whenever both operands are integral, in or out of int32 range.
+> An operand of 2^40 is legal there and would make the vector fire on a real
+> execution. Tier 0 is worse still, since its operands may be any JS value. The
+> whole family is restricted to values this compiler chose.
+
+##### Encoded state machine (with `controlFlowFlattening`)
+
+With both options on, the flattening state register is moved into an **encoded
+domain**. A per-function bijection `E` is drawn and the register holds `E(s)`
+rather than `s`, so the state alphabet and the transition graph are no longer
+readable off the bytecode.
+
+`E` is 5–7 rounds, each with a closed-form inverse: multiply by an odd constant,
+add, xor, rotate, xorshift, and one **degree-3 permutation polynomial mod 2^32**
+(Rivest-valid: `a1` odd, `a2` and `a3` even) whose compositional inverse is
+computed at build time. The rotate and xorshift rounds are mandatory — without
+one the composite is still a polynomial function, and interpolating it is the
+standard attack on a polynomial encoding.
+
+Because a bijection preserves equality, the **dispatch chain never decodes**: it
+compares encoded values directly, and its relative accumulator walks by XOR
+instead of addition. The cost lands only on a state transition, of which there
+is one per edge taken:
+
+```js
+step:  state' = E( D(state) + Dd(delta) )
+cond:  state' = E( D(state) + Dd(d0) + (m & Dd(d1)) )
+```
+
+Both keep the delta as an *operand*, so one handler serves every edge in the
+function rather than one per edge — and `Dd` is a second encoding applied to the
+immediates, without which the operands would still spell out the edge structure.
+The whole decode-compute-encode is built as one straight-line run of bindings
+and MBA-expanded, so the three phases have no boundary between them.
+
+The two layers compose. Inside a transition the decoded value is a plain state,
+and every plain state is drawn from one residue class mod 8 — so the bindings
+downstream of the decode carry `modTag` vectors on top of the int32 ones. The
+scoping there is load-bearing: a vector over an intermediate folded into a
+binding that runs *before* it would read a hoisted `var` still holding
+`undefined`, and `(undefined & 7) ^ tag` is `tag`, which is not zero. Domains
+are therefore introduced by position.
+
+The **encoded** words get a residue class of their own, four bits wide. The
+dispatch chain never decodes, so the plain tag says nothing about anything it
+touches; `E` is fixed first and the state values are then drawn to satisfy
+`E(s) & 15 === tag`, which costs a rejection loop at build time and nothing at
+runtime. Fifteen of every sixteen integers a prober substitutes for the state
+operand are outside the set the handler has to be correct on.
+
+##### Taint operands
+
+Everything above changes what a handler *looks* like. None of it touches the
+attack that does not care: a devirtualizer recovers a flattened CFG by
+**executing** handlers against concrete state, and constant-propagating the
+result. Against that, depth is free to the attacker and a domain vector is
+simply never reached.
+
+What an executing attacker needs is a value for every input. So handlers on
+compiler-generated arithmetic read one extra register they provably do not
+depend on — folded in through an identity, so the value is unchanged for
+anything the register might hold — and the register is chosen to be one fed by a
+`CALL`, a property read, or a global load. The constant propagation now has a
+hole in it exactly where the state machine used to fold flat.
+
+One register per function is enough: a second unknown input is no less
+resolvable than the first, while a per-site choice would multiply the handler
+table for nothing.
+
+> An identity of the form `(x + t) - t` is exact for every int32 `t` and `NaN`
+> for `undefined`, which is what a taint register holds in a function with
+> nothing opaque in it. Taint sources are therefore coerced on read. That bug
+> was found by `mbaFitCheck` while it was being written.
+
+Two facts worth stating plainly. There is no `IMUL` opcode, so `E` cannot be
+lowered to plain bytecode; both handlers are minted up front and the whole
+feature is skipped for a function if the opcode space cannot supply them, since
+a half-encoded state machine is a broken program rather than a weaker one. And
+this raises the cost of *static* devirtualization only — the state register is
+still observable at runtime, so a lifter willing to execute the program recovers
+the same graph.
+
+#### `mbaFitCheck` (true/false)
+
+Verifies every generated MBA handler at build time. On by default whenever `mba`
+is on; set it to `false` to skip it.
+
+Everything the MBA layer does is probabilistic — handlers are drawn, not
+written. A rule is picked at random, a null vector lands somewhere or does not,
+a domain is claimed by one pass and consumed by another. That makes two kinds of
+silent failure possible, and this check makes both loud.
+
+**Wrong programs.** A domain-restricted term is only sound because the values
+reaching it really are inside the declared set. If a claim is wrong, the vector
+fires during a real execution and the handler returns the wrong answer — on some
+seeds and not others, in a way that looks like anything but an obfuscator bug.
+Every handler is therefore evaluated against in-domain inputs and compared with
+the operator it replaced, and checked for independence from the operands it
+promised not to depend on. A failure here throws.
+
+**Handlers that buy nothing.** The other failure is a handler that is perfectly
+correct and useless: a black-box devirtualizer does not simplify MBA, it samples
+the handler over its operands and matches the results against a table of
+JavaScript operators. Depth, node count and non-linearity are all invisible to
+that attack. So the check runs the attack — same probe grid, same candidate
+table, same "which operator reproduces every observation" question — and reports
+how much of the handler table is still trivially identifiable:
+
+```
+mbaFitCheck: 76 handlers — 41 match no operator, 27 identifiable, 8 beyond a two-operand classifier (48ms)
+```
+
+A handler carrying a firing domain is *required* to match nothing, and throws if
+it does; the rest is a number the build prints rather than a thing nobody knows.
+With `verbose` the identifiable ones are listed by name.
 
 #### `selfModifying` (true/false)
 

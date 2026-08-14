@@ -50,7 +50,7 @@ import { choice, chance, getRandomInt } from "./random-utils.ts";
 import type { Bytecode, RegisterOperand } from "../types.ts";
 import { Compiler } from "../compiler.ts";
 import { allocReg } from "./pass-utils.ts";
-import { U16_MAX } from "./op-utils.ts";
+import { U16_MAX, U32_MAX } from "./op-utils.ts";
 
 // ── Expression IR ────────────────────────────────────────────────────────────
 
@@ -67,6 +67,7 @@ export type MBABinOp =
   | "&"
   | "|"
   | "<<"
+  | ">>"
   | ">>>"
   | "imul";
 export type MBAUnOp = "~" | "neg" | "not";
@@ -103,6 +104,7 @@ export const mOr = (l: MBAExpr, r: MBAExpr) => bin("|", l, r);
 export const mShl = (l: MBAExpr, r: MBAExpr) => bin("<<", l, r);
 export const mImul = (l: MBAExpr, r: MBAExpr) => bin("imul", l, r);
 export const mUshr = (l: MBAExpr, r: MBAExpr) => bin(">>>", l, r);
+export const mShr = (l: MBAExpr, r: MBAExpr) => bin(">>", l, r);
 export const mBNot = (v: MBAExpr) => un("~", v);
 export const mNeg = (v: MBAExpr) => un("neg", v);
 export const mLNot = (v: MBAExpr) => un("not", v);
@@ -298,22 +300,27 @@ const MUL_IDENTITY_RULES: BinRule[] = [
 //
 //     imul(imul(x, v), c) === x        (exactly, for every int32 x)
 //
-// The caller supplies `v` derived from a per-frame quantity (the executing
-// frame's register count) and `c` baked from the value that frame is EXPECTED
-// to have. Consequences:
+// The caller supplies `v` derived from the executing frame's SALT slot — the
+// identity word of whichever function is running, see utils/frame-layout.ts —
+// and `c` baked from the salt the handler's OWN function carries.
+// Consequences:
 //
-//   • Neither literal resembles the register count. `c` for 631 is 74872647.
-//     There is no small number sitting next to it to read the answer off.
-//   • Run the same handler in a frame with a different register count and `v`
-//     changes, `imul(v, c)` is no longer 1, and the result is garbage. The
-//     handler is bound to its frame.
-//   • That also breaks lifting the handler out and probing it with fabricated
-//     state, since fabricated state has the wrong register count.
+//   • Neither literal resembles the salt, or each other.
+//   • Run the same handler inside a different function and `v` changes,
+//     `imul(v, c)` is no longer 1, and the result is garbage. The handler is
+//     bound to one function, not merely to a frame shape.
+//   • That also breaks lifting the handler out and probing it against
+//     fabricated state, since fabricated state has no salt to supply.
 //
-// This is obscurity against READING, not against a solver: `c` inverts back to
-// `v` with the same Newton iteration used to build it, and a register count has
-// a tiny domain. It raises the cost of understanding a handler, not of
-// mechanically solving one.
+// The salt is what makes this more than obscurity against reading. `c` still
+// inverts back to `v` with the same Newton iteration used to build it, so an
+// attacker holding the body can always recover the value it wants — but
+// recovering a value is not the same as being able to SUPPLY it. The salt
+// appears nowhere except one MAKE_CLOSURE operand and one slot of a live frame,
+// nothing in the interpreter recomputes it, and it is 2^32 wide. This binding
+// previously read the frame's register count, which is a small integer, is
+// derivable from the frame itself, and which an interpreter oracle hands over
+// on request.
 type FrameRule = (x: MBAExpr, v: MBAExpr, c: MBAExpr) => MBAExpr;
 
 const FRAME_BOUND_RULES: FrameRule[] = [
@@ -334,6 +341,518 @@ export function modInverse32(n: number): number {
   let x = n | 0;
   for (let i = 0; i < 5; i++) x = Math.imul(x, 2 - Math.imul(n, x)) | 0;
   return x | 0;
+}
+
+/** The two baked words of one frame binding, plus the value they undo. */
+export interface FrameKey {
+  /** Scramble applied to the frame's SALT slot at runtime. */
+  mul: number;
+  xor: number;
+  /** modInverse32 of the scrambled salt this handler's own function carries. */
+  inverse: number;
+}
+
+/**
+ * Pick the scramble constants for one frame-bound handler, and the inverse that
+ * undoes them for `salt`.
+ *
+ * `v = (imul(salt, mul) ^ xor) | 1` is always odd, so it always has an inverse
+ * mod 2^32.  Redrawing until both words are large keeps them opaque: a small
+ * multiplicand inverts to a well-known magic constant (modInverse32(3) is
+ * 0xAAAAAAAB), and v === 1 would make the whole binding a no-op.
+ *
+ * Drawn by whichever bytecode pass registers the handler rather than by the
+ * runtime pass that emits it, so the pair is part of the MBA_OPS record and the
+ * build-time fit check can reproduce a real frame without re-deriving anything.
+ */
+export function frameKeyConstants(salt: number): FrameKey {
+  const MIN_MAGNITUDE = 0xffff;
+  for (let attempt = 0; ; attempt++) {
+    // An odd multiplier keeps imul a bijection, so distinct salts stay distinct.
+    const mul = (getRandomInt(1, 0x7fffffff) * 2 + 1) | 0;
+    const xor = getRandomInt(1, 0x7fffffff) | 0;
+    const v = ((Math.imul(salt, mul) ^ xor) | 1) | 0;
+    const inverse = modInverse32(v);
+    if (
+      attempt > 32 ||
+      (Math.abs(v) > MIN_MAGNITUDE && Math.abs(inverse) > MIN_MAGNITUDE)
+    )
+      return { mul, xor, inverse };
+  }
+}
+
+/** The runtime value of the frame-binding variable `v` for a given salt. */
+export function frameKeyValue(key: FrameKey, salt: number): number {
+  return ((Math.imul(salt, key.mul) ^ key.xor) | 1) | 0;
+}
+
+/** Pin a node against rewriting.  Its children are still expanded. */
+export function pinned(e: MBAExpr): MBAExpr {
+  if (e.k === "bin") return { ...e, fixed: true };
+  if (e.k === "un") return { ...e, fixed: true };
+  return e;
+}
+
+// ── Domain-restricted identities ─────────────────────────────────────────────
+//
+// Every rule above this line is TOTAL: it holds for all of Z/2^32.  That is a
+// stronger promise than this obfuscator actually has to make, and the surplus
+// is what an attacker's simplifier runs on.
+//
+// The standard MBA simplifiers (SiMBA, MBA-Blast, GAMBA, and the sampling
+// simplifier in JS-Confuser) share one method: evaluate the candidate and the
+// rewrite over a sample of the FULL input space, and accept the rewrite only
+// where they agree everywhere.  Their soundness rule is total equivalence.
+//
+// So stop being totally equivalent.  Where the compiler CHOOSES every value a
+// variable can hold, the identity only has to hold on that set D.  A term that
+// vanishes on D and nowhere else can then be added with any coefficient:
+//
+//     handler = core(a, b) + Z(a) - Z(b)
+//
+// On D this is exactly `core`.  Off D it is a different function, so:
+//
+//   • a sampler drawing from the full space sees a function matching no
+//     candidate, and refuses every rewrite;
+//   • a signature-based solver enumerating truth assignments computes the
+//     signature of the wrong function entirely;
+//   • a black-box classifier sampling the handler to identify its operator
+//     gets no match.
+//
+// ── Where the probes actually land ───────────────────────────────────────────
+//
+// A domain only earns its size if the vector FIRES on the values a prober
+// substitutes, and that is a sharper requirement than it looks.  A black-box
+// classifier separates its probes into two populations: integers, which decide
+// the fit, and everything else (floats, strings, NaN, objects), which it uses
+// only to NARROW an already-passing candidate set.  The observed shape is
+//
+//     survivors = candidates matching every INTEGER probe
+//     refined   = survivors matching every general probe
+//     if (refined is empty) keep survivors      // general probes discarded
+//
+// so a vector that fires exclusively on non-integers changes nothing at all:
+// it empties `refined`, the classifier falls back, and the integer fit stands.
+// That is measurable — it is what happened to the `int32` vector below, which
+// shipped in 175 places and cost an attacker nothing.
+//
+// Every domain therefore carries a `strength`:
+//
+//   FIRING — the vector is non-zero on ordinary small integers, so it lands in
+//            the population that decides the fit.  These are the ones worth
+//            spending on.
+//   WEAK   — the vector is only non-zero outside int32 (or is zero everywhere
+//            an attacker can reach).  Kept as filler, never relied on.
+//
+// The catch is that D has to be REAL.  Every domain below is one the compiler
+// establishes by construction, never one an analysis inferred:
+//
+//   modTag  — controlFlowFlattening draws its state alphabet from ONE residue
+//             class, in both the plain and the encoded domain, so states and
+//             the deltas between them are congruent by construction.  FIRING:
+//             a probe of 3 or 255 is off-tag with probability 1 - 2^-bits.
+//   bool    — the value is a comparison result narrowed to 0/1.  FIRING: every
+//             probe outside {0, 1}.
+//   mask    — the value is a branchless select mask, 0 or -1 exactly.  FIRING:
+//             every probe outside {0, -1}.
+//   int32   — the precondition the whole MBA algebra already requires.  WEAK,
+//             for the reason above; it survives as filler because it is free.
+//
+// Every vector is built from Math.imul, which keeps it int32 (so it cannot
+// break the magnitude invariant) and — because there is no IMUL opcode — makes
+// the whole family handler-only, exactly like FRAME_BOUND_RULES.  emitMBA
+// rejects it if it ever reaches the bytecode backend.
+
+/** What is known to be true of a variable in EVERY real execution. */
+export interface MBADomain {
+  /**
+   * Always an int32.  WEAK — the vector it enables is zero on every integer,
+   * so it only reaches probes a classifier is willing to discard.
+   */
+  int32?: boolean;
+  /** Always congruent to `tag` modulo 2^`bits`.  FIRING. */
+  modTag?: { bits: number; tag: number };
+  /** Always exactly 0 or 1 (a narrowed comparison result).  FIRING. */
+  bool?: boolean;
+  /** Always exactly 0 or -1 (a branchless select mask).  FIRING. */
+  mask?: boolean;
+}
+
+/**
+ * True when `domain` supports a vector that is non-zero on ordinary integers —
+ * i.e. one that reaches the probes a black-box classifier uses to DECIDE a fit
+ * rather than the ones it discards.  The build-time fit check uses this to know
+ * which handlers are required to match no operator.
+ */
+export function domainFires(domain: MBADomain): boolean {
+  return !!(domain.modTag || domain.bool || domain.mask);
+}
+
+/**
+ * Prefix for the alias bound to a source operand's RAW value — before the
+ * tier-0 `~~` coercion.  The int32 vector must read this rather than the
+ * coerced local, because the coercion is precisely what erases the evidence it
+ * tests for.  mbaOpcodes binds it when the expression mentions it.
+ */
+export const RAW_PREFIX = "raw$";
+
+/** A fresh odd multiplier — odd so a non-zero input cannot be zeroed out. */
+const nullKey = () => (getRandomInt(1, 0x7fffffff) * 2 + 1) | 0;
+
+/**
+ * Every vector `domain` supports for the variable `name`, each tagged with
+ * whether it fires on ordinary integers (see the section header).  Callers pick
+ * from this rather than taking a random draw, so a firing vector is never
+ * passed over in favour of filler.
+ */
+function nullVectorForms(
+  name: string,
+  domain: MBADomain,
+): { firing: boolean; build: () => MBAExpr }[] {
+  const forms: { firing: boolean; build: () => MBAExpr }[] = [];
+
+  if (domain.modTag) {
+    const { bits, tag } = domain.modTag;
+    const mask = (1 << bits) - 1;
+    // Zero exactly when x ≡ tag (mod 2^bits); non-zero for the 1 - 2^-bits of
+    // integers that are not.
+    forms.push({
+      firing: true,
+      build: () =>
+        mImul(
+          mXor(mAnd(mVar(name), mNum(mask)), mNum(tag & mask)),
+          mNum(nullKey()),
+        ),
+    });
+  }
+
+  if (domain.bool) {
+    // Zero exactly on {0, 1}: every other integer has a bit above bit 0 set.
+    forms.push({
+      firing: true,
+      build: () => mImul(mAnd(mVar(name), mNum(~1)), mNum(nullKey())),
+    });
+    // Same domain by a different route — b*(b-1) is 0 for b in {0,1}.  The
+    // 16-bit mask keeps the product inside float64's exact range, exactly as
+    // MUL_IDENTITY_RULES does.
+    forms.push({
+      firing: true,
+      build: () => {
+        const b = pinnedMask16(mVar(name));
+        return mImul(mMul(b, mSub(b, mNum(1))), mNum(nullKey()));
+      },
+    });
+  }
+
+  if (domain.mask) {
+    // `x ^ (x >> 31)` folds a value onto its own sign: 0 becomes 0 and -1
+    // becomes 0, while every other int32 keeps at least one bit.  That is
+    // exactly the {0, -1} domain of a branchless select mask.
+    forms.push({
+      firing: true,
+      build: () =>
+        mImul(
+          mXor(mVar(name), pinned(mShr(mVar(name), mNum(31)))),
+          mNum(nullKey()),
+        ),
+    });
+  }
+
+  if (domain.int32) {
+    // `x - (x | 0)` is the fractional part: 0 for every int32, non-zero for any
+    // other finite number.  Scaling before imul is what keeps a small fraction
+    // from being truncated away to nothing.
+    //
+    // WEAK: it is zero on every integer, so a classifier that decides its fit
+    // on integer probes never sees it.  Kept because it costs nothing and does
+    // reach a simplifier that samples the full value space.
+    //
+    // The subtraction is PINNED.  Several SUB_RULES route through `~`, which
+    // applies ToInt32 to its operand and so discards the fraction — the rewrite
+    // would still be correct (the term stays 0 on the domain) but the vector
+    // would collapse to a constant zero and buy nothing at all.
+    const raw = mVar(RAW_PREFIX + name);
+    forms.push({
+      firing: false,
+      build: () =>
+        mImul(
+          mMul(pinned(mSub(raw, mOr(raw, mNum(0)))), mNum(0x10000)),
+          mNum(nullKey()),
+        ),
+    });
+  }
+
+  return forms;
+}
+
+/**
+ * An expression that is 0 for every value in `domain` and generically non-zero
+ * outside it.  Returns null when the domain says nothing usable.
+ */
+export function mbaNullVector(
+  name: string,
+  domain: MBADomain,
+): MBAExpr | null {
+  const forms = nullVectorForms(name, domain);
+  if (forms.length === 0) return null;
+  const firing = forms.filter((f) => f.firing);
+  return choice(firing.length > 0 ? firing : forms).build();
+}
+
+// Ways to fold a null vector into an expression without changing its value on
+// the domain.  Each is an identity when `z` is 0 and `x` is an int32.
+//
+// Every rule here must also DIFFER from `x` for some z ≠ 0, or it is not a
+// domain-restricted term at all — it is a plain identity wearing one's clothes,
+// and it costs an attacker nothing.  `(x + z) - (z & z)` used to sit in this
+// list and is exactly that: `z & z` is `z`, so it is `x` for every z.
+const DOMAIN_IDENTITY_RULES: ((x: MBAExpr, z: MBAExpr) => MBAExpr)[] = [
+  (x, z) => mAdd(x, z),
+  (x, z) => mSub(x, z),
+  (x, z) => mXor(x, z),
+  (x, z) => mOr(x, mAnd(z, mNum(getRandomInt(0, U32_MAX) | 0))),
+  (x, z) => mAdd(x, mImul(z, mNum(getRandomInt(0, U32_MAX) | 0))),
+];
+
+/**
+ * The variable `name`, with a null vector over its own domain folded in.
+ *
+ * Where poisonMBA folds a vector at the ROOT of a finished expression, this
+ * puts one on an OPERAND, before the expression is built around it.  That
+ * difference decides whether the term is observable:
+ *
+ *   • A comparison cannot be poisoned at the root at all.  Folding an
+ *     arithmetic term around `x === y` and re-coercing gives `!!(true + z)`,
+ *     which is `true` for every z but -1 — so the handler still answers exactly
+ *     like `===` on the probes a classifier draws, and the vector is wasted.
+ *     Poisoning the operand instead makes the comparison itself disagree.
+ *   • For anything else it is simply deeper: a root term sits outside every
+ *     truncation, where a substitute-simplify-reinsert loop can lift it back
+ *     out, while an operand term is entangled with everything downstream.
+ *
+ * FIRING forms only.  A weak vector placed here is pure size: it cannot change
+ * an answer on any integer probe, and the engine already scatters weak vectors
+ * through the leaves with a probability.  A leaf with nothing firing to offer
+ * is left exactly as it was.
+ *
+ * Only the two rules that provably move the value are used — a vector folded
+ * with `|` or `&` can leave `x` unchanged even when it fires. On the domain
+ * both are exactly `x`, since `z` is 0 there.
+ */
+export function poisonedLeaf(
+  name: string,
+  domain: MBADomain | undefined,
+): MBAExpr {
+  if (!domain) return mVar(name);
+  const firing = nullVectorForms(name, domain).filter((f) => f.firing);
+  if (firing.length === 0) return mVar(name);
+  const z = choice(firing).build();
+  return pinned(
+    truncMBA(chance(50) ? mAdd(mVar(name), z) : mXor(mVar(name), z)),
+  );
+}
+
+/**
+ * Pick a null vector from across every variable that carries a domain.
+ *
+ * The pool is built from ALL variables first and only then filtered, rather
+ * than picking a variable and taking whatever it offers.  The difference
+ * matters: a handler whose operands are int32-only and whose mask operand is a
+ * genuine {0,-1} would otherwise spend most of its draws on the int32 filler
+ * and never place the one vector that reaches an integer probe.
+ */
+function drawNullVector(o: ResolvedOptions): MBAExpr | null {
+  const pool: { firing: boolean; build: () => MBAExpr }[] = [];
+  for (const name of Object.keys(o.domains))
+    pool.push(...nullVectorForms(name, o.domains[name]));
+  if (pool.length === 0) return null;
+  const firing = pool.filter((f) => f.firing);
+  return choice(firing.length > 0 ? firing : pool).build();
+}
+
+/**
+ * Fold `name` into `e` through a cancelling identity, so the expression READS
+ * the variable without depending on it.
+ *
+ * The expansion engine already does this at the leaves for anything in `noise`,
+ * but only with a probability — and a taint operand is not optional: its
+ * register is appended to the instruction whether or not the draw happened to
+ * use it, and a handler that declares an operand it never reads consumes the
+ * wrong number of words from the bytecode stream.  Callers use this to turn the
+ * engine's likelihood into a guarantee.
+ *
+ * Exact for any int32 `e` and ANY value of `name` — the identity rules hold
+ * over all of Z/2^32, which is what makes a taint operand safe to point at a
+ * register whose contents the compiler knows nothing about.
+ */
+export function entangleMBA(e: MBAExpr, name: string): MBAExpr {
+  return pinned(truncMBA(choice(IDENTITY_RULES)(e, mVar(name))));
+}
+
+/**
+ * Fold domain-restricted null vectors into an already-built expression.
+ *
+ * Applied at the ROOT by the handler builders; the expansion engine applies the
+ * same rules at the leaves, which is what stops the term from being a separable
+ * summand a substitute-simplify-reinsert loop could lift back out.
+ */
+export function poisonMBA(e: MBAExpr, options?: MBAOptions): MBAExpr {
+  const o = resolve(options);
+  if (o.poisonChance <= 0) return e;
+  let out = e;
+  // Two draws: one term is a lone summand, two are a pair whose variables
+  // differ, which is the shape the concept describes (`+ Z(a) - Z(b)`).
+  const rounds = chance(50) ? 1 : 2;
+  for (let i = 0; i < rounds; i++) {
+    if (!chance(o.poisonChance)) continue;
+    const z = drawNullVector(o);
+    if (!z) break;
+    out = choice(DOMAIN_IDENTITY_RULES)(out, z);
+  }
+  // Pinned: a poisoned subtree may still be composed into a larger expression
+  // and expanded again (mbaSuperOps does exactly that), and an unpinned `| 0`
+  // can be rewritten into a form that preserves the value only modulo 2^32 —
+  // which is not a truncation at all.
+  return out === e ? e : pinned(truncMBA(out));
+}
+
+// ── Key-selected semantics ───────────────────────────────────────────────────
+//
+// Every rule above this line is an IDENTITY: the expression it produces is
+// equal to the operation it replaced, for every input.  That is exactly the
+// property a black-box attacker exploits.  A deobfuscator does not have to
+// simplify an MBA to defeat it — it can run the handler on sampled inputs and
+// match the results against a table of candidate operators.  Depth, variable
+// count and non-linearity are all irrelevant to that attack, because they do
+// not change what the function COMPUTES.
+//
+// The way out (Loki, USENIX Sec '22) is to stop shipping a handler that equals
+// any single operator.  One handler hosts TWO semantics and a per-site key
+// picks which one runs:
+//
+//     f(a, b, k) = select(op0(a, b), op1(a, b), selector(k))
+//
+// Sampling f over (a, b) with k fixed now yields whichever operator that CALL
+// SITE asked for, and the same handler yields a different one at the next site.
+// There is no single operator to match the handler against, so a table-driven
+// classifier gets no answer at all.
+//
+// Honest limits.  An attacker who fully simplifies the body still sees both
+// candidate operators sitting in a select, and then has to recover the selector
+// bit from `k` — a bounded amount of work, not a wall.  What this buys is that
+// the cheap attack (sample the handler, read off the operator) stops working,
+// and the expensive one has to model a third input.  Callers should also feed
+// `s` and `k` into `noise`, which raises the arity any evaluation-based solver
+// has to cover from two variables to four.
+
+/**
+ * Constants for one merged handler's selector derivation.  `mul` is odd so
+ * `k -> imul(k ^ xor, mul)` is a bijection: exactly half of the 2^32 possible
+ * key operands select each semantic, and both halves are dense, so a site can
+ * always draw a fresh random key rather than reusing a recognisable literal.
+ */
+export interface SelectorKey {
+  mul: number;
+  xor: number;
+  shift: number;
+  /**
+   * Every key operand this handler is ever given is congruent to `tag` modulo
+   * 2^KEY_TAG_BITS.  Nothing in the selector derivation depends on that — it is
+   * a DOMAIN the compiler establishes so the handler body can carry null
+   * vectors over `k` that vanish for every real key and fire for a probe.
+   * See "Domain-restricted identities".
+   */
+  tag: number;
+}
+
+/** Bits of the key operand reserved for the domain tag.  See SelectorKey. */
+export const KEY_TAG_BITS = 3;
+
+export function makeSelectorKey(): SelectorKey {
+  return {
+    // Odd multiplier — keeps the mixing step invertible.
+    mul: (getRandomInt(1, 0x7fffffff) * 2 + 1) | 0,
+    xor: getRandomInt(1, 0x7fffffff) | 0,
+    // Any bit of the product will do; picking a random one stops the low bit of
+    // `k` from being the answer.
+    //
+    // It may not be one of the bottom KEY_TAG_BITS, though.  Bit s of a product
+    // depends only on bits 0..s of its operands, and the bottom KEY_TAG_BITS of
+    // every key operand are pinned to `tag` — so a shift below that would make
+    // the selector a CONSTANT, and findSelectorOperand could never satisfy the
+    // other semantic.
+    shift: getRandomInt(KEY_TAG_BITS, 31),
+    tag: getRandomInt(0, (1 << KEY_TAG_BITS) - 1),
+  };
+}
+
+/**
+ * The selector bit carried by key operand `k`.  MUST stay in lockstep with
+ * selectorSource() below — that is the whole contract between the bytecode pass
+ * that chooses `k` and the handler that decodes it.
+ */
+export function applySelector(k: number, key: SelectorKey): 0 | 1 {
+  return ((Math.imul(k ^ key.xor, key.mul) >>> key.shift) & 1) as 0 | 1;
+}
+
+/** JS source for applySelector(), for the generated handler body. */
+export function selectorSource(kExpr: string, key: SelectorKey): string {
+  return `((Math.imul(${kExpr} ^ ${key.xor}, ${key.mul}) >>> ${key.shift}) & 1)`;
+}
+
+/**
+ * A key operand whose selector bit is `want` AND whose low bits carry the
+ * handler's domain tag.  Drawn at random rather than derived, so no two sites
+ * share a key even when they select the same semantic: one draw in
+ * 2^(KEY_TAG_BITS+1) qualifies, which still leaves ~2^28 keys per semantic.
+ */
+export function findSelectorOperand(key: SelectorKey, want: 0 | 1): number {
+  const mask = (1 << KEY_TAG_BITS) - 1;
+  for (;;) {
+    // `>>> 0` because `&` and `|` yield a SIGNED int32, and a negative operand
+    // fails serialization (bytecode slots are u32).
+    const k = (((getRandomInt(0, U32_MAX) & ~mask) | key.tag) >>> 0);
+    if (applySelector(k, key) === want) return k;
+  }
+}
+
+/**
+ * Branchless two-way select: yields `buildZero()` when `sel` is even and
+ * `buildOne()` when it is odd.
+ *
+ * The two branches are passed as THUNKS, not expressions: the first form below
+ * needs two independent expansions of the same semantic, and re-drawing gives
+ * two structurally different subtrees that happen to be equal — which is a lot
+ * less legible than the same subtree written twice.
+ *
+ * Both branches must already be fully expanded and int32-truncated (i.e. they
+ * come from the high-level builders above).  The skeleton assembled here is
+ * deliberately NOT run through expandMBA: doing so could rewrite a `~~` or
+ * `| 0` produced by truncMBA into a form that preserves the value but drops the
+ * truncation, which is the same trap ltExpr documents.
+ */
+export function mbaSelectExpr(
+  buildZero: () => MBAExpr,
+  buildOne: () => MBAExpr,
+  sel: MBAExpr,
+): MBAExpr {
+  // `sel & 1` is pinned: the magnitude argument below depends on this factor
+  // being 0 or 1, and a value-preserving rewrite of `& 1` would not keep it.
+  const s: MBAExpr = { k: "bin", op: "&", l: sel, r: mNum(1), fixed: true };
+
+  // Both forms are exact for s in {0, 1}, and both stay far inside float64's
+  // exact-integer range: every branch is int32-truncated (<= 2^31) and the only
+  // multiplications are by 0 or 1.
+  if (chance(50)) {
+    // z + s*(o - z'), with z and z' independent expansions of the same value.
+    return truncMBA(
+      mAdd(buildZero(), mMul(s, mSub(buildOne(), buildZero()))),
+    );
+  }
+  // s*o + (s^1)*z — the classic branchless select, and a different shape.
+  return truncMBA(
+    mAdd(mMul(s, buildOne()), mMul(mXor(s, mNum(1)), buildZero())),
+  );
 }
 
 // ── Expansion engine ─────────────────────────────────────────────────────────
@@ -377,6 +896,19 @@ export interface MBAOptions {
    * is a plain single-variable MBA.
    */
   noise?: string[];
+  /**
+   * What is known to be true of each variable in every REAL execution, keyed by
+   * variable name.  Supplying one lets the engine add terms that vanish on that
+   * domain and nowhere else, which breaks the total-equivalence rule every
+   * sampling simplifier relies on.  See "Domain-restricted identities".
+   *
+   * Handler-only: the vectors are built from Math.imul, which has no opcode.
+   * Only ever describe a domain the COMPILER establishes; a domain an analysis
+   * merely inferred turns an analysis bug into a wrong answer.
+   */
+  domains?: Record<string, MBADomain>;
+  /** % chance a leaf expansion / root fold uses a domain null vector. */
+  poisonChance?: number;
   /** Always rewrite the root node (used for constant hiding). */
   forceRoot?: boolean;
 }
@@ -402,6 +934,8 @@ const DEFAULTS: ResolvedOptions = {
   mulChance: 40,
   leafDepth: 1,
   noise: [],
+  domains: {},
+  poisonChance: 0,
   frameVar: "",
   invVar: "",
   frameChance: 50,
@@ -418,6 +952,8 @@ function resolve(options: MBAOptions | undefined): ResolvedOptions {
   o.frameVar = o.frameVar || "";
   o.invVar = o.invVar || "";
   o.noise = o.noise ?? [];
+  o.domains = o.domains ?? {};
+  o.poisonChance = o.poisonChance ?? 0;
   // The frame binding needs BOTH halves; half of it is meaningless.
   if (!o.frameVar || !o.invVar) {
     o.frameVar = "";
@@ -469,8 +1005,33 @@ function rewrite(
     // operand actually hides it, so leaves demand one — the frame binding
     // counts, since those are variables too.
     const hasFrame = o.frameVar !== "";
-    if ((o.noise.length === 0 && !hasFrame) || leafD <= 0) return e;
+    const hasDomain =
+      o.poisonChance > 0 && Object.keys(o.domains).length > 0;
+    if ((o.noise.length === 0 && !hasFrame && !hasDomain) || leafD <= 0)
+      return e;
     if (!forced && !chance(o.identityChance)) return e;
+
+    // A domain-restricted fold beats both of the others.  An identity rule
+    // cancels by inspection for whatever value its operand holds; a frame-bound
+    // rule at least has to be evaluated, but it IS still an identity in the
+    // right frame.  This one is not an identity at all outside D, so a
+    // simplifier sampling the full space measures a different function and
+    // refuses every rewrite it would otherwise make.
+    //
+    // The vector itself is folded in un-rewritten: the leaf under it is
+    // expanded as usual, but rewriting the vector's own children would only
+    // spend budget weakening what it detects (an identity rule applies ToInt32
+    // to its subject, which is exactly the evidence the int32 vector reads).
+    if (hasDomain && chance(o.poisonChance)) {
+      const z = drawNullVector(o);
+      if (z)
+        return choice(DOMAIN_IDENTITY_RULES)(
+          rewrite(e, d, o, false, leafD - 1),
+          z,
+        );
+    }
+
+    if (o.noise.length === 0 && !hasFrame) return e;
 
     // A frame-bound rule is worth more than a plain identity: it cannot be
     // cancelled by inspection, only evaluated, and only in the right frame.
@@ -754,6 +1315,65 @@ export function mbaToAST(
   }
 }
 
+// ── Backend 2b: direct evaluation ────────────────────────────────────────────
+
+/**
+ * Evaluate `e` against a variable environment, using exactly the semantics the
+ * emitted JavaScript has.
+ *
+ * This exists for the build-time fit check (utils/mba-fit-check.ts), which has
+ * to answer the same question an attacker's black-box classifier asks — "what
+ * does this handler compute on these inputs?" — without generating, parsing and
+ * running the handler.  Keeping it here rather than in the checker keeps it
+ * next to the printer and the AST backend it has to agree with.
+ *
+ * An unbound variable is a build bug (mbaOpcodes would emit a bare identifier
+ * and fail at runtime), so it throws rather than defaulting.
+ */
+export function evalMBA(e: MBAExpr, env: Map<string, unknown>): any {
+  switch (e.k) {
+    case "num":
+      return e.value;
+    case "var": {
+      if (!env.has(e.name))
+        throw new Error(`evalMBA: unbound variable "${e.name}"`);
+      return env.get(e.name);
+    }
+    case "un": {
+      const v = evalMBA(e.v, env);
+      if (e.op === "~") return ~v;
+      if (e.op === "neg") return -v;
+      return !v;
+    }
+    case "bin": {
+      const l = evalMBA(e.l, env);
+      const r = evalMBA(e.r, env);
+      switch (e.op) {
+        case "+":
+          return l + r;
+        case "-":
+          return l - r;
+        case "*":
+          return l * r;
+        case "^":
+          return l ^ r;
+        case "&":
+          return l & r;
+        case "|":
+          return l | r;
+        case "<<":
+          return l << r;
+        case ">>":
+          return l >> r;
+        case ">>>":
+          return l >>> r;
+        default:
+          return Math.imul(l, r);
+      }
+    }
+  }
+}
+
 /** Total nodes in `e` — a size proxy for callers that want to reject a draw. */
 export function mbaNodeCount(e: MBAExpr): number {
   if (e.k === "bin") return 1 + mbaNodeCount(e.l) + mbaNodeCount(e.r);
@@ -792,6 +1412,7 @@ const BIN_OPCODE: Partial<Record<MBABinOp, string>> = {
   "&": "BAND",
   "|": "BOR",
   "<<": "SHL",
+  ">>": "SHR",
   ">>>": "USHR",
 };
 

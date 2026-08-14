@@ -280,16 +280,19 @@ function disassembleInstr(instr: ParsedInstr): string {
       const startPc = raw[2];
       const paramCount = raw[3];
       const regCount = raw[4];
+      // raw: [op, dst, startPc, paramCount, regCount, uvCount, hasRest, salt,
+      //       (isLocal, idx)…] — the pairs begin at 8.
+      const UV_PAIRS_AT = 8;
       // Bounded — garbage bytecode can name a huge uvCount here.
       const uvCount = Math.max(
         0,
-        Math.min(raw[5] ?? 0, Math.floor((raw.length - 6) / 2)),
+        Math.min(raw[5] ?? 0, Math.floor((raw.length - UV_PAIRS_AT) / 2)),
       );
       const label = extractLabel(annotation);
       const uvParts: string[] = [];
       for (let i = 0; i < uvCount; i++) {
-        const isLocal = raw[6 + i * 2];
-        const idx = raw[6 + i * 2 + 1];
+        const isLocal = raw[UV_PAIRS_AT + i * 2];
+        const idx = raw[UV_PAIRS_AT + i * 2 + 1];
         uvParts.push(isLocal ? `local[${idx}]` : `uv[${idx}]`);
       }
       const uvStr = uvCount > 0 ? `, upvalues=[${uvParts.join(", ")}]` : "";

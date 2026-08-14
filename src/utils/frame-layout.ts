@@ -24,9 +24,25 @@ import { choice, getRandomInt, shuffle } from "./random-utils.ts";
 //   HANDLERS    exception-handler stack (lazily created)
 //   FRAME_SIZE  HEADER_SIZE + regCount — the block's total length
 //   REG_BASE    absolute index of r0
+//   SALT        the executing function's 32-bit identity word (see below)
 //
 // REG_BASE is stored rather than derived so register access never depends on
 // the header layout; that is what lets the layout be randomized for free.
+//
+// SALT is the only slot nothing in the interpreter reads. It carries a random
+// u32 drawn per function at compile time and pushed into the frame from the
+// closure's descriptor, and it exists for the MBA layer: a frame-bound handler
+// multiplies by a value derived from it and by the modular inverse of the value
+// ITS OWN function is expected to have, so the handler is the identity in that
+// frame and garbage in every other one.
+//
+// It replaces the register count, which used to play that role. Both bind a
+// handler to a frame; the difference is the key space. A register count is a
+// small integer an attacker can enumerate — or recover with an oracle, since it
+// is a value the interpreter itself computes — while a salt is 2^32 wide, is
+// never derived from anything observable, and is per FUNCTION rather than per
+// frame SHAPE, so two functions that happen to use the same number of registers
+// no longer share handlers' key material.
 export const FRAME_SLOT_NAMES = [
   "PC",
   "CALLER",
@@ -36,6 +52,7 @@ export const FRAME_SLOT_NAMES = [
   "HANDLERS",
   "FRAME_SIZE",
   "REG_BASE",
+  "SALT",
 ] as const;
 
 export interface FrameLayout {

@@ -84,6 +84,22 @@ export interface Options {
   mba?: boolean;
 
   /**
+   * Verify every generated MBA handler at build time (default: on with `mba`).
+   *
+   * Two things are checked, and both are otherwise invisible:
+   * - that the handler computes what it replaced on the inputs it was built to
+   *   assume, and does not depend on the operands it promised not to. A failure
+   *   here is a wrong program, so it throws.
+   * - how much of the handler table a black-box operator classifier could still
+   *   identify — the same probe-and-match attack a devirtualizer runs. Reported
+   *   as a count (with `verbose`, as a list).
+   *
+   * Set to `false` to skip it; it costs a fraction of a second on a typical
+   * build and rather more on a very large one.
+   */
+  mbaFitCheck?: boolean;
+
+  /**
    * Function bodies are replaced upon runtime entry to the real bytecode.
    */
   selfModifying?: boolean;

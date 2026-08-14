@@ -23,13 +23,20 @@ import { U16_MAX, U32_MAX } from "./utils/op-utils.ts";
 import { concealConstants } from "./transforms/bytecode/concealConstants.ts";
 import { dispatcher } from "./transforms/bytecode/dispatcher.ts";
 import { mbaExpand } from "./transforms/bytecode/mbaExpand.ts";
+import { mbaSuperOps } from "./transforms/bytecode/mbaSuperOps.ts";
 import { analyzeIntTypes } from "./analysis/int-types.ts";
-import type { MBAExpr } from "./utils/mba-utils.ts";
+import type {
+  FrameKey,
+  MBADomain,
+  MBAExpr,
+  SelectorKey,
+} from "./utils/mba-utils.ts";
 import { controlFlowFlattening } from "./transforms/bytecode/controlFlowFlattening.ts";
 import { stringConcealing } from "./transforms/bytecode/stringConcealing.ts";
 import { getByteSize, now } from "./utils/profile-utils.ts";
 import { walkHoistScope } from "./utils/ast-utils.ts";
 import { createFrameLayout, type FrameLayout } from "./utils/frame-layout.ts";
+import { runMBAFitCheck } from "./utils/mba-fit-check.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -42,6 +49,44 @@ const readVMRuntimeFile = () => {
 
 export const VM_RUNTIME = readVMRuntimeFile().split("@START")[1];
 export const SOURCE_NODE_SYM = Symbol("SOURCE_NODE");
+
+// Marks an instruction a PASS generated (as opposed to one compiled from user
+// source) whose operands are int32 BY CONSTRUCTION — every value flowing
+// through it is a compiler-chosen u16 or the result of another such
+// instruction.  mbaExpand's "generated" phase uses this instead of the AST
+// int-type analysis, which cannot say anything about instructions that have no
+// source node.  Set by controlFlowFlattening on its state-machine arithmetic;
+// see mba-utils' correctness contract for why int32-ness is the precondition.
+export const MBA_SAFE_SYM = Symbol("MBA_SAFE");
+
+/**
+ * Value of MBA_SAFE_SYM.  `"hot"` additionally says the instruction sits on a
+ * path executed once per *edge* rather than once per block — CFF's dispatch
+ * chain, where every arm is re-evaluated on every state transition.  The MBA
+ * passes give those a smaller expansion budget: an arm's handler runs O(blocks)
+ * times more often than a block body's, so depth spent there is multiplied by
+ * the block count at runtime while buying no more resistance than merging and
+ * frame-binding already do.
+ */
+export type MBASafeMark = true | "hot";
+
+/**
+ * What a generating pass knows about the VALUES its instruction's operands can
+ * hold, keyed by operand index (`instr[i]`).
+ *
+ * MBA_SAFE_SYM already promises int32-ness, which is the correctness
+ * precondition.  This is the stronger, optional statement — "this operand is a
+ * 0/-1 mask", "this one is congruent to 5 mod 16" — that lets the MBA layer add
+ * terms vanishing on exactly that set and nowhere else, so the handler stops
+ * being extensionally equal to any operator on the probes a black-box
+ * classifier draws.  See mba-utils' "Domain-restricted identities".
+ *
+ * Only ever set this from a fact the compiler ESTABLISHED.  A domain that is
+ * merely likely turns a analysis slip into a miscompile, since the vector
+ * would fire during a real execution instead of vanishing.
+ */
+export const MBA_DOMAINS_SYM = Symbol("MBA_DOMAINS");
+export type MBAOperandDomains = Record<number, MBADomain>;
 
 // Opcodes
 // Register-based encoding.  Operand convention (x86 / CPython style):
@@ -295,6 +340,14 @@ interface FnDescriptor {
   hasRest?: boolean;
 
   /**
+   * This function's identity word: a random u32 emitted as a MAKE_CLOSURE
+   * operand, pushed into the frame's SALT slot at call time, and used by the
+   * MBA layer to bind a generated handler to this function. Nothing in the
+   * interpreter reads it. See utils/frame-layout.ts.
+   */
+  salt?: number;
+
+  /**
    * Only populated AFTER resolveLabels
    */
   startPc?: number;
@@ -359,12 +412,102 @@ export class Compiler {
       /** Tier 0: coerce operands with `~~` before the identity runs. */
       normalize: boolean;
       /**
-       * When non-null, this handler is FRAME-BOUND: the runtime pass bakes in
-       * the modular inverse of this function's register count, so the handler
-       * only computes the right answer inside a frame with that count. Null
-       * means a generic handler, correct in any frame.
+       * When non-null, this handler is FRAME-BOUND: it derives a multiplier
+       * from the executing frame's SALT slot and multiplies by the baked
+       * inverse of THIS function's salt, so it computes the right answer only
+       * inside this function. Null means a generic handler, correct anywhere.
        */
       fnId: number | null;
+      /**
+       * The two scramble words and the baked inverse behind that binding, drawn
+       * by the bytecode pass that registered the handler. Present exactly when
+       * the expression mentions the frame variable.
+       *
+       * Drawn there rather than in the runtime pass that emits the body so the
+       * build-time fit check can reconstruct a genuine frame — a checker that
+       * had to guess the salt would measure a handler no real execution ever
+       * runs, and would pass everything.
+       */
+      frame?: FrameKey;
+      /**
+       * When present, this handler is MERGED: it hosts two different semantics
+       * and reads one extra operand — a per-site key whose selector bit picks
+       * which one runs. The handler is then equal to no single operator, so
+       * sampling it over its operands identifies nothing. See mba-utils'
+       * "Key-selected semantics" section.
+       */
+      select?: {
+        /** Semantic computed when the selector bit is 0 / 1. */
+        zeroName: string;
+        oneName: string;
+        key: SelectorKey;
+      };
+      /**
+       * MBA variable names bound to the instruction's SOURCE operands, in the
+       * order the instruction carries them (after the destination).  Absent
+       * means the plain one- or two-source form, `["a"]` / `["a", "b"]`.
+       *
+       * A SUPEROPERATOR names one per leaf register of the fused chain, which
+       * is how a single handler can read four or five sources and still write
+       * only one destination — the intermediates of the chain never exist.
+       */
+      srcNames?: string[];
+      /**
+       * How each `srcNames` entry is read, positionally.  "reg" is the usual
+       * `regs[base + operand]`; "imm" reads the operand itself as a value, which
+       * is how a superoperator absorbs a folded LOAD_INT — the immediate becomes
+       * an untyped operand consumed somewhere inside the mixture instead of a
+       * legible integer load standing in front of it.
+       */
+      srcKinds?: ("reg" | "imm")[];
+      /**
+       * Names of the sources that are TAINT operands: registers folded in
+       * through cancelling identities only, so the handler's value does not
+       * depend on them.
+       *
+       * They exist for the attacker's constant propagation rather than for its
+       * operator classifier. A devirtualizer recovers a flattened CFG by
+       * executing handlers against concrete state; a taint operand names a
+       * register whose value that analysis does not have, which widens the
+       * result to unknown and leaves the computed jump unresolved. The compiled
+       * program is unaffected — the identity cancels for every value, which the
+       * build-time fit check verifies rather than assumes.
+       */
+      taintNames?: string[];
+      /**
+       * The OP_SPECS names this handler implements, indexed by selector bit —
+       * `["ADD"]` for a single-semantic handler, `["ADD", "SUB"]` for a merged
+       * one. Absent means there is no single operator behind it: a
+       * superoperator fuses a whole chain, and a state transition is a decode,
+       * an add and an encode.
+       *
+       * Recorded so utils/mba-fit-check.ts can verify at build time that the
+       * handler really does compute what it replaced, on inputs drawn from the
+       * domains its expansion was allowed to assume. That is the check that
+       * turns a wrong domain claim from a rare, seed-dependent miscompile into
+       * a build failure.
+       */
+      semantics?: string[];
+      /**
+       * Operand domains this handler's expansion was allowed to assume, keyed
+       * by source name. Recorded so the fit check knows which handlers are
+       * REQUIRED to match no operator (the ones carrying a vector that fires on
+       * integer probes) and which are only expected to.
+       */
+      domains?: Record<string, MBADomain>;
+      /**
+       * Straight-line bindings evaluated before `expr`, in order — each may
+       * reference the ones before it and every source name.  mbaOpcodes gives
+       * each a fresh local.
+       *
+       * This exists so an encoded-domain handler can name its intermediates.
+       * MBAExpr is a tree with no sharing, and the rounds of an encoding
+       * reference their input several times each (a rotate twice, a Horner
+       * chain once per degree), so writing the whole decode-compute-encode as
+       * ONE expression multiplies out to six figures of nodes. Binding each
+       * round makes it additive. See utils/encoding-utils.ts.
+       */
+      bindings?: [string, MBAExpr][];
     }
   >;
 
@@ -586,7 +729,12 @@ export class Compiler {
 
     var fnIdx = this.fnDescriptors.length;
     const entryLabel = this._makeLabel(`fn_${fnIdx}`);
-    const desc: FnDescriptor = {};
+    // Drawn here rather than lazily, so every pass downstream can bind to a
+    // function's identity word without caring whether one has been needed yet.
+    // Odd is not required — mbaOpcodes scrambles it into an odd multiplier —
+    // but a zero salt would make two functions with no MBA handlers agree, so
+    // the low bit is set to keep every draw distinct from the default.
+    const desc: FnDescriptor = { salt: (getRandomInt(0, U32_MAX) | 1) >>> 0 };
     this.fnDescriptors.push(desc);
 
     const ctx = new FnContext(this, this._currentCtx, fnIdx);
@@ -733,7 +881,8 @@ export class Compiler {
   }
 
   // Emit MAKE_CLOSURE with all metadata as inline operands.
-  // Layout: dst, startPc, paramCount, regCount, uvCount, [isLocal, idx, …]
+  // Layout: dst, startPc, paramCount, regCount, uvCount, hasRest, salt,
+  //         [isLocal, idx, …]
   // regCount is emitted as a fnRegCount IR operand; resolveRegisters() fills it.
   _emitMakeClosure(desc: FnDescriptor, node: t.Node, ctx: FnContext) {
     // const ctx = this._currentCtx!;
@@ -753,6 +902,7 @@ export class Compiler {
         b.fnRegCountOperand(desc._fnIdx), // resolved by resolveRegisters()
         desc.upvalues.length,
         desc.hasRest ? 1 : 0, // 1 = last param is a rest element
+        desc.salt!, // frame SALT slot seed — see utils/frame-layout.ts
         ...uvOperands,
       ] as b.Instruction,
       node,
@@ -3253,6 +3403,7 @@ class Serializer {
 
     sections.push(`var MAIN_START_PC = ${mainStartPc};`);
     sections.push(`var MAIN_REG_COUNT = ${mainRegCount};`);
+    sections.push(`var MAIN_SALT = ${compiler.mainFn.salt};`);
     sections.push(`var ENCODE_BYTECODE = ${!!this.options.encodeBytecode};`);
     sections.push(
       `var TIMING_CHECKS = ${
@@ -3357,6 +3508,26 @@ export async function compileAndSerialize(
     });
   }
 
+  // The second half of the MBA layer, and the reason controlFlowFlattening
+  // emits plain bytecode: it marks its state-machine arithmetic MBA-safe, and
+  // these two turn that arithmetic into HANDLERS rather than into more
+  // instructions.  Order matters — mbaSuperOps fuses whole dataflow chains into
+  // one handler each, and the "generated" phase of mbaExpand then converts
+  // whatever was left over one instruction at a time.
+  //
+  // Both are gated on `mba` alone: with the option off, CFF's output stays the
+  // plain state machine, which is exactly the pre-MBA behaviour.
+  if (intFacts) {
+    passes.push({
+      pass: mbaSuperOps,
+      name: "mbaSuperOps",
+    });
+    passes.push({
+      pass: (bc, c) => mbaExpand(bc, c, null, "generated"),
+      name: "mbaExpand:generated",
+    });
+  }
+
   if (options.dispatcher) {
     passes.push({
       pass: dispatcher,
@@ -3449,6 +3620,20 @@ export async function compileAndSerialize(
 
   for (const pass of passes) {
     runAndTime(pass.pass, pass.name);
+  }
+
+  // Every MBA handler is a random draw, and two of the things that can go wrong
+  // with one are invisible in the output: a domain claim that does not hold
+  // (a miscompile on some seeds and not others) and a handler that is still
+  // extensionally equal to the operator it replaced (correct, and worthless).
+  // Both are decidable here, so they are decided here rather than in the field.
+  // See utils/mba-fit-check.ts.
+  if (options.mba && options.mbaFitCheck !== false) {
+    const startedAt = now();
+    runMBAFitCheck(compiler);
+    compiler.profileData.transforms["mbaFitCheck"] = {
+      transformTime: now() - startedAt,
+    };
   }
 
   // Resolve virtual registers to concrete slot indices and set regCount per fn.

@@ -239,6 +239,7 @@ export function stringConcealing(
       b.fnRegCountOperand(desc._fnIdx),
       0, // upvalue count
       0, // hasRest
+      desc.salt, // frame SALT slot seed
     ] as unknown as Instruction;
 
   const { bytecode } = forEachFunction(bc, compiler, (fnInstrs, fnId) => {

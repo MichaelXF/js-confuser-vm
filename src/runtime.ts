@@ -2,6 +2,7 @@ import { OP_ORIGINAL as OP } from "./compiler.ts";
 const BYTECODE = [];
 const MAIN_START_PC = 0;
 const MAIN_REG_COUNT = 0;
+const MAIN_SALT = 0;
 const CONSTANTS = [];
 const ENCODE_BYTECODE = false;
 const TIMING_CHECKS = false;
@@ -127,6 +128,10 @@ VM.prototype._pushFrame = function (closure, args, thisVal, retDst) {
   regs[fp + SLOTS.CLOSURE] = closure;
   regs[fp + SLOTS.FRAME_SIZE] = size;
   regs[fp + SLOTS.REG_BASE] = base;
+  // The executing function's identity word. Nothing here reads it; generated
+  // MBA handlers do, and only compute correctly when it matches the function
+  // they were built for. See utils/frame-layout.ts.
+  regs[fp + SLOTS.SALT] = fn.salt;
 
   // Seeds for the decoy header slots this build happens to have (see utils/frame-layout.ts)
   /* @NOISE */
@@ -676,13 +681,14 @@ VM.prototype.run = function (closure, thisVal, args) {
 
         // Closures
         case OP.MAKE_CLOSURE: {
-          // dst, startPc, paramCount, regCount, uvCount, hasRest, [isLocal, idx, ...]
+          // dst, startPc, paramCount, regCount, uvCount, hasRest, salt, [isLocal, idx, ...]
           var dst = this._operand();
           var startPc = this._operand();
           var paramCount = this._operand();
           var regCount = this._operand();
           var uvCount = this._operand();
           var hasRest = this._operand(); // 1 if last param is a rest element
+          var salt = this._operand(); // this function's identity word (SLOTS.SALT)
 
           var uvDescs = new Array(uvCount);
           for (var i = 0; i < uvCount; i++) {
@@ -700,6 +706,7 @@ VM.prototype.run = function (closure, thisVal, args) {
             regCount: regCount,
             startPc: startPc,
             hasRest: hasRest,
+            salt: salt,
           };
 
           var closure = new Closure(fn);
@@ -970,6 +977,7 @@ vm.run(
     paramCount: 0,
     regCount: MAIN_REG_COUNT,
     startPc: MAIN_START_PC,
+    salt: MAIN_SALT,
   }),
   undefined,
   null, // no arguments object / parameter setup for the root frame

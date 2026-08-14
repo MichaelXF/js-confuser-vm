@@ -560,6 +560,7 @@ function processFunctionBlock(
     b.fnRegCountOperand(decodeDesc._fnIdx), // resolved by resolveRegisters()
     0, // no upvalues
     0, // hasRest = false
+    decodeDesc.salt!, // frame SALT slot seed
   ] as Instruction);
 
   // Write the site key into the register(s) the decode closure expects.
