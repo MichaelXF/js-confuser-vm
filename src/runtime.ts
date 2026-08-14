@@ -654,8 +654,12 @@ VM.prototype.run = function (closure, thisVal, args) {
           var caller = regs[fp + SLOTS.CALLER];
           var retDst = regs[fp + SLOTS.RET_DST];
 
-          // NewExpression: When invoking from the 'new' keyword, the newly constructed object is returned instead (if the original function doesn't return an object)
-          if (retDst & 1 && (typeof retVal !== "object" || retVal === null))
+          // NewExpression: When invoking from the 'new' keyword, the newly constructed object is returned instead (if the original function doesn't return an object or function)
+          if (
+            retDst & 1 &&
+            (retVal === null ||
+              (typeof retVal !== "object" && typeof retVal !== "function"))
+          )
             retVal = regs[fp + SLOTS.THIS];
 
           // Zero out the callee's whole block (header included) to limit
