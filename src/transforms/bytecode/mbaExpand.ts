@@ -43,8 +43,10 @@ import type { Bytecode, Instruction, RegisterOperand } from "../../types.ts";
 import {
   Compiler,
   MBA_DOMAINS_SYM,
+  MBA_KEYMIX_SYM,
   MBA_SAFE_SYM,
   SOURCE_NODE_SYM,
+  type MBAKeyMix,
   type MBAOperandDomains,
   type MBASafeMark,
 } from "../../compiler.ts";
@@ -80,6 +82,7 @@ import {
   mbaVarNames,
   poisonMBA,
   poisonedLeaf,
+  selectorDstShift,
   type FrameKey,
   type MBADomain,
   type MBAEmitContext,
@@ -261,6 +264,35 @@ const POISON_CHANCE = 45;
 // identifies. A bound one is not liftable out of its frame at all.
 const FRAME_BOUND_CHANCE = 85;
 
+// Salt-selected vs frame-bound
+// ───────────────────────────────────────────────────────────────────────────
+// A merged handler can take its salt dependence through the SELECTOR instead of
+// through the multiplicative binding, and where it can, it should. The two are
+// mutually exclusive and the reason is an oracle.
+//
+// The multiplicative binding makes a wrong salt compute garbage, and garbage is
+// a signal. `imul(v, c)` has exactly one recognisable answer, so an attacker
+// holding a handful of candidate salts — five, in an analysed sample — tries
+// each and reads off the unique one that yields 1. One closed-form evaluation
+// over a tiny set, no execution required. That is how the binding was broken in
+// the field.
+//
+// Routing the salt through the selector removes the signal instead of hardening
+// it. A wrong salt flips the bit for half of all wrong salts, so the handler
+// computes its PARTNER semantic — `SUB` where the program means `ADD`. Both are
+// total, neither throws, and neither is distinguishable by inspection. Every
+// candidate salt now produces a clean operator fit and nothing picks one out.
+//
+// Carrying both would give the whole thing back: the multiplicative oracle
+// names the salt, and the named salt resolves the selector. So a merged site
+// draws one or the other, and mostly this one.
+const SALT_SELECTED_CHANCE = 80;
+
+// % of merged handlers that also derive their DESTINATION from the selector
+// word. Not all of them, so "reads four operands and writes somewhere the
+// operand does not name" is not simply what a merged opcode looks like.
+const DST_SHIFT_CHANCE = 55;
+
 // Merged handlers
 // ───────────────────────────────────────────────────────────────────────────
 // Everything above keeps the property that ruins it: a generated handler still
@@ -313,6 +345,19 @@ interface MergedVariant {
   oneName: string;
   key: SelectorKey;
 }
+
+// Which frame the handler's identity is tied to, and how.
+//
+//   fnId           the function whose salt is key material, or null for a
+//                  handler that is correct in any frame.
+//   multiplicative the FRAME_BOUND_RULES binding (`v` / `c`).  Never combined
+//                  with a salt-selected selector — see SALT_SELECTED_CHANCE.
+interface Binding {
+  fnId: number | null;
+  multiplicative: boolean;
+}
+
+const GENERIC: Binding = { fnId: null, multiplicative: false };
 
 export interface OpSpec {
   /** 0 = int32 by JS spec (needs operand normalisation); 1 = analysis-gated. */
@@ -464,12 +509,24 @@ export function mbaExpand(
     srcDomains: (MBADomain | undefined)[];
     /** The taint register to append, or null.  See utils/mba-taint.ts. */
     taint: RegisterOperand | null;
+    /**
+     * A register whose value at this instruction the generating pass knows,
+     * folded into a merged handler's selector.  See MBA_KEYMIX_SYM.
+     */
+    keyMix: MBAKeyMix | null;
     /** Every register input is a build-time constant.  See budgetFor. */
     constFed: boolean;
   }
 
   // Handler-identity key.  A cache miss costs one more handler; a false HIT
   // costs correctness, so everything the body was built from goes in here.
+  //
+  // The key-mix is absent on purpose, in both halves.  Its VALUE does not
+  // belong here because two sites with different values share a handler
+  // happily — the per-site key operand is solved against whatever that site
+  // supplies.  Its PRESENCE does change the operand count, but only for a
+  // merged handler, so it is folded into the merged cache key instead of
+  // splitting the shared pool that unmerged handlers also draw from.
   const siteKey = (site: Site): string =>
     [
       site.hot ? "hot" : "cold",
@@ -741,33 +798,40 @@ export function mbaExpand(
     redraw((o) => buildExpr(spec, kind, site, o), kind, site, !!spec.boolean);
 
   // Sources the INSTRUCTION carries, in operand order: the real ones, then the
-  // taint. mbaOpcodes reads them in exactly this order.
-  const srcNamesFor = (spec: OpSpec, site: Site) => {
+  // taint, then the key-mix register. mbaOpcodes reads them in exactly this
+  // order and takes the merged key operand after all of them.
+  const KEY_MIX_VAR = "m";
+  const srcNamesFor = (spec: OpSpec, site: Site, merged: boolean) => {
     const names = spec.arity === 3 ? ["a", "b"] : ["a"];
     if (site.taint) names.push(TAINT_VAR);
+    // Only a merged handler has a selector to mix into; carrying the operand
+    // anywhere else would be a read with no consumer.
+    const keyMix = merged && site.keyMix ? KEY_MIX_VAR : null;
+    if (keyMix) names.push(keyMix);
     return {
       srcNames: names,
       srcKinds: names.map(() => "reg" as const),
       taintNames: site.taint ? [TAINT_VAR] : undefined,
+      keyMixName: keyMix ?? undefined,
     };
   };
 
-  const frameKeyFor = (fnId: number | null): FrameKey | undefined =>
-    fnId === null
-      ? undefined
-      : frameKeyConstants(compiler.fnDescriptors[fnId]?.salt ?? 0);
+  const frameKeyFor = (binding: Binding): FrameKey | undefined =>
+    binding.multiplicative && binding.fnId !== null
+      ? frameKeyConstants(compiler.fnDescriptors[binding.fnId]?.salt ?? 0)
+      : undefined;
 
   const newVariant = (
     name: string,
     spec: OpSpec,
     originalOp: number,
-    fnId: number | null,
+    binding: Binding,
     label: string,
     site: Site,
   ): number | null => {
     const slot = nextFreeSlot(compiler);
     if (slot === -1) return null;
-    const kind = fnId === null ? "handler" : "frameBound";
+    const kind = binding.multiplicative ? "frameBound" : "handler";
     const srcs = spec.arity === 3 ? ["a", "b"] : ["a"];
     const domains = domainsFor(kind, null, site, srcs);
     compiler.MBA_OPS[slot] = {
@@ -775,13 +839,15 @@ export function mbaExpand(
       arity: spec.arity + (site.taint ? 1 : 0),
       expr: buildHandlerExpr(spec, kind, site),
       normalize: spec.tier === 0,
-      // Non-null means the runtime pass bakes the inverse of this function's
-      // salt into the handler; the handler is then only correct inside it.
-      fnId,
-      frame: frameKeyFor(fnId),
+      // The function this handler's identity is tied to. `frame` decides HOW:
+      // present means the multiplicative binding, absent means the salt reaches
+      // the handler through a merged selector instead (or, for an unmerged
+      // generic handler, not at all).
+      fnId: binding.fnId,
+      frame: frameKeyFor(binding),
       domains,
       semantics: [name],
-      ...srcNamesFor(spec, site),
+      ...srcNamesFor(spec, site, false),
     };
     compiler.OP_NAME[slot] = `MBA_${name}_${label}`;
     return slot;
@@ -803,7 +869,7 @@ export function mbaExpand(
     if (!list) {
       list = [];
       for (let i = 0; i < VARIANTS_PER_OP; i++) {
-        const slot = newVariant(name, spec, originalOp, null, String(i), site);
+        const slot = newVariant(name, spec, originalOp, GENERIC, String(i), site);
         if (slot === null) break;
         list.push(slot);
       }
@@ -826,7 +892,14 @@ export function mbaExpand(
     if (!frameBoundVariants.has(key)) {
       frameBoundVariants.set(
         key,
-        newVariant(name, spec, originalOp, fnId, `f${fnId}`, site),
+        newVariant(
+          name,
+          spec,
+          originalOp,
+          { fnId, multiplicative: true },
+          `f${fnId}`,
+          site,
+        ),
       );
     }
     return frameBoundVariants.get(key) ?? null;
@@ -840,31 +913,42 @@ export function mbaExpand(
     n0: string,
     n1: string,
     group: MergeGroup,
-    fnId: number | null,
+    binding: Binding,
     site: Site,
   ): MergedVariant[] => {
     const [zeroName, oneName] = [n0, n1].sort();
+    // Salt-selected and multiplicative variants must not share a cache entry:
+    // they differ in what the body reads, not merely in how it was drawn.
+    const bindTag =
+      binding.fnId === null
+        ? "generic"
+        : `${binding.multiplicative ? "mul" : "sel"}:${binding.fnId}`;
     const cacheKey =
-      (fnId === null
-        ? `${zeroName}|${oneName}`
-        : `${zeroName}|${oneName}:${fnId}`) + `#${siteKey(site)}`;
+      `${zeroName}|${oneName}@${bindTag}` +
+      `${site.keyMix ? "+m" : ""}#${siteKey(site)}`;
 
     let list = mergedVariants.get(cacheKey);
     if (list) return list;
 
     list = [];
-    // Frame-bound variants are minted one per (pair, function): the function
-    // already supplies the diversity, so more would only inflate the handler
-    // count — the same policy frameBoundVariantFor follows.
-    const count = fnId === null ? VARIANTS_PER_OP : 1;
+    // Variants bound to a function are minted one per (pair, function): the
+    // function already supplies the diversity, so more would only inflate the
+    // handler count — the same policy frameBoundVariantFor follows.
+    const count = binding.fnId === null ? VARIANTS_PER_OP : 1;
     for (let i = 0; i < count; i++) {
       const slot = nextFreeSlot(compiler);
       if (slot === -1) break;
 
-      const key = makeSelectorKey();
+      // The selector folds in the frame's salt exactly when this handler is
+      // bound to a function WITHOUT the multiplicative rules — see
+      // SALT_SELECTED_CHANCE for why the two are exclusive.
+      const key = makeSelectorKey({
+        useSalt: binding.fnId !== null && !binding.multiplicative,
+        dstShift: chance(DST_SHIFT_CHANCE),
+      });
       const zeroSpec = OP_SPECS[zeroName];
       const oneSpec = OP_SPECS[oneName];
-      const kind = fnId === null ? "handler" : "frameBound";
+      const kind = binding.multiplicative ? "frameBound" : "handler";
       const srcs = zeroSpec.arity === 3 ? ["a", "b"] : ["a"];
       const domains = domainsFor(kind, key, site, srcs);
 
@@ -874,7 +958,8 @@ export function mbaExpand(
         originalOp: OP[zeroName]!,
         // The key operand is not counted here: `arity` is the instruction's
         // source count, and mbaOpcodes reads the key separately, after them.
-        arity: zeroSpec.arity + (site.taint ? 1 : 0),
+        arity:
+          zeroSpec.arity + (site.taint ? 1 : 0) + (site.keyMix ? 1 : 0),
         expr: redraw(
           (o) =>
             buildMergedExpr(
@@ -893,13 +978,13 @@ export function mbaExpand(
         // Groups never straddle tiers, so one normalisation rule is correct for
         // both branches.
         normalize: zeroSpec.tier === 0,
-        fnId,
-        frame: frameKeyFor(fnId),
+        fnId: binding.fnId,
+        frame: frameKeyFor(binding),
         domains,
         // Index = selector bit, matching `select`.
         semantics: [zeroName, oneName],
         select: { zeroName, oneName, key },
-        ...srcNamesFor(zeroSpec, site),
+        ...srcNamesFor(zeroSpec, site, true),
       };
       compiler.OP_NAME[slot] = `MBA_SEL_${mergedSeq++}`;
       list.push({ op: slot, zeroName, oneName, key });
@@ -910,13 +995,14 @@ export function mbaExpand(
   };
 
   // Pick a merged opcode able to serve `name`, plus the key operand that makes
-  // it compute `name` rather than its partner.  Returns null when the opcode
-  // space is exhausted or the op has no same-tier partner.
+  // it compute `name` rather than its partner, and the destination shift that
+  // key implies.  Returns null when the opcode space is exhausted or the op has
+  // no same-tier partner.
   const mergedSiteFor = (
     name: string,
-    fnId: number | null,
+    binding: Binding,
     site: Site,
-  ): { op: number; keyOperand: number } | null => {
+  ): { op: number; keyOperand: number; dstShift: number } | null => {
     const group = groupFor(name);
     if (!group) return null;
     const partners = group.names.filter(
@@ -924,15 +1010,32 @@ export function mbaExpand(
     );
     if (partners.length === 0) return null;
 
-    const list = mergedVariantsFor(name, choice(partners), group, fnId, site);
+    const list = mergedVariantsFor(name, choice(partners), group, binding, site);
     if (list.length === 0) return null;
 
     const variant = choice(list);
     const bit = name === variant.zeroName ? 0 : 1;
+
+    // Everything the handler XORs into the key before deriving the selector,
+    // which is everything the compiler knows and an attacker has to recover:
+    // this function's salt, and the key-mix register's value here.  The key
+    // operand is solved against it, so the SAME literal at a site with a
+    // different state word — or in a frame with a different salt — selects the
+    // other semantic.
+    const mix =
+      (variant.key.useSalt
+        ? compiler.fnDescriptors[binding.fnId ?? -1]?.salt ?? 0
+        : 0) ^ (site.keyMix ? site.keyMix.value : 0);
+
     // A fresh random key per site, not a shared constant: half of the 2^32
     // operands select each semantic, so no two sites need share a literal even
     // when they ask for the same one.
-    return { op: variant.op, keyOperand: findSelectorOperand(variant.key, bit) };
+    const keyOperand = findSelectorOperand(variant.key, bit, mix);
+    return {
+      op: variant.op,
+      keyOperand,
+      dstShift: selectorDstShift(keyOperand, variant.key, mix),
+    };
   };
 
   const result: Bytecode = [];
@@ -999,12 +1102,12 @@ export function mbaExpand(
     // transition (see MBAPhase).
     if (phase === "generated" || chance(handlerChance)) {
       const siteFnId = findFnId(instr)!;
-      const boundFnId = chance(FRAME_BOUND_CHANCE) ? siteFnId : null;
 
       // Declared operand domains, read off the instruction the generating pass
       // stamped.  Indexed by operand position there; positional here, since the
       // handler names its sources `a` / `b` in the same order.
       const declared = meta[MBA_DOMAINS_SYM] as MBAOperandDomains | undefined;
+      const keyMix = meta[MBA_KEYMIX_SYM] as MBAKeyMix | undefined;
       const site: Site = {
         hot,
         srcDomains: [declared?.[2], ...(binary ? [declared?.[3]] : [])],
@@ -1014,22 +1117,47 @@ export function mbaExpand(
         // going to happen — while the state machine is ALL constants, which is
         // exactly what makes it foldable and worth breaking.
         taint: phase === "generated" ? taintFor(siteFnId) : null,
+        // Only usable on a register of THIS function's frame — another
+        // function's operand would be read out of the wrong register window,
+        // and the selector would come out of a value that is not there.
+        keyMix:
+          keyMix && keyMix.reg.fnId === siteFnId ? keyMix : null,
         constFed: constRegs.isConstFed(instr),
       };
+
+      // How this handler's identity is tied to the frame. A merged site
+      // normally takes the salt through its SELECTOR, where a wrong salt
+      // produces a wrong operator rather than the garbage that gives the
+      // multiplicative binding away; an unmerged one has no selector, so the
+      // multiplicative rules are all it can use.
+      const boundHere = chance(FRAME_BOUND_CHANCE);
+      const wantMerged = chance(MERGE_CHANCE);
+      const binding: Binding = !boundHere
+        ? GENERIC
+        : {
+            fnId: siteFnId,
+            multiplicative: !(wantMerged && chance(SALT_SELECTED_CHANCE)),
+          };
 
       // Merged first: it is the only form that is not a pure function of the
       // instruction's own operands, so it is the only one a black-box
       // classifier cannot identify by sampling.
-      const merged = chance(MERGE_CHANCE)
-        ? mergedSiteFor(name, boundFnId, site)
-        : null;
+      const merged = wantMerged ? mergedSiteFor(name, binding, site) : null;
       if (merged !== null) {
+        const dst = cloneReg(instr[1] as RegisterOperand);
+        // The operand stops naming the register the instruction writes: the
+        // handler XORs the same shift back out of its selector word, so the two
+        // cancel — but only in a frame whose salt reproduces that word.
+        if (merged.dstShift !== 0) dst.xorShift = merged.dstShift;
+
         const replacement: Instruction = [
           merged.op,
-          ...(instr.slice(1) as Instruction[number][]),
-          // Taint first, then the key: mbaOpcodes reads every source in
+          dst,
+          ...(instr.slice(2) as Instruction[number][]),
+          // Taint, then key-mix, then the key: mbaOpcodes reads every source in
           // `srcNames` order and the key operand last of all.
           ...(site.taint ? [{ ...site.taint }] : []),
+          ...(site.keyMix ? [{ ...site.keyMix.reg }] : []),
           merged.keyOperand,
         ];
         (replacement as unknown as Record<symbol, unknown>)[SOURCE_NODE_SYM] =
@@ -1041,7 +1169,7 @@ export function mbaExpand(
       }
 
       const variant =
-        boundFnId !== null
+        binding.fnId !== null
           ? frameBoundVariantFor(name, spec, op as number, siteFnId, site)
           : genericVariantFor(name, spec, op as number, site);
       if (variant !== null) {
@@ -1102,6 +1230,7 @@ export function mbaExpand(
       hot: false,
       srcDomains: [],
       taint: null,
+      keyMix: null,
       constFed: constRegs.isConstFed(instr),
     };
     const resultReg = emitMBA(

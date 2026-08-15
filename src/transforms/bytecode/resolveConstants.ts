@@ -1,5 +1,6 @@
 import type * as b from "../../types.ts";
-import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
+import { Compiler } from "../../compiler.ts";
+import { copyInstrMeta } from "../../utils/pass-utils.ts";
 import { getRandomInt } from "../../utils/random-utils.ts";
 import { U32_MAX } from "../../utils/op-utils.ts";
 
@@ -128,9 +129,9 @@ export function resolveConstants(
         }
       });
 
-      const newInstr = [op, ...newOperands] as b.Instruction;
-      (newInstr as any)[SOURCE_NODE_SYM] = (instr as any)[SOURCE_NODE_SYM];
-      resolved.push(newInstr);
+      resolved.push(
+        copyInstrMeta(instr, [op, ...newOperands] as b.Instruction),
+      );
     } else {
       resolved.push(instr);
     }

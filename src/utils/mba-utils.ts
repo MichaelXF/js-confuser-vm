@@ -744,6 +744,42 @@ export function poisonMBA(e: MBAExpr, options?: MBAOptions): MBAExpr {
 // and the expensive one has to model a third input.  Callers should also feed
 // `s` and `k` into `noise`, which raises the arity any evaluation-based solver
 // has to cover from two variables to four.
+//
+// ── Salt-selected semantics ──────────────────────────────────────────────────
+//
+// A key operand read straight off the instruction is still a per-site CONSTANT,
+// so a fitter that probes one site at a time recovers that site's operator
+// anyway.  The fix is to fold values into the key that an attacker does not
+// have, so `k` alone decides nothing:
+//
+//     s = bit( imul((k ^ salt ^ mixReg) ^ xor, mul), shift )
+//
+//   • `salt` is the executing frame's decoded SALT slot (`useSalt`).
+//   • `mixReg` is a register whose value at this site the COMPILER knows and an
+//     attacker's constant propagation does not — in practice the flattening
+//     state register, which makes recovering the operator circular with
+//     recovering the state.  See transforms/bytecode/mbaExpand.ts.
+//
+// The salt term is the important one, and not for the reason a frame binding is
+// normally added.  FRAME_BOUND_RULES bind a handler to a function by making it
+// compute GARBAGE elsewhere, and garbage is a signal: `imul(v, c)` has one
+// recognisable answer (1), so an attacker holding a handful of candidate salts
+// tries each and reads off the unique one that cancels.  That is a closed-form
+// oracle over a five-element set, and it is how the binding was broken in the
+// field.
+//
+// Routing the salt through the SELECTOR instead removes the signal rather than
+// hardening it.  A wrong salt flips the bit for half of all wrong salts, so the
+// handler computes its PARTNER semantic — `SUB` where the program means `ADD`.
+// Both are total, neither throws, and neither is distinguishable from the
+// correct one by inspection.  Every candidate salt now yields a clean operator
+// fit and there is no tie-breaker; the attacker gets two consistent hypotheses
+// per site instead of one right answer.
+//
+// The two mechanisms do not compose, and callers must pick one per handler: a
+// salt-selected handler that ALSO carries the multiplicative binding still
+// hands over the `imul(v, c) === 1` oracle, which points at the salt that then
+// resolves the selector.  See FRAME_BOUND_CHANCE in mbaExpand.
 
 /**
  * Constants for one merged handler's selector derivation.  `mul` is odd so
@@ -763,12 +799,36 @@ export interface SelectorKey {
    * See "Domain-restricted identities".
    */
   tag: number;
+  /**
+   * Fold the executing frame's SALT into the key before deriving the bit.  See
+   * "Salt-selected semantics" below — this is what makes a wrong salt produce a
+   * wrong OPERATOR rather than a wrong value.
+   */
+  useSalt: boolean;
+  /**
+   * Non-zero to also derive a destination shift from the selector word: the
+   * handler writes to `regs[base + (dst ^ (selWord & dstMask))]`, and the
+   * compiler emits `dst` pre-shifted.  Breaks a layout probe's "exactly one
+   * write slot, and the operand names it" assumption, and under `useSalt` a
+   * wrong salt writes to a plausible WRONG register instead of erroring.
+   */
+  dstMask: number;
 }
 
 /** Bits of the key operand reserved for the domain tag.  See SelectorKey. */
 export const KEY_TAG_BITS = 3;
 
-export function makeSelectorKey(): SelectorKey {
+/**
+ * Width of the destination shift.  Every frame is padded so that
+ * `dst ^ anything <= DST_SHIFT_MASK` is still a legal register index — see
+ * transforms/bytecode/resolveRegisters.ts, which is where the padding is
+ * applied and where this bound has to be honoured.
+ */
+export const DST_SHIFT_MASK = 7;
+
+export function makeSelectorKey(
+  options: { useSalt?: boolean; dstShift?: boolean } = {},
+): SelectorKey {
   return {
     // Odd multiplier — keeps the mixing step invertible.
     mul: (getRandomInt(1, 0x7fffffff) * 2 + 1) | 0,
@@ -781,38 +841,82 @@ export function makeSelectorKey(): SelectorKey {
     // every key operand are pinned to `tag` — so a shift below that would make
     // the selector a CONSTANT, and findSelectorOperand could never satisfy the
     // other semantic.
+    //
+    // That argument only holds when the key operand is the ONLY input, though.
+    // With a salt or a mix register folded in, the low bits move too, so the
+    // constraint is unnecessary there — but keeping it costs three bits of an
+    // otherwise free choice and keeps one rule instead of two.
     shift: getRandomInt(KEY_TAG_BITS, 31),
     tag: getRandomInt(0, (1 << KEY_TAG_BITS) - 1),
+    useSalt: !!options.useSalt,
+    dstMask: options.dstShift ? DST_SHIFT_MASK : 0,
   };
 }
 
 /**
- * The selector bit carried by key operand `k`.  MUST stay in lockstep with
- * selectorSource() below — that is the whole contract between the bytecode pass
- * that chooses `k` and the handler that decodes it.
+ * The selector WORD for a site, from its key operand and whatever else is mixed
+ * into it.  MUST stay in lockstep with selectorWordSource() below — that is the
+ * whole contract between the bytecode pass that chooses `k` and the handler
+ * that decodes it.
+ *
+ * `mix` is the XOR of every runtime input the handler folds in before the
+ * derivation: the executing frame's decoded salt (when `useSalt`), and the
+ * value of the key-mix register (when the site carries one).  Both are values
+ * the compiler knows and an attacker has to recover.
  */
-export function applySelector(k: number, key: SelectorKey): 0 | 1 {
-  return ((Math.imul(k ^ key.xor, key.mul) >>> key.shift) & 1) as 0 | 1;
+export function selectorWord(
+  k: number,
+  key: SelectorKey,
+  mix: number = 0,
+): number {
+  return Math.imul((k ^ mix) ^ key.xor, key.mul);
 }
 
-/** JS source for applySelector(), for the generated handler body. */
-export function selectorSource(kExpr: string, key: SelectorKey): string {
-  return `((Math.imul(${kExpr} ^ ${key.xor}, ${key.mul}) >>> ${key.shift}) & 1)`;
+/** The selector bit carried by key operand `k` under `mix`. */
+export function applySelector(
+  k: number,
+  key: SelectorKey,
+  mix: number = 0,
+): 0 | 1 {
+  return ((selectorWord(k, key, mix) >>> key.shift) & 1) as 0 | 1;
+}
+
+/** The destination shift carried by key operand `k` under `mix`. */
+export function selectorDstShift(
+  k: number,
+  key: SelectorKey,
+  mix: number = 0,
+): number {
+  return key.dstMask === 0 ? 0 : selectorWord(k, key, mix) & key.dstMask;
+}
+
+/** JS source for selectorWord(), for the generated handler body. */
+export function selectorWordSource(
+  kExpr: string,
+  key: SelectorKey,
+  mixExprs: string[],
+): string {
+  const mixed = mixExprs.reduce((acc, e) => `(${acc} ^ ${e})`, kExpr);
+  return `Math.imul(${mixed} ^ ${key.xor}, ${key.mul})`;
 }
 
 /**
- * A key operand whose selector bit is `want` AND whose low bits carry the
- * handler's domain tag.  Drawn at random rather than derived, so no two sites
- * share a key even when they select the same semantic: one draw in
+ * A key operand whose selector bit is `want` under `mix`, AND whose low bits
+ * carry the handler's domain tag.  Drawn at random rather than derived, so no
+ * two sites share a key even when they select the same semantic: one draw in
  * 2^(KEY_TAG_BITS+1) qualifies, which still leaves ~2^28 keys per semantic.
  */
-export function findSelectorOperand(key: SelectorKey, want: 0 | 1): number {
+export function findSelectorOperand(
+  key: SelectorKey,
+  want: 0 | 1,
+  mix: number = 0,
+): number {
   const mask = (1 << KEY_TAG_BITS) - 1;
   for (;;) {
     // `>>> 0` because `&` and `|` yield a SIGNED int32, and a negative operand
     // fails serialization (bytecode slots are u32).
-    const k = (((getRandomInt(0, U32_MAX) & ~mask) | key.tag) >>> 0);
-    if (applySelector(k, key) === want) return k;
+    const k = ((getRandomInt(0, U32_MAX) & ~mask) | key.tag) >>> 0;
+    if (applySelector(k, key, mix) === want) return k;
   }
 }
 

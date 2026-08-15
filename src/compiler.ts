@@ -31,6 +31,12 @@ import type {
   MBAExpr,
   SelectorKey,
 } from "./utils/mba-utils.ts";
+import { modInverse32 } from "./utils/mba-utils.ts";
+import {
+  createSaltEncoding,
+  type Encoding,
+} from "./utils/encoding-utils.ts";
+import { resolveSalts } from "./transforms/bytecode/resolveSalts.ts";
 import { controlFlowFlattening } from "./transforms/bytecode/controlFlowFlattening.ts";
 import { stringConcealing } from "./transforms/bytecode/stringConcealing.ts";
 import { getByteSize, now } from "./utils/profile-utils.ts";
@@ -87,6 +93,41 @@ export type MBASafeMark = true | "hot";
  */
 export const MBA_DOMAINS_SYM = Symbol("MBA_DOMAINS");
 export type MBAOperandDomains = Record<number, MBADomain>;
+
+/**
+ * A register whose value AT THIS INSTRUCTION the generating pass knows, offered
+ * to the MBA layer as key material for a merged handler's selector.
+ *
+ * The handler folds the register into the selector derivation, so what operator
+ * it computes depends on a value that is not on the instruction.  The compiler
+ * solves for the key operand that makes the site's real value select the right
+ * semantic; anyone else has to resolve the register first.
+ *
+ * controlFlowFlattening sets it to the state register and that block's own
+ * state word, which is the pairing that matters: an attacker folding the state
+ * machine needs the operators to evaluate the transitions, and needs the state
+ * to know the operators.  See mba-utils' "Salt-selected semantics".
+ *
+ * Like MBA_DOMAINS_SYM this must be a fact, not a guess — a wrong value here
+ * selects the wrong semantic and miscompiles the instruction.  Only set it on
+ * an instruction that provably runs with the register holding `value`, and
+ * never on one that WRITES that register.
+ */
+export const MBA_KEYMIX_SYM = Symbol("MBA_KEYMIX");
+export interface MBAKeyMix {
+  reg: b.RegisterOperand;
+  value: number;
+}
+
+/**
+ * The function whose frame a MAKE_CLOSURE executes in, stamped by whoever emits
+ * it. resolveSalts needs it because the salt seed mixes in the CREATING frame's
+ * salt word, and it cannot be recovered from the instruction's position: a
+ * MAKE_CLOSURE that lands inside a selfModifying patch region is STORED outside
+ * every function body and only copied back to its real address at runtime.
+ * The stamp travels with the instruction object, so relocation cannot lose it.
+ */
+export const FN_PARENT_SYM = Symbol("FN_PARENT");
 
 // Opcodes
 // Register-based encoding.  Operand convention (x86 / CPython style):
@@ -340,10 +381,15 @@ interface FnDescriptor {
   hasRest?: boolean;
 
   /**
-   * This function's identity word: a random u32 emitted as a MAKE_CLOSURE
-   * operand, pushed into the frame's SALT slot at call time, and used by the
-   * MBA layer to bind a generated handler to this function. Nothing in the
-   * interpreter reads it. See utils/frame-layout.ts.
+   * This function's identity word: a random u32 used by the MBA layer to bind a
+   * generated handler to this function. Nothing in the interpreter reads it.
+   * See utils/frame-layout.ts.
+   *
+   * This is the PLAIN salt, which is key material and never appears anywhere in
+   * the output. What the frame's SALT slot holds is `SALT_ENCODING.encodeValue`
+   * of it, and what the MAKE_CLOSURE operand carries is a word that only yields
+   * that after the handler mixes in the closure's own metadata and the creating
+   * frame's salt. See Compiler.saltWord and transforms/bytecode/resolveSalts.ts.
    */
   salt?: number;
 
@@ -443,6 +489,22 @@ export class Compiler {
         key: SelectorKey;
       };
       /**
+       * The `srcNames` entry holding this handler's KEY-MIX register, if it has
+       * one: a register whose value at each call site the generating pass knew,
+       * XORed into the key before the selector is derived.
+       *
+       * It makes the operator a function of something that is not on the
+       * instruction. controlFlowFlattening supplies the flattening state
+       * register, which is the pairing worth having — an attacker folding the
+       * state machine needs the operators to evaluate the transitions and needs
+       * the state to know the operators. See MBA_KEYMIX_SYM.
+       *
+       * The source is read like any other (so the operand count lines up) but
+       * is deliberately NOT a taint: its value decides which semantic runs, so
+       * the handler is not invariant in it, and the fit check must not probe it.
+       */
+      keyMixName?: string;
+      /**
        * MBA variable names bound to the instruction's SOURCE operands, in the
        * order the instruction carries them (after the destination).  Absent
        * means the plain one- or two-source form, `["a"]` / `["a", "b"]`.
@@ -514,6 +576,59 @@ export class Compiler {
   OP_NAME: Record<number, string>;
   JUMP_OPS: Set<number>;
 
+  /**
+   * The bijection the frame's SALT slot is held under. E^-1 exists only inside
+   * generated handler bodies, fused into their MBA, so a plain salt recovered
+   * by emulating MAKE_CLOSURE still cannot be written into a fabricated frame.
+   * See utils/encoding-utils.ts' createSaltEncoding.
+   */
+  SALT_ENCODING: Encoding;
+
+  /**
+   * Constants of the MAKE_CLOSURE salt derivation. The handler computes
+   *
+   *   saltWord = (imul(operand, mul) ^ mix) | 0
+   *   mix      = imul(startPc ^ regCount, mixB)
+   *            ^ imul(paramCount + uvCount + hasRest, mixC)
+   *            ^ <creating frame's SALT slot>
+   *
+   * so the operand alone is not the salt, and recovering one requires having
+   * resolved labels, registers, and the enclosing function's salt first. `inv`
+   * is modInverse32(mul) — resolveSalts solves for the operand with it.
+   */
+  SALT_DERIVE: { mul: number; inv: number; mixB: number; mixC: number };
+
+  /**
+   * The salt-seed operand for a MAKE_CLOSURE, filled in by resolveSalts.
+   *
+   * Every site that emits MAKE_CLOSURE must use this rather than writing a
+   * salt: what the instruction carries is a seed the handler mixes with the
+   * closure's own metadata and the creating frame's salt, and none of those are
+   * known here. resolveSalts throws on a MAKE_CLOSURE whose salt slot is a
+   * literal, so a new emission site cannot quietly get this wrong.
+   */
+  saltSeedOperand(): b.Operand {
+    return { type: "number" };
+  }
+
+  /**
+   * Mark a MAKE_CLOSURE with the function whose frame executes it, so
+   * resolveSalts can mix that frame's salt word into the seed. Required on
+   * every MAKE_CLOSURE — see FN_PARENT_SYM.
+   */
+  markClosureParent(instr: b.Instruction, parentFnId: number): b.Instruction {
+    (instr as unknown as Record<symbol, unknown>)[FN_PARENT_SYM] = parentFnId;
+    return instr;
+  }
+
+  /** What the frame's SALT slot holds for `fnId` — E(salt), as a u32. */
+  saltWord(fnId: number | null | undefined): number {
+    if (fnId === null || fnId === undefined) return 0;
+    const salt = this.fnDescriptors[fnId]?.salt;
+    if (typeof salt !== "number") return 0;
+    return this.SALT_ENCODING.encodeValue(salt) >>> 0;
+  }
+
   constants: b.Constant[];
 
   log(...messages: any[]) {
@@ -551,6 +666,18 @@ export class Compiler {
     this.ALIASED_OPS = {};
     this.ANTI_OPS = {};
     this.MBA_OPS = {};
+
+    this.SALT_ENCODING = createSaltEncoding();
+    {
+      // Odd, so the multiply is a bijection and resolveSalts can invert it.
+      const mul = (getRandomInt(1, 0x7fffffff) * 2 + 1) | 0;
+      this.SALT_DERIVE = {
+        mul,
+        inv: modInverse32(mul),
+        mixB: getRandomInt(1, U32_MAX) | 0,
+        mixC: getRandomInt(1, U32_MAX) | 0,
+      };
+    }
 
     this.OP = { ...OP_ORIGINAL };
 
@@ -881,9 +1008,16 @@ export class Compiler {
   }
 
   // Emit MAKE_CLOSURE with all metadata as inline operands.
-  // Layout: dst, startPc, paramCount, regCount, uvCount, hasRest, salt,
+  // Layout: dst, startPc, paramCount, regCount, uvCount, hasRest, saltSeed,
   //         [isLocal, idx, …]
   // regCount is emitted as a fnRegCount IR operand; resolveRegisters() fills it.
+  //
+  // The salt operand is a SEED, not the salt: the handler mixes it with this
+  // closure's startPc / regCount / param counts and with the creating frame's
+  // own salt word before the result reaches the SALT slot. It is emitted as an
+  // unresolved operand because two of those inputs are only known after
+  // resolveLabels and resolveRegisters — see transforms/bytecode/resolveSalts.ts,
+  // which fills it in.
   _emitMakeClosure(desc: FnDescriptor, node: t.Node, ctx: FnContext) {
     // const ctx = this._currentCtx!;
     const dst = ctx.allocReg();
@@ -892,21 +1026,20 @@ export class Compiler {
       uvOperands.push(uv.isLocal ? 1 : 0);
       uvOperands.push(uv.index); // RegisterOperand if isLocal, number if upvalue chain
     }
-    this.emit(
-      ctx,
-      [
-        this.OP.MAKE_CLOSURE,
-        dst,
-        { type: "label", label: desc.entryLabel },
-        desc.paramCount,
-        b.fnRegCountOperand(desc._fnIdx), // resolved by resolveRegisters()
-        desc.upvalues.length,
-        desc.hasRest ? 1 : 0, // 1 = last param is a rest element
-        desc.salt!, // frame SALT slot seed — see utils/frame-layout.ts
-        ...uvOperands,
-      ] as b.Instruction,
-      node,
-    );
+    const instr = [
+      this.OP.MAKE_CLOSURE,
+      dst,
+      { type: "label", label: desc.entryLabel },
+      desc.paramCount,
+      b.fnRegCountOperand(desc._fnIdx), // resolved by resolveRegisters()
+      desc.upvalues.length,
+      desc.hasRest ? 1 : 0, // 1 = last param is a rest element
+      this.saltSeedOperand() as b.InstrOperand, // resolved by resolveSalts()
+      ...uvOperands,
+    ] as b.Instruction;
+    // The frame this runs in is the one holding the closure expression.
+    this.markClosureParent(instr, ctx._fnId);
+    this.emit(ctx, instr, node);
     return dst;
   }
 
@@ -3403,7 +3536,13 @@ class Serializer {
 
     sections.push(`var MAIN_START_PC = ${mainStartPc};`);
     sections.push(`var MAIN_REG_COUNT = ${mainRegCount};`);
-    sections.push(`var MAIN_SALT = ${compiler.mainFn.salt};`);
+    // The ENCODED word, not the salt: the root frame has no MAKE_CLOSURE to
+    // derive one, so this is the single place a salt word reaches the output
+    // directly — and even here it is E(salt), which is not usable as key
+    // material without the encoding. See Compiler.saltWord.
+    sections.push(
+      `var MAIN_SALT = ${compiler.saltWord(compiler.mainFn._fnIdx)};`,
+    );
     sections.push(`var ENCODE_BYTECODE = ${!!this.options.encodeBytecode};`);
     sections.push(
       `var TIMING_CHECKS = ${
@@ -3436,6 +3575,29 @@ class Serializer {
       ),
     );
     sections.push(`var SLOTS = ${generate(slotsObject).code};`);
+
+    // Emitted UNSIGNED. Every consumer of these words reaches them through
+    // Math.imul, `^` or a `| 0`, all of which ToInt32 first, so the value is
+    // identical either way — but classObfuscation's inlineConstants only folds
+    // objects made of plain literals, and `-1` is a UnaryExpression rather than
+    // one. Keeping them non-negative is what lets them be inlined away.
+    const u32 = (value: number) => t.numericLiteral(value >>> 0);
+
+    const noiseKeysObject = t.objectExpression(
+      Object.entries(layout.NOISE_KEYS).map(([name, value]) =>
+        t.objectProperty(t.identifier(name), u32(value)),
+      ),
+    );
+    sections.push(`var NOISE_KEYS = ${generate(noiseKeysObject).code};`);
+
+    const saltDerive = compiler.SALT_DERIVE;
+    const saltDeriveObject = t.objectExpression([
+      t.objectProperty(t.identifier("mul"), u32(saltDerive.mul)),
+      t.objectProperty(t.identifier("mixB"), u32(saltDerive.mixB)),
+      t.objectProperty(t.identifier("mixC"), u32(saltDerive.mixC)),
+    ]);
+    sections.push(`var SALT_DERIVE = ${generate(saltDeriveObject).code};`);
+
     sections.push(`var HEADER_SIZE = ${layout.HEADER_SIZE};`);
     sections.push(`var FRAME_START = ${layout.FRAME_START};`);
 
@@ -3651,6 +3813,11 @@ export async function compileAndSerialize(
 
   // Resolve constant references to pool indices (+ conceal key operand).
   runAndTime(resolveConstants, "resolveConstants");
+
+  // Fill in each closure's salt seed. Needs startPc (resolveLabels) and
+  // regCount (resolveRegisters), both of which feed the derivation, and must
+  // precede encryptPatches like every other operand write.
+  runAndTime(resolveSalts, "resolveSalts");
 
   // Encrypt the moved-out patch regions. Only selfModifying emits PATCH, so
   // there is nothing to encrypt when it is off. Runs last — it needs every

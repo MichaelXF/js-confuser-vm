@@ -143,6 +143,14 @@ export interface FitCheckReport {
   skipped: number;
   /** Correctness failures.  Any entry here is a miscompile waiting to happen. */
   violations: string[];
+  /**
+   * The salt oracle, measured rather than assumed — see checkSaltOracle.
+   *
+   * `decided` counts salt-dependent handlers where exactly one candidate salt
+   * survives, i.e. where an attacker holding the candidate set can read the
+   * right one off. `ambiguous` counts the ones where two or more do.
+   */
+  saltOracle: { decided: number; ambiguous: number; total: number };
 }
 
 export function mbaFitCheck(compiler: Compiler): FitCheckReport {
@@ -152,6 +160,7 @@ export function mbaFitCheck(compiler: Compiler): FitCheckReport {
     unfittable: 0,
     skipped: 0,
     violations: [],
+    saltOracle: { decided: 0, ambiguous: 0, total: 0 },
   };
 
   for (const [opStr, def] of Object.entries(compiler.MBA_OPS)) {
@@ -173,14 +182,29 @@ function checkHandler(
   const srcKinds = def.srcKinds ?? srcNames.map(() => "reg" as const);
   const taints = new Set(def.taintNames ?? []);
   const domains = def.domains ?? {};
+  const ownSalt = compiler.fnDescriptors[def.fnId ?? -1]?.salt ?? 0;
 
   // Sources an attacker would treat as the handler's inputs: the real ones.
-  // A taint source is an input in name only, which is the point of it.
-  const inputs = srcNames.filter((n) => !taints.has(n));
+  // A taint source is an input in name only, which is the point of it, and a
+  // key-mix source is not an input either — it decides which SEMANTIC runs, so
+  // probing over it would measure two different operators superimposed and tell
+  // nobody anything. Its real value is supplied below.
+  const inputs = srcNames.filter(
+    (n) => !taints.has(n) && n !== def.keyMixName,
+  );
+
+  // A representative value for the key-mix register — one site's state word.
+  // Any value works: the key operand is solved against whatever the site holds,
+  // and `run` solves it the same way.
+  const KEY_MIX_VALUE = 0x51ed3a90 | 0;
 
   // Evaluate the handler the way the emitted case does: bindings in order, then
   // the result expression, with `v` / `c` / `k` / `s` resolved as mbaOpcodes
   // resolves them.
+  //
+  // `values.__salt` overrides the function's own salt, which is what lets the
+  // salt-oracle check below ask the question an attacker asks: run this handler
+  // as though a DIFFERENT function's frame were executing it.
   const run = (
     values: Record<string, number>,
     selectorBit: 0 | 1 | null,
@@ -196,16 +220,30 @@ function checkHandler(
       env.set(RAW_PREFIX + n, v);
     }
 
+    // The salt the EXECUTING frame supplies, which is this handler's own
+    // function's unless the caller is impersonating another one.
+    const salt = values.__salt ?? ownSalt;
+
     if (def.frame) {
-      const salt = compiler.fnDescriptors[def.fnId ?? -1]?.salt ?? 0;
-      env.set("v", frameKeyValue(def.frame, values.__salt ?? salt));
+      env.set("v", frameKeyValue(def.frame, salt));
       env.set("c", def.frame.inverse);
     }
 
     if (def.select && selectorBit !== null) {
-      const k = findSelectorOperand(def.select.key, selectorBit);
+      // Exactly what mbaExpand mixes in at a call site, and exactly what the
+      // handler recomputes at runtime. The key operand is drawn against the
+      // handler's OWN function's salt — a site's literal is fixed at compile
+      // time — while the selector is derived under whichever salt is executing,
+      // so a wrong salt flips the bit here just as it would in the field.
+      const siteMix =
+        (def.select.key.useSalt ? ownSalt : 0) ^
+        (def.keyMixName ? values[def.keyMixName] ?? 0 : 0);
+      const runMix =
+        (def.select.key.useSalt ? salt : 0) ^
+        (def.keyMixName ? values[def.keyMixName] ?? 0 : 0);
+      const k = findSelectorOperand(def.select.key, selectorBit, siteMix);
       env.set("k", k | 0);
-      env.set("s", applySelector(k, def.select.key));
+      env.set("s", applySelector(k, def.select.key, runMix));
     }
 
     try {
@@ -227,6 +265,9 @@ function checkHandler(
       values[n] = inDomainValue(domains[n], seed * (i + 7) + i);
     });
     for (const n of taints) values[n] = 0;
+    // Pinned across every seed: the key operand is solved against it, so a
+    // value that moved between calls would move the selector with it.
+    if (def.keyMixName) values[def.keyMixName] = KEY_MIX_VALUE;
     return values;
   };
 
@@ -276,7 +317,25 @@ function checkHandler(
     });
   }
 
-  // ── 3. The classifier ──────────────────────────────────────────────────────
+  // ── 3. The salt oracle ─────────────────────────────────────────────────────
+  // The attack that broke the frame binding in the field, run here: take the
+  // candidate salts, execute the handler under each, and see how many survive.
+  //
+  // Under the multiplicative binding exactly one does, because a wrong salt
+  // makes `imul(v, c)` an arbitrary word and the handler computes garbage that
+  // matches nothing. Under a salt-selected selector a wrong salt flips the bit
+  // and the handler computes its PARTNER semantic — which is a perfectly good
+  // operator — so several candidates survive and nothing distinguishes the
+  // right one. See mba-utils' "Salt-selected semantics".
+  //
+  // Reported rather than enforced. A build legitimately carries some
+  // multiplicative handlers (they are what makes the population mixed), so
+  // "every handler is ambiguous" is not the goal; knowing the split is.
+  if (def.fnId !== null && def.fnId !== undefined && semantics) {
+    checkSaltOracle(compiler, def, run, realValues, semantics, report);
+  }
+
+  // ── 4. The classifier ──────────────────────────────────────────────────────
   // Now play the attacker: probe the handler over the grid and see whether any
   // single operator reproduces every observation. Immediates stay at a
   // plausible real value, exactly as a fitter reading them off the instruction
@@ -351,6 +410,70 @@ function checkHandler(
   }
 }
 
+/**
+ * How many candidate salts leave this handler computing a REAL operator.
+ *
+ * The attacker's position: they hold the build's salts (every function's, from
+ * emulating MAKE_CLOSURE) and one handler, and want to know which salt the
+ * handler belongs to. They run it under each and keep the ones whose output is
+ * a coherent operator rather than noise.
+ *
+ * One survivor means the handler names its own function. Two or more means it
+ * does not, and the attacker has to decide between semantics that are all
+ * legitimate — which is the whole point of routing the salt through the
+ * selector instead of through a multiplier.
+ */
+function checkSaltOracle(
+  compiler: Compiler,
+  def: MBAOp,
+  run: (
+    values: Record<string, number>,
+    selectorBit: 0 | 1 | null,
+  ) => { value: any; error?: string },
+  realValues: (seed: number) => Record<string, number>,
+  semantics: string[],
+  report: FitCheckReport,
+): void {
+  const references = semantics
+    .map((n) => REFERENCE[n])
+    .filter((f): f is (a: any, b: any) => any => !!f);
+  if (references.length === 0) return;
+
+  const srcNames = def.srcNames ?? (def.arity === 3 ? ["a", "b"] : ["a"]);
+  const taints = new Set(def.taintNames ?? []);
+  const inputs = srcNames.filter(
+    (n) => !taints.has(n) && n !== def.keyMixName,
+  );
+  if (inputs.length === 0 || inputs.length > 2) return;
+
+  // Every salt in the build is a candidate — that is exactly the set an
+  // attacker recovers — plus a few draws, so a handler that happens to agree
+  // with two of this build's functions is not mistaken for a general property.
+  const candidates = compiler.fnDescriptors
+    .map((d) => d.salt)
+    .filter((s): s is number => typeof s === "number");
+  for (let i = 0; i < 4; i++) candidates.push(getRandomInt(0, 0xffffffff) | 0);
+
+  let survivors = 0;
+  for (const salt of candidates) {
+    // A salt survives if SOME semantic this handler hosts reproduces its output
+    // across the seeds. Under the correct salt that is the site's own; under a
+    // flipped selector it is the partner's.
+    const matches = references.some((ref) =>
+      [1, 2, 3, 4].every((seed) => {
+        const values = { ...realValues(seed), __salt: salt };
+        const got = run(values, def.select ? 0 : null);
+        return same(got.value, ref(values[inputs[0]], values[inputs[1]]));
+      }),
+    );
+    if (matches) survivors++;
+  }
+
+  report.saltOracle.total++;
+  if (survivors <= 1) report.saltOracle.decided++;
+  else report.saltOracle.ambiguous++;
+}
+
 function tryCall(fn: () => any): any {
   try {
     return fn();
@@ -380,6 +503,14 @@ export function runMBAFitCheck(compiler: Compiler): void {
       `operator, ${fitted} identifiable, ${report.skipped} beyond a ` +
       `two-operand classifier (${Date.now() - started}ms)`,
   );
+  const oracle = report.saltOracle;
+  if (oracle.total > 0) {
+    compiler.log(
+      `mbaFitCheck: salt oracle — ${oracle.ambiguous}/${oracle.total} ` +
+        `frame-dependent handlers stay ambiguous under a wrong salt, ` +
+        `${oracle.decided} name their own function`,
+    );
+  }
   if (fitted > 0 && compiler.options.verbose) {
     for (const f of report.fitted.slice(0, 12))
       compiler.log(`  identifiable: ${f.name} = ${f.operator}`);

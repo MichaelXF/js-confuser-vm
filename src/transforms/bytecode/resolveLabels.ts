@@ -16,7 +16,8 @@
 // startPc, and LOAD_INT label operands are all correct after flattening.
 
 import type { Instruction } from "../../types.ts";
-import { Compiler, SOURCE_NODE_SYM } from "../../compiler.ts";
+import { Compiler } from "../../compiler.ts";
+import { copyInstrMeta } from "../../utils/pass-utils.ts";
 
 // Resolve symbolic labels to absolute flat-PC indices within a bytecode array.
 // defineLabel pseudo-instructions are stripped; label-ref operands become ints.
@@ -93,8 +94,7 @@ export function resolveLabels(
       return operand;
     });
 
-    const newInstr = [op, ...newOperands];
-    (newInstr as any)[SOURCE_NODE_SYM] = (instr as any)[SOURCE_NODE_SYM];
+    const newInstr = copyInstrMeta(instr, [op, ...newOperands]);
 
     // Pseudo-op "defineLabel"s are kept within this bytecode as the Serializer is responsible for dropping it, and its useful information for comment generation
     resolved.push(newInstr);

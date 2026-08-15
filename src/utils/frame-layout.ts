@@ -57,6 +57,13 @@ export const FRAME_SLOT_NAMES = [
 
 export interface FrameLayout {
   SLOTS: Record<string, number>;
+  /**
+   * Scramble constants for the decoy slots — see NOISE_KEYS below.  Always
+   * populated, even when no decoy was provisioned, so the runtime's `@NOISE`
+   * blocks always have something to reference before classObfuscation drops
+   * them.
+   */
+  NOISE_KEYS: Record<string, number>;
   HEADER_SIZE: number;
   FRAME_START: number;
 }
@@ -79,6 +86,34 @@ const DISPATCH_NOISE_SLOT_NAMES = [
   "NOISE_MIRROR",
   "NOISE_ACC",
 ];
+
+// Scramble constants for the decoy slots.
+//
+// The decoys used to hold their seeds verbatim — a frame end, a param count, a
+// PC that walked 0, 1, 2 — which was legible on sight and, worse, legible in
+// contrast: the SALT slot holds a value under the build's salt encoding, so a
+// small plain integer sitting next to it identifies itself as the slot that is
+// NOT encoded.  A decoy whose whole job is to be indistinguishable cannot be
+// the one thing in the header that is distinguishable.
+//
+// Nothing reads these, so there is no inverse and no correctness burden: an odd
+// multiplier and a xor are enough to put every decoy anywhere in the 32-bit
+// range and keep it moving there.
+function pickNoiseKeys(): Record<string, number> {
+  const odd = () => (getRandomInt(1, 0x7fffffff) * 2 + 1) | 0;
+  return {
+    END: odd(),
+    PARAMS: odd(),
+    PC: odd(),
+    MIRROR: odd(),
+    ACC: odd(),
+    // The counter walks by a full-width odd stride (a Weyl sequence) rather
+    // than by one, so it never looks like an instruction count.
+    STEP: odd(),
+    COUNTER: getRandomInt(0, 0xffffffff) | 0,
+    X: getRandomInt(1, 0x7fffffff) | 0,
+  };
+}
 
 function pickNoiseSlots(): string[] {
   const picked = [
@@ -118,6 +153,7 @@ export function createFrameLayout(options: Options): FrameLayout {
 
   return {
     SLOTS: Object.fromEntries(entries),
+    NOISE_KEYS: pickNoiseKeys(),
     HEADER_SIZE: headerSize,
     FRAME_START: randomize ? getRandomInt(1, 16) : 1,
   };

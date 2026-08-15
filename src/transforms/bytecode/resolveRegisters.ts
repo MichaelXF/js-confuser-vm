@@ -30,6 +30,7 @@
 
 import type { Bytecode } from "../../types.ts";
 import { Compiler } from "../../compiler.ts";
+import { DST_SHIFT_MASK } from "../../utils/mba-utils.ts";
 
 export function resolveRegisters(
   bc: Bytecode,
@@ -204,13 +205,31 @@ export function resolveRegisters(
       const op = instr[i] as any;
       if (!op || typeof op !== "object") continue;
       if (op.type === "register") {
-        op.resolvedValue = fnSlotMaps.get(op.fnId)?.get(op.id);
+        const slot = fnSlotMaps.get(op.fnId)?.get(op.id);
+        // A merged MBA handler recomputes its destination from its selector
+        // word, so the operand carries the slot XORed with the shift the
+        // handler will apply.  Pass 4 pads the frame so the emitted index — and
+        // every index the handler could produce from it — stays legal.
+        op.resolvedValue =
+          slot !== undefined && op.xorShift ? slot ^ op.xorShift : slot;
       }
     }
   }
 
   // ── Pass 4: set regCount on each FnDescriptor ─────────────────────────────
   // regCount = max concrete slot used + 1  (not sum of virtual-register counts).
+  //
+  // Rounded UP to cover the destination shift when this build uses one.  The
+  // handler writes `regs[base + (dst ^ (selWord & DST_SHIFT_MASK))]`, so with
+  // the top slot at N the write can reach `N | DST_SHIFT_MASK` — in the right
+  // frame the two shifts cancel and it lands on N, but a frame has to be big
+  // enough for every index the arithmetic can produce, or a wrong salt writes
+  // past the block and into the next frame's header.  A handful of slots per
+  // frame buys that bound.
+  const dstShifted = Object.values(compiler.MBA_OPS).some(
+    (def) => (def.select?.key.dstMask ?? 0) !== 0,
+  );
+
   for (const desc of compiler.fnDescriptors) {
     const fnId = desc._fnIdx!;
     const slotMap = fnSlotMaps.get(fnId);
@@ -220,6 +239,8 @@ export function resolveRegisters(
         if (slot + 1 > regCount) regCount = slot + 1;
       }
     }
+    if (dstShifted && regCount > 0)
+      regCount = ((regCount - 1) | DST_SHIFT_MASK) + 1;
     desc.regCount = regCount;
   }
 

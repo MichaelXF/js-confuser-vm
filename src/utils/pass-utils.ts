@@ -16,6 +16,22 @@ export function ref(r: RegisterOperand): RegisterOperand {
   return b.registerOperand(r.id, r.fnId);
 }
 
+// Carry an instruction's out-of-band metadata across a rebuild.
+//
+// Passes attach facts to instructions through symbol properties — the source
+// AST node, the MBA int32 promise, declared operand domains, the creating frame
+// of a MAKE_CLOSURE — and any pass that builds a NEW array for an instruction
+// silently drops all of them. Copying every own symbol rather than a named one
+// means a pass that starts carrying a new fact does not have to find and update
+// each rebuild site; missing one produces a wrong program (a MAKE_CLOSURE
+// without its parent stamp cannot derive a salt) rather than a type error.
+export function copyInstrMeta<T>(from: unknown, to: T): T {
+  const src = from as Record<symbol, unknown>;
+  const dst = to as Record<symbol, unknown>;
+  for (const key of Object.getOwnPropertySymbols(src)) dst[key] = src[key];
+  return to;
+}
+
 // Scan bc and return the highest virtual register id seen for each fnId.
 // Used by passes that allocate new registers after the compiler has finished.
 export function buildMaxIdMap(bc: Bytecode): Map<number, number> {

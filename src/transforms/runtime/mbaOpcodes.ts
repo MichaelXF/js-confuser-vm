@@ -4,9 +4,10 @@ import { Compiler } from "../../compiler.ts";
 import { getSwitchStatement, parseStatement } from "../../utils/ast-utils.ts";
 import {
   RAW_PREFIX,
+  mVar,
   mbaToAST,
   mbaVarNames,
-  selectorSource,
+  selectorWordSource,
 } from "../../utils/mba-utils.ts";
 import { chance, choice, getRandomInt } from "../../utils/random-utils.ts";
 
@@ -192,58 +193,122 @@ export function applyMBAOpcodes(ast: t.File, compiler: Compiler): void {
     for (const name of deferred)
       body.push(parseStatement(`${name} = ${trunc(name)};`));
 
-    // ── Merged: read the key, derive the selector ────────────────────────────
-    // The key operand is read LAST, matching the order mbaExpand appends it in.
-    if (def.select) {
-      varNames.k = localName(taken);
-      varNames.s = localName(taken);
-      body.push(parseStatement(`var ${varNames.k} = this._operand();`));
-      body.push(
-        parseStatement(
-          `var ${varNames.s} = ${selectorSource(varNames.k, def.select.key)};`,
-        ),
+    // ── Frame state: the decoded salt, and the binding derived from it ───────
+    //
+    // The SALT slot does not hold the executing function's identity word — it
+    // holds E(salt) under the build's salt encoding.  E^-1 is inlined here, and
+    // only here, so a plain salt recovered by emulating MAKE_CLOSURE still has
+    // to be pushed back through the encoding before a fabricated frame agrees
+    // with a real one.  See utils/encoding-utils.ts' createSaltEncoding.
+    //
+    // Two consumers, and both are optional:
+    //
+    //   `v` — the MULTIPLICATIVE binding.  A scrambled odd value derived from
+    //     the salt, multiplied against `c`, the modular inverse of the value
+    //     this handler's own function carries.  The product is 1 in that frame
+    //     and an arbitrary word in every other, so the handler computes garbage
+    //     anywhere else.  `c` never gets a statement at all — it resolves
+    //     straight to its literal wherever the expression mentions it.
+    //
+    //   the SELECTOR — see the merged block below.  A handler uses one or the
+    //     other, never both: the multiplicative binding hands an attacker a
+    //     closed-form oracle (`imul(v, c) === 1` picks the salt out of a
+    //     candidate set in one evaluation), which would immediately resolve a
+    //     selector the salt is supposed to hide.  mbaExpand decides which.
+    //
+    // Emitted as ONE scatter so the decode cannot be placed after the value
+    // that reads it, and scattered rather than written as a prologue so a
+    // canonicalizer has no fixed `var v = …;` opening to key on.
+    const wantsMul = allVars.includes("v");
+    const wantsSalt = !!def.select?.key.useSalt || wantsMul;
+    let saltLocal: string | null = null;
+    if (wantsSalt) {
+      const slotLocal = localName(taken);
+      saltLocal = localName(taken);
+      const decoded = compiler.SALT_ENCODING.decodeExpr(mVar(slotLocal));
+      const frameStmts: t.Statement[] = [
+        parseStatement(`var ${slotLocal} = regs[fp + SLOTS.SALT];`),
+        t.variableDeclaration("var", [
+          t.variableDeclarator(
+            t.identifier(saltLocal),
+            mbaToAST(decoded, (n) => t.identifier(n)),
+          ),
+        ]),
+      ];
+
+      if (wantsMul) {
+        // Drawn by the bytecode pass that registered this handler, so the same
+        // pair is available to the build-time fit check without re-deriving it.
+        const frame = def.frame;
+        ok(
+          frame,
+          `MBA handler ${compiler.OP_NAME[opcode]} is frame-bound but carries ` +
+            `no key constants`,
+        );
+        varNames.v = localName(taken);
+        literals.c = frame.inverse;
+        frameStmts.push(
+          parseStatement(
+            `var ${varNames.v} = (Math.imul(${saltLocal}, ${frame.mul}) ^ ${frame.xor}) | 1;`,
+          ),
+        );
+      }
+
+      scatter(body, frameStmts);
+    } else {
+      ok(
+        !wantsMul,
+        `MBA handler ${compiler.OP_NAME[opcode]} references "v" without a salt`,
       );
     }
 
-    // ── Frame binding: scattered, not a prologue ─────────────────────────────
-    // `v` is a scrambled odd value derived from the EXECUTING frame's SALT slot
-    // — the identity word of whichever function is running — and `c` is the
-    // modular inverse of the value this handler's own function carries.
-    // Multiplying by both is the identity, but only inside that function.
+    // ── Merged: read the key, derive the selector ────────────────────────────
+    // The key operand is read LAST, matching the order mbaExpand appends it in.
     //
-    // The salt is a full-entropy u32, which is the whole point of reading it
-    // rather than the register count this used to use: a count is a small
-    // integer, and one an interpreter oracle hands over for free, so binding to
-    // it cost an attacker a search of a few hundred values. There is nothing to
-    // search here, and nothing in the interpreter that recomputes it.
-    //
-    // The scramble on top keeps both baked words opaque — a salt of 1 would
-    // otherwise invert to a recognisable constant — and mixing through a random
-    // multiply and XOR puts `v` anywhere in the 32-bit range.
-    //
-    // Both the split into two statements and their scattered placement exist to
-    // deny a canonicalizer a fixed `var v = …; var c = …;` prologue to key on.
-    // `c` never gets a statement at all — it resolves straight to its literal
-    // wherever the expression happens to mention it.
-    if (allVars.includes("v")) {
-      // Drawn by the bytecode pass that registered this handler, so the same
-      // pair is available to the build-time fit check without re-deriving it.
-      const frame = def.frame;
-      ok(
-        frame,
-        `MBA handler ${compiler.OP_NAME[opcode]} is frame-bound but carries ` +
-          `no key constants`,
-      );
-      const seed = localName(taken);
-      varNames.v = localName(taken);
-      literals.c = frame.inverse;
+    // What the selector is derived from is the point of it.  A key read straight
+    // off the instruction is a per-site constant, so a fitter that probes one
+    // site recovers that site's operator regardless of how the two semantics are
+    // mixed.  Everything folded in here is a value the compiler knows and an
+    // attacker does not: the frame's decoded salt, and — when the generating
+    // pass offered one — a register whose value at this instruction it
+    // established.  See mba-utils' "Salt-selected semantics".
+    if (def.select) {
+      varNames.k = localName(taken);
+      varNames.s = localName(taken);
+      const selWord = localName(taken);
+      const mixExprs: string[] = [];
+      if (def.select.key.useSalt) mixExprs.push(saltLocal!);
+      // The key-mix source is read as an ordinary operand above; `keyMixName`
+      // records which of them it is.
+      if (def.keyMixName) mixExprs.push(def.keyMixName);
 
-      scatter(body, [
-        parseStatement(`var ${seed} = regs[fp + SLOTS.SALT];`),
+      body.push(parseStatement(`var ${varNames.k} = this._operand();`));
+      body.push(
         parseStatement(
-          `var ${varNames.v} = (Math.imul(${seed}, ${frame.mul}) ^ ${frame.xor}) | 1;`,
+          `var ${selWord} = ${selectorWordSource(
+            varNames.k,
+            def.select.key,
+            mixExprs,
+          )};`,
         ),
-      ]);
+      );
+      body.push(
+        parseStatement(
+          `var ${varNames.s} = (${selWord} >>> ${def.select.key.shift}) & 1;`,
+        ),
+      );
+
+      // The destination shift, from the same word. mbaExpand emitted `dst`
+      // already XORed with this, so the two cancel in the right frame — and in
+      // any other one the handler writes to a different, still legal register
+      // rather than erroring. See DST_SHIFT_MASK.
+      if (def.select.key.dstMask !== 0) {
+        body.push(
+          parseStatement(
+            `dst = dst ^ (${selWord} & ${def.select.key.dstMask});`,
+          ),
+        );
+      }
     }
 
     // ── Straight-line bindings ───────────────────────────────────────────────

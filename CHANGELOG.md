@@ -25,6 +25,20 @@ Related and cheap: don't compute the register base the same way in every handler
 ```
 
 
+## Unreleased
+
+- Improved `MBA` — the function salt no longer answers to a one-shot oracle
+- - Merged handlers now take their operator selector from the executing frame's salt, not from the key operand alone. A wrong salt makes the handler compute its *partner* semantic (`SUB` where the program means `ADD`) instead of garbage, so an attacker trying candidate salts gets a clean operator fit for every one of them and nothing tells them apart
+- - This replaces the multiplicative frame binding on those handlers rather than joining it: `imul(v, c) === 1` is a closed-form test with one recognisable answer, and leaving it in place would name the salt that resolves the selector
+- - Merged handlers can also fold in a register whose value the compiler knows and an attacker does not — `controlFlowFlattening` supplies the state register, which makes recovering the operator circular with recovering the flattening state
+- - A merged handler may derive its *destination* from the same selector word, so the operand no longer names the register the instruction writes. Frames are padded so every index the arithmetic can produce is legal
+- - `mbaFitCheck` now runs the salt oracle itself and reports how many frame-dependent handlers stay ambiguous under a wrong salt
+
+- Improved the VM's frame layout
+- - The `SALT` header slot now holds the salt under a per-build encoding, decoded inside handler bodies and nowhere else
+- - `MAKE_CLOSURE` no longer carries a function's salt as an immediate. It carries a seed that only becomes the salt once the closure's own metadata and the *creating* frame's salt are mixed in, so the closure tree has to be walked from the root in order rather than scraped off a disassembly
+- - Decoy header slots are scrambled into full-entropy words instead of holding a frame end, a param count or a walking PC — a decoy holding a small plain integer next to an encoded `SALT` identified itself as the slot that was not encoded
+
 ## `0.1.5` Updates
 
 - Improved `Self Modifying`

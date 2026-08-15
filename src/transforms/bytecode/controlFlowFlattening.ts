@@ -109,7 +109,9 @@ import type { Bytecode, Instruction, RegisterOperand } from "../../types.ts";
 import {
   Compiler,
   MBA_DOMAINS_SYM,
+  MBA_KEYMIX_SYM,
   MBA_SAFE_SYM,
+  type MBAKeyMix,
   type MBAOperandDomains,
   type MBASafeMark,
 } from "../../compiler.ts";
@@ -754,6 +756,21 @@ interface EmitCtx {
    * the last operand of every transition instruction.  See utils/mba-taint.ts.
    */
   taint: RegisterOperand | null;
+  /**
+   * The state register and the word it holds RIGHT NOW, offered to the MBA
+   * layer as key material for a merged handler's selector (see MBA_KEYMIX_SYM).
+   *
+   * Set for the span of one block's terminator lowering, where the state
+   * register provably still holds that block's own value, and cleared
+   * afterwards.  The pairing is the point: a devirtualizer folding the state
+   * machine has to evaluate these handlers to learn the next state, and now has
+   * to know the state to learn what the handlers compute.
+   *
+   * Only the fresh-destination emitters stamp it.  An instruction that WRITES
+   * the state register must never carry the mark — the value would be the one
+   * before the write, and the mark says "while this instruction runs".
+   */
+  keyMix: MBAKeyMix | null;
 }
 
 // A distinct operand object for the same virtual register, PRESERVING `kind`
@@ -766,9 +783,20 @@ const dup = (r: RegisterOperand): RegisterOperand => ({ ...r });
 // marked all the same: mbaSuperOps folds a marked LOAD_INT into the consumer
 // that reads it, which turns the immediate into an operand of an opaque handler
 // rather than a legible integer load.
+// Offer this instruction the block's live state word as selector key material.
+// Only ever called from an emitter whose destination is a FRESH temporary, so
+// the state register cannot be the thing being written.
+function markKeyMix(instr: Instruction, ctx: EmitCtx): Instruction {
+  if (ctx.keyMix)
+    (instr as unknown as Record<symbol, unknown>)[MBA_KEYMIX_SYM] = ctx.keyMix;
+  return instr;
+}
+
 function emitImm(out: Bytecode, ctx: EmitCtx, value: number): RegisterOperand {
   const dst = allocTemp(ctx.fnId, ctx.maxId);
-  out.push(markSafe([ctx.compiler.OP.LOAD_INT!, dup(dst), value]));
+  out.push(
+    markKeyMix(markSafe([ctx.compiler.OP.LOAD_INT!, dup(dst), value]), ctx),
+  );
   return dst;
 }
 
@@ -786,7 +814,7 @@ function emitUn(
     dup(dst),
     dup(a),
   ];
-  out.push(safe ? markSafe(instr) : instr);
+  out.push(markKeyMix(safe ? markSafe(instr) : instr, ctx));
   return dst;
 }
 
@@ -809,6 +837,9 @@ function emitBinTo(
   return dst;
 }
 
+// Into a FRESH temporary — which is why this one may carry the key-mix mark and
+// emitBinTo may not: emitBinTo's destination is the caller's, and for the
+// unencoded transitions that destination IS the state register.
 function emitBin(
   out: Bytecode,
   ctx: EmitCtx,
@@ -816,14 +847,10 @@ function emitBin(
   a: RegisterOperand,
   b: RegisterOperand,
 ): RegisterOperand {
-  return emitBinTo(
-    out,
-    ctx,
-    opName,
-    allocTemp(ctx.fnId, ctx.maxId),
-    a,
-    b,
-  );
+  const before = out.length;
+  const dst = emitBinTo(out, ctx, opName, allocTemp(ctx.fnId, ctx.maxId), a, b);
+  for (let i = before; i < out.length; i++) markKeyMix(out[i], ctx);
+  return dst;
 }
 
 // Emit a RELATIVE state transition.  When a block runs, the state register
@@ -1206,6 +1233,8 @@ function processFunctionBlock(
     // the encoded transition handlers, and the unencoded lowering is plain
     // bytecode with no handler to fold it into.
     taint: encoder && encoder.taint ? taintReg : null,
+    // Set per block, for the span of its terminator lowering only.
+    keyMix: null,
   };
 
   // 3. Pre-compute all state mappings BEFORE shuffle
@@ -1286,7 +1315,18 @@ function processFunctionBlock(
     // Block body
     out.push(...block.body);
 
-    // Terminator rewriting
+    // Terminator rewriting.
+    //
+    // From here to the state write, `state` provably still holds THIS block's
+    // word — the seed above guarantees it for a bypassed entry and the
+    // dispatcher for every other — so the terminator's own arithmetic can offer
+    // it to the MBA layer as selector key material. Cleared immediately after,
+    // because nothing outside this span can make the same promise.
+    ctx.keyMix = {
+      reg: rState,
+      value: encoder ? encoder.encode(block.stateValue) : block.stateValue,
+    };
+
     const term = block.terminator;
 
     if (term === null) {
@@ -1361,6 +1401,8 @@ function processFunctionBlock(
         out.push(term);
       }
     }
+
+    ctx.keyMix = null;
   }
 
   return { instrs: out, tail: dispatch.innerBytecode };

@@ -8,6 +8,8 @@ const ENCODE_BYTECODE = false;
 const TIMING_CHECKS = false;
 const SENTINELS = { CALL_SPREAD: 0 };
 const SLOTS: Record<string, number> = {};
+const NOISE_KEYS: Record<string, number> = {};
+const SALT_DERIVE = { mul: 0, mixB: 0, mixC: 0 };
 const HEADER_SIZE = 0;
 const FRAME_START = 0;
 // The text above is not included in the compiled output - for type intellisense only
@@ -128,21 +130,35 @@ VM.prototype._pushFrame = function (closure, args, thisVal, retDst) {
   regs[fp + SLOTS.CLOSURE] = closure;
   regs[fp + SLOTS.FRAME_SIZE] = size;
   regs[fp + SLOTS.REG_BASE] = base;
-  // The executing function's identity word. Nothing here reads it; generated
-  // MBA handlers do, and only compute correctly when it matches the function
-  // they were built for. See utils/frame-layout.ts.
+  // The executing function's identity word, held under the build's salt
+  // encoding. Nothing here reads it; generated MBA handlers do, decoding it
+  // inside their own MBA, and only compute correctly when it matches the
+  // function they were built for. See utils/frame-layout.ts.
   regs[fp + SLOTS.SALT] = fn.salt;
 
   // Seeds for the decoy header slots this build happens to have (see utils/frame-layout.ts)
+  //
+  // Every integer decoy is scrambled into a full-entropy word rather than
+  // holding its plain seed. The SALT slot holds an encoded word, so a decoy
+  // holding `0`, a param count or a small PC would be legible as the slot that
+  // ISN'T encoded — which is the one thing a decoy must not be. The values are
+  // never read, so the scramble is free and needs no inverse.
   /* @NOISE */
-  if (typeof SLOTS.NOISE_END === "number") regs[fp + SLOTS.NOISE_END] = end;
+  if (typeof SLOTS.NOISE_END === "number")
+    regs[fp + SLOTS.NOISE_END] =
+      (Math.imul(end + 1, NOISE_KEYS.END) ^ NOISE_KEYS.X) | 0;
   if (typeof SLOTS.NOISE_PARAMS === "number")
-    regs[fp + SLOTS.NOISE_PARAMS] = fn.paramCount;
+    regs[fp + SLOTS.NOISE_PARAMS] =
+      (Math.imul(fn.paramCount + 1, NOISE_KEYS.PARAMS) ^ NOISE_KEYS.X) | 0;
+  // The one decoy that cannot be scrambled — it holds the argument array. That
+  // is consistent rather than conspicuous: THIS, CLOSURE and HANDLERS are
+  // object slots too.
   if (typeof SLOTS.NOISE_ARGS === "number") regs[fp + SLOTS.NOISE_ARGS] = args;
   if (typeof SLOTS.NOISE_PC === "number")
-    regs[fp + SLOTS.NOISE_PC] = fn.startPc;
+    regs[fp + SLOTS.NOISE_PC] =
+      (Math.imul(fn.startPc + 1, NOISE_KEYS.PC) ^ NOISE_KEYS.X) | 0;
   if (typeof SLOTS.NOISE_COUNTER === "number")
-    regs[fp + SLOTS.NOISE_COUNTER] = 0;
+    regs[fp + SLOTS.NOISE_COUNTER] = NOISE_KEYS.COUNTER;
 
   this._regsTop = end;
 
@@ -247,16 +263,28 @@ VM.prototype.run = function (closure, thisVal, args) {
     // var opcode = this.bytecode[pc];
     // console.log(`[run] pc=${pc}, opcode=${opcode}, name=${Object.keys(OP).find((key) => OP[key] === opcode)}`);
 
-    // Churn the decoy header slots so the real PC isn't the only slot moving
+    // Churn the decoy header slots so the real PC isn't the only slot moving.
+    // Each step is a scramble rather than an increment: a slot that walks 0, 1,
+    // 2, … or that mirrors the raw opcode advertises what it is, while these
+    // move every dispatch and look like the encoded words the real header slots
+    // now hold.
     /* @NOISE */
     if (typeof SLOTS.NOISE_PC === "number")
-      regs[fp + SLOTS.NOISE_PC] = (regs[fp + SLOTS.NOISE_PC] + 1) % bc.length;
+      regs[fp + SLOTS.NOISE_PC] =
+        (Math.imul(regs[fp + SLOTS.NOISE_PC] ^ pc, NOISE_KEYS.PC) ^
+          NOISE_KEYS.X) |
+        0;
     if (typeof SLOTS.NOISE_COUNTER === "number")
-      regs[fp + SLOTS.NOISE_COUNTER]++;
+      regs[fp + SLOTS.NOISE_COUNTER] =
+        (regs[fp + SLOTS.NOISE_COUNTER] + NOISE_KEYS.STEP) | 0;
     if (typeof SLOTS.NOISE_MIRROR === "number")
-      regs[fp + SLOTS.NOISE_MIRROR] = op;
+      regs[fp + SLOTS.NOISE_MIRROR] =
+        (Math.imul(op + 1, NOISE_KEYS.MIRROR) ^ NOISE_KEYS.X) | 0;
     if (typeof SLOTS.NOISE_ACC === "number")
-      regs[fp + SLOTS.NOISE_ACC] = (regs[fp + SLOTS.NOISE_ACC] ^ pc) | 0;
+      regs[fp + SLOTS.NOISE_ACC] =
+        (Math.imul(regs[fp + SLOTS.NOISE_ACC] ^ pc, NOISE_KEYS.ACC) ^
+          NOISE_KEYS.X) |
+        0;
 
     // Debugging protection: Detects debugger by checking for >1s pauses which can only happen from debugger; or extremely slow sync tasks
     if (TIMING_CHECKS) {
@@ -685,14 +713,25 @@ VM.prototype.run = function (closure, thisVal, args) {
 
         // Closures
         case OP.MAKE_CLOSURE: {
-          // dst, startPc, paramCount, regCount, uvCount, hasRest, salt, [isLocal, idx, ...]
+          // dst, startPc, paramCount, regCount, uvCount, hasRest, saltSeed, [isLocal, idx, ...]
           var dst = this._operand();
           var startPc = this._operand();
           var paramCount = this._operand();
           var regCount = this._operand();
           var uvCount = this._operand();
           var hasRest = this._operand(); // 1 if last param is a rest element
-          var salt = this._operand(); // this function's identity word (SLOTS.SALT)
+          // The new frame's SALT word. NOT read verbatim: the operand is a seed
+          // that only becomes the word once this closure's own metadata and the
+          // CREATING frame's salt are mixed in, so the identity word of a
+          // function cannot be scraped off a disassembly and cannot be
+          // recovered at all before its enclosing function's has been. See
+          // transforms/bytecode/resolveSalts.ts, which inverts this.
+          var salt =
+            (Math.imul(this._operand(), SALT_DERIVE.mul) ^
+              Math.imul(startPc ^ regCount, SALT_DERIVE.mixB) ^
+              Math.imul(paramCount + uvCount + hasRest, SALT_DERIVE.mixC) ^
+              regs[fp + SLOTS.SALT]) |
+            0;
 
           var uvDescs = new Array(uvCount);
           for (var i = 0; i < uvCount; i++) {

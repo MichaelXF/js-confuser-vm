@@ -23,6 +23,15 @@ export type RegisterOperand = Op<{
   // span CFF dispatch-loop back-edges — regions the linear-scan liveness
   // analysis cannot reason about.
   pinned?: boolean;
+  // Emit this operand as `slot ^ xorShift` rather than as the slot.
+  //
+  // Only ever set on the DESTINATION of a merged MBA handler, which recovers
+  // the real slot by XORing the same value back out of its selector word (see
+  // mba-utils' DST_SHIFT_MASK).  The operand therefore does not name the
+  // register the instruction writes, which is what a layout probe assumes.
+  // resolveRegisters applies it, and pads the frame so the shifted index is
+  // always still a legal slot.
+  xorShift?: number;
 }>;
 
 // A placeholder for a function's concrete regCount, emitted in MAKE_CLOSURE.

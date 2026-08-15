@@ -552,16 +552,21 @@ function processFunctionBlock(
   const out: Bytecode = [];
 
   // ── Hoist: create the decode closure once at function entry ───────────────
-  out.push([
-    OP.MAKE_CLOSURE!,
-    ref(rClosure),
-    { type: "label", label: decodeDesc.entryLabel },
-    decodeDesc.paramCount, // 2 or 3, depending on the param mode
-    b.fnRegCountOperand(decodeDesc._fnIdx), // resolved by resolveRegisters()
-    0, // no upvalues
-    0, // hasRest = false
-    decodeDesc.salt!, // frame SALT slot seed
-  ] as Instruction);
+  out.push(
+    compiler.markClosureParent(
+      [
+        OP.MAKE_CLOSURE!,
+        ref(rClosure),
+        { type: "label", label: decodeDesc.entryLabel },
+        decodeDesc.paramCount, // 2 or 3, depending on the param mode
+        b.fnRegCountOperand(decodeDesc._fnIdx), // resolved by resolveRegisters()
+        0, // no upvalues
+        0, // hasRest = false
+        compiler.saltSeedOperand(), // frame SALT seed — resolveSalts fills it in
+      ] as Instruction,
+      fnId,
+    ),
+  );
 
   // Write the site key into the register(s) the decode closure expects.
   const emitKey = (dst: Bytecode, siteKey: number) => {

@@ -230,17 +230,25 @@ export function stringConcealing(
   `).compile({}, compiler);
   const [inflateDesc, decodeDesc] = helpers.functions;
 
-  const mkClosure = (dst: RegisterOperand, desc: any, params: number) =>
-    [
-      OP.MAKE_CLOSURE!,
-      ref(dst),
-      { type: "label", label: desc.entryLabel },
-      params,
-      b.fnRegCountOperand(desc._fnIdx),
-      0, // upvalue count
-      0, // hasRest
-      desc.salt, // frame SALT slot seed
-    ] as unknown as Instruction;
+  const mkClosure = (
+    dst: RegisterOperand,
+    desc: any,
+    params: number,
+    parentFnId: number,
+  ) =>
+    compiler.markClosureParent(
+      [
+        OP.MAKE_CLOSURE!,
+        ref(dst),
+        { type: "label", label: desc.entryLabel },
+        params,
+        b.fnRegCountOperand(desc._fnIdx),
+        0, // upvalue count
+        0, // hasRest
+        compiler.saltSeedOperand(), // frame SALT seed — resolveSalts fills it in
+      ] as unknown as Instruction,
+      parentFnId,
+    );
 
   const { bytecode } = forEachFunction(bc, compiler, (fnInstrs, fnId) => {
     if (!needSet.has(fnId)) return { instrs: fnInstrs };
@@ -262,7 +270,7 @@ export function stringConcealing(
     if (isMain) {
       const rInflate = allocReg(fnId, maxId);
       const rB64 = allocReg(fnId, maxId);
-      prologue.push(mkClosure(rInflate, inflateDesc, 1));
+      prologue.push(mkClosure(rInflate, inflateDesc, 1, fnId));
       prologue.push([OP.LOAD_CONST!, ref(rB64), b.constantOperand(bankB64)]);
       prologue.push([OP.CALL!, ref(rBankMain), ref(rInflate), 1, ref(rB64)]);
       rBank = rBankMain;
@@ -273,7 +281,7 @@ export function stringConcealing(
 
     if (usesStrings) {
       rDecode = allocReg(fnId, maxId);
-      prologue.push(mkClosure(rDecode, decodeDesc, 4));
+      prologue.push(mkClosure(rDecode, decodeDesc, 4, fnId));
       rKey = allocReg(fnId, maxId);
       rStart = allocReg(fnId, maxId);
       rLen = allocReg(fnId, maxId);

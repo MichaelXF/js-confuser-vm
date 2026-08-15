@@ -118,6 +118,16 @@ export interface Encoding {
    */
   encodeSteps: (x: MBAExpr, name: (i: number) => string) => EncodingSteps;
   decodeSteps: (x: MBAExpr, name: (i: number) => string) => EncodingSteps;
+  /**
+   * E(x) / E^-1(x) as ONE expression, with no intermediate bindings.
+   *
+   * Only safe for an encoding whose rounds each reference their input a bounded
+   * number of times — see createSaltEncoding, which is built for exactly this
+   * and is the only thing that should call these.  A general encoding must use
+   * the stepped form above or it multiplies out to six figures of nodes.
+   */
+  encodeExpr: (x: MBAExpr) => MBAExpr;
+  decodeExpr: (x: MBAExpr) => MBAExpr;
   /** E(n) as an int32, at build time. */
   encodeValue: (n: number) => number;
   /** E^-1(n) as an int32, at build time. */
@@ -279,6 +289,11 @@ export function createEncoding(polynomial = true): Encoding {
     rounds.splice(getRandomInt(1, rounds.length - 1), 0, pp3Round());
   }
 
+  return buildEncoding(rounds);
+}
+
+/** Wrap a fixed round list as an Encoding. */
+function buildEncoding(rounds: Round[]): Encoding {
   const steps = (
     x: MBAExpr,
     name: (i: number) => string,
@@ -315,8 +330,46 @@ export function createEncoding(polynomial = true): Encoding {
   return {
     encodeSteps: (x, name) => steps(x, name, true),
     decodeSteps: (x, name) => steps(x, name, false),
+    encodeExpr: (x) => rounds.reduce((acc, r) => trunc(r.forward(acc)), x),
+    decodeExpr: (x) =>
+      [...rounds].reverse().reduce((acc, r) => trunc(r.inverse(acc)), x),
     encodeValue: (n) => rounds.reduce((acc, r) => r.forwardValue(acc), n | 0),
     decodeValue: (n) =>
       rounds.reduceRight((acc, r) => r.inverseValue(acc), n | 0),
   };
+}
+
+// The salt encoding
+// ───────────────────────────────────────────────────────────────────────────
+// A separate factory because it is used differently from every other encoding
+// here: its decode is INLINED into a generated handler body (see
+// transforms/runtime/mbaOpcodes.ts) rather than emitted as a chain of bindings,
+// and it runs once per execution of every salt-reading handler rather than once
+// per state transition.  Both facts push in the same direction — the round set
+// has to be small and, above all, non-duplicating.
+//
+// So the expensive rounds are excluded outright.  `pp3`'s inverse is a Horner
+// chain of up to 16 imuls; a xorshift inverse references its input three or four
+// times, which for an INLINE composite multiplies rather than adds.  What is
+// left is mul / add / xor (one reference each) plus one mandatory `rot` (two
+// references), which is what keeps the composite off being a polynomial —
+// exactly the argument createEncoding makes, at a size an inline expansion can
+// afford.  Worst case is two copies of a bare variable leaf.
+//
+// ── What it is for ───────────────────────────────────────────────────────────
+// The frame's SALT slot holds E(salt) rather than the salt.  E^-1 exists only
+// inside handler bodies, fused into their MBA, so an attacker who recovers a
+// function's plain salt — by emulating MAKE_CLOSURE, which is the only place it
+// is derivable at all — still cannot write it into a fabricated frame and have
+// the handlers agree.  See utils/frame-layout.ts.
+const SALT_ROUNDS = 3;
+
+export function createSaltEncoding(): Encoding {
+  const rounds: (() => Round)[] = [mulRound, addRound, xorRound];
+  const picked: Round[] = [];
+  for (let i = 0; i < SALT_ROUNDS; i++) picked.push(choice(rounds)());
+  // Mandatory, and placed at a random depth: without a bit-permuting round the
+  // whole composite is a polynomial function and interpolation recovers it.
+  picked.splice(getRandomInt(0, picked.length), 0, rotRound());
+  return buildEncoding(picked);
 }
