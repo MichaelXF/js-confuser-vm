@@ -1,13 +1,52 @@
 import { parse } from "@babel/parser";
 import { generate } from "@babel/generator";
+import * as t from "@babel/types";
+import traverseImport from "@babel/traverse";
 import { Compiler } from "../../src/compiler.ts";
 import { applyClassObfuscation } from "../../src/transforms/runtime/classObfuscation.ts";
 import { applyDeclassify } from "../../src/transforms/runtime/declassify.ts";
 import { evalCode, obfuscate } from "../test-utils.js";
 
+const traverse = traverseImport.default || traverseImport;
+
 // Strips `//` line comments so assertions only see real code
 function stripLineComments(code) {
   return code.replace(/\/\/.*$/gm, "");
+}
+
+// Finds the handler-table dispatch — a computed call `TABLE[op]()` — and
+// returns its NodePath, or null. Matching on the AST rather than on the
+// generated text matters here: every name in the output is a one-or-two-letter
+// mangled name, and property names come out of the same alphabet as variable
+// names, so a textual search for `H[` also hits an unrelated `vm.H[idx]`.
+function findDispatchPath(ast) {
+  let found = null;
+  traverse(ast, {
+    CallExpression(path) {
+      const callee = path.node.callee;
+      if (
+        t.isMemberExpression(callee) &&
+        callee.computed &&
+        t.isIdentifier(callee.object) &&
+        t.isIdentifier(callee.property, { name: "op" }) &&
+        path.node.arguments.length === 0
+      ) {
+        found = path;
+        path.stop();
+      }
+    },
+  });
+  return found;
+}
+
+// The index of `path`'s statement within `blockNode.body`, or null when the
+// path sits in some deeper block (inside a handler function, say) instead of
+// directly alongside the table declaration.
+function siblingStatementIndex(path, blockNode) {
+  const stmt = path.getStatementParent();
+  if (!stmt || !stmt.parentPath || stmt.parentPath.node !== blockNode)
+    return null;
+  return stmt.key;
 }
 
 test("Variant #1: Renames internal VM classes' fields/methods and stays correct", async () => {
@@ -142,19 +181,39 @@ test("Variant #5: handlerTable's table is a local of the run function", async ()
   // The VM.prototype alias handlerTable uses on its own is gone: declassify
   // ran first, so there is no prototype left to hang a table off.
   expect(code).not.toContain("VMPrototype");
-  expect(code).not.toMatch(/this\[\w+\]\(\)/);
 
-  // Dispatch now goes through a plain local array, declared before every
-  // assignment that writes into it.
-  const dispatch = code.match(/(\w+)\[op\]\(\)/);
+  const ast = parse(code, { sourceType: "unambiguous" });
+  const dispatch = findDispatchPath(ast);
   expect(dispatch).not.toBeNull();
 
-  const table = dispatch[1];
-  const declAt = code.indexOf(`var ${table} = [];`);
-  const firstUseAt = code.search(new RegExp("\\b" + table + "\\["));
+  // Dispatch goes through a local binding, not a property of a live object:
+  // `H[op]()`, never `this[op]()`.
+  expect(t.isThisExpression(dispatch.node.callee.object)).toBe(false);
 
-  expect(declAt).toBeGreaterThanOrEqual(0);
-  expect(firstUseAt).toBeGreaterThan(declAt);
+  const table = dispatch.node.callee.object.name;
+  const binding = dispatch.scope.getBinding(table);
+  expect(binding).toBeDefined();
+
+  // A plain empty array declared as a local of the enclosing run function —
+  // so it is unreachable from outside a live call to it.
+  expect(binding.kind).toBe("var");
+  expect(t.isFunction(binding.scope.block)).toBe(true);
+  expect(binding.path.node.init).toMatchObject({
+    type: "ArrayExpression",
+    elements: [],
+  });
+
+  // Every handler assignment sitting alongside the declaration has to come
+  // after it — a write hoisted above `var H = []` would be `undefined[0] = ...`
+  // the moment the run function is entered.
+  const declStmt = binding.path.getStatementParent();
+  const blockNode = declStmt.parentPath.node;
+  const uses = binding.referencePaths
+    .map((p) => siblingStatementIndex(p, blockNode))
+    .filter((i) => i !== null);
+
+  expect(uses.length).toBeGreaterThan(0);
+  expect(Math.min(...uses)).toBeGreaterThan(declStmt.key);
 
   expect(await evalCode(code)).toEqual(42);
 });
