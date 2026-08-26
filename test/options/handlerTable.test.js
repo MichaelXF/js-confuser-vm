@@ -55,11 +55,17 @@ test("Variant #2: Handler table stays correct with specialized opcodes + class o
     },
   );
 
-  // classObfuscation inlines OP, so handler keys are now numeric opcodes.
-  expect(output).toMatch(/VMPrototype\[\d+\] = function/);
+  // classObfuscation declassifies the runtime first, so the table is no longer
+  // a property of VM.prototype: it is a plain array declared inside the run
+  // function, and the handlers read VM state through run's vm parameter.
+  expect(output).not.toMatch(/VMPrototype/);
+  expect(output).not.toMatch(/\.prototype\[[^\]]*\]\s*=/);
+  expect(output).toMatch(/(\w+)\[\d+\] = function \(\) \{/);
+  expect(output).not.toMatch(/this\[\w+\]\(\)/);
 
   // Recursion exercises RETURN -> halt across many frames; the ternary and
   // arithmetic exercise the injected frame/regs/base vars inside handlers.
+
   var result = await evalCode(output);
   expect(result).toEqual(55);
 });

@@ -10,6 +10,15 @@ import {
 } from "../../utils/random-utils.ts";
 import { createNameGenerator } from "../../utils/name-utilts.ts";
 import { NOISE_SLOT_PREFIX } from "../../utils/frame-layout.ts";
+import {
+  buildClassModel,
+  collectUsedNames,
+  type ClassInfo,
+  type ClassModel,
+  type DeclassifiedClass,
+  type DeclassifiedFn,
+  type DeclassifyResult,
+} from "./declassify.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -146,10 +155,10 @@ function inlineConstants(ast: t.File, _compiler: Compiler): void {
   traverse(ast, {
     Program(programPath) {
       // Force a fresh scope crawl: earlier runtime passes (antiInstrumentation,
-      // specializedOpcodes, ...) clone/push raw AST nodes (switch cases that
-      // reference SENTINELS/OP) without going through path-based mutation, so
-      // a cached scope from any prior traverse() on this same ast could be
-      // missing those references.
+      // specializedOpcodes, declassify, ...) clone/push raw AST nodes (switch
+      // cases that reference SENTINELS/OP) without going through path-based
+      // mutation, so a cached scope from any prior traverse() on this same ast
+      // could be missing those references.
       programPath.scope.crawl();
 
       for (const stmt of [...ast.program.body]) {
@@ -172,93 +181,6 @@ function inlineConstants(ast: t.File, _compiler: Compiler): void {
       }
     },
   });
-}
-
-// ── Class model ──────────────────────────────────────────────────────────
-// Generic discovery of "function constructor + prototype methods" classes
-// inside the VM runtime source, e.g. `function Frame(...) { this.x = ...; }`
-// plus `Frame.prototype.method = function (...) {...}`. Nothing here is
-// hardcoded to the current class names (Upvalue/Closure/Frame/VM) so the
-// pass keeps working if runtime.ts evolves.
-
-interface ClassInfo {
-  name: string;
-  ctorFn: t.FunctionDeclaration;
-  fields: Set<string>;
-  methods: Map<string, t.FunctionExpression>;
-}
-
-interface ClassModel {
-  classes: Map<string, ClassInfo>;
-}
-
-function collectThisFields(ctorFn: t.FunctionDeclaration): Set<string> {
-  const fields = new Set<string>();
-  traverse(t.blockStatement(ctorFn.body.body), {
-    noScope: true,
-    AssignmentExpression(path) {
-      const { node } = path;
-      const left = node.left;
-      if (
-        node.operator === "=" &&
-        t.isMemberExpression(left) &&
-        t.isThisExpression(left.object) &&
-        !left.computed &&
-        t.isIdentifier(left.property)
-      ) {
-        fields.add(left.property.name);
-      }
-    },
-  });
-  return fields;
-}
-
-function buildClassModel(ast: t.File): ClassModel {
-  const classes = new Map<string, ClassInfo>();
-
-  // Pass 1: top-level `function Name(...) { this.x = ...; }` constructors.
-  for (const stmt of ast.program.body) {
-    if (!t.isFunctionDeclaration(stmt) || !stmt.id) continue;
-    const fields = collectThisFields(stmt);
-    if (fields.size === 0) continue; // not a constructor-shaped function
-    classes.set(stmt.id.name, {
-      name: stmt.id.name,
-      ctorFn: stmt,
-      fields,
-      methods: new Map(),
-    });
-  }
-
-  // Pass 2: `Name.prototype.method = function (...) {...}` assignments.
-  for (const stmt of ast.program.body) {
-    if (!t.isExpressionStatement(stmt)) continue;
-    const expr = stmt.expression;
-    if (!t.isAssignmentExpression(expr) || expr.operator !== "=") continue;
-
-    const left = expr.left;
-    if (
-      !t.isMemberExpression(left) ||
-      left.computed ||
-      !t.isIdentifier(left.property)
-    )
-      continue;
-
-    const obj = left.object;
-    if (
-      !t.isMemberExpression(obj) ||
-      obj.computed ||
-      !t.isIdentifier(obj.object) ||
-      !t.isIdentifier(obj.property, { name: "prototype" })
-    )
-      continue;
-
-    const classInfo = classes.get(obj.object.name);
-    if (!classInfo || !t.isFunctionExpression(expr.right)) continue;
-
-    classInfo.methods.set(left.property.name, expr.right);
-  }
-
-  return { classes };
 }
 
 // ── Property renaming ───────────────────────────────────────────────────
@@ -349,10 +271,11 @@ function isPlainStructObject(obj: t.ObjectExpression): boolean {
 // Collects field names from ad-hoc "struct" object literals used internally by
 // the VM runtime as records — fn descriptors (paramCount/regCount/startPc/...),
 // upvalue descriptors (isLocal/_index), exception-handler records
-// (handlerPc/exceptionReg/...), for-in iterator state (_keys/i), etc. These
+// (handlerPc/exceptionReg/...), for-in iterator state (_keys/i), and — once
+// declassify has run — the bare objects the class factories hand back. These
 // aren't classes (no constructor function builds them), so buildClassModel
-// never sees their fields; this is what lets renameClassProperties cover them
-// too. PropertyDescriptor-shaped literals passed to Object.defineProperty /
+// never sees their fields; this is what lets the renamer cover them too.
+// PropertyDescriptor-shaped literals passed to Object.defineProperty /
 // getOwnPropertyDescriptor (get/set/value/writable/enumerable/configurable)
 // are implicitly excluded since every one of those keys is in RENAME_DENYLIST.
 // Any object whose shape isn't this simple (computed/method/spread keys) is
@@ -392,6 +315,26 @@ function collectCandidateNames(model: ClassModel, ast: t.File): Set<string> {
   return names;
 }
 
+// After declassify the method names are gone from the property namespace —
+// they're plain function bindings now, renamed separately by
+// renameFreeFunctions. What's left is the field set (which includes the fake
+// fields injected below) plus every struct literal in the file.
+function collectDeclassifiedNames(
+  result: DeclassifyResult,
+  ast: t.File,
+): Set<string> {
+  const names = new Set<string>();
+  for (const cls of result.classes) {
+    for (const field of cls.fields) {
+      if (!RENAME_DENYLIST.has(field)) names.add(field);
+    }
+  }
+  for (const field of collectStructFieldNames(ast)) {
+    if (!RENAME_DENYLIST.has(field)) names.add(field);
+  }
+  return names;
+}
+
 // Generated names must avoid RENAME_DENYLIST too — otherwise a short generated
 // name (e.g. "get") could collide with one of those reserved property names
 // and corrupt unrelated, intentionally-untouched accesses (PropertyDescriptor
@@ -404,9 +347,9 @@ function generateMangledNames(candidates: Set<string>): Map<string, string> {
   return map;
 }
 
-function renameClassProperties(
+function renameProperties(
   ast: t.File,
-  model: ClassModel,
+  candidates: Set<string>,
   compiler: Compiler,
 ): void {
   if (detectUnsafeRenamePatterns(ast)) {
@@ -416,7 +359,6 @@ function renameClassProperties(
     return;
   }
 
-  const candidates = collectCandidateNames(model, ast);
   if (candidates.size === 0) return;
 
   const mangleMap = generateMangledNames(candidates);
@@ -455,7 +397,43 @@ function renameClassProperties(
   });
 }
 
-// ── Parameter reordering ────────────────────────────────────────────────
+// ── Fake parameters ─────────────────────────────────────────────────────
+// Dummy value handed to a fake parameter at a call site. The value is never
+// read by real logic, so any cheap-to-construct literal works; varying the
+// kind across call sites just avoids a tell-tale repeated literal.
+function randomFakeLiteral(): t.Expression {
+  switch (getRandomInt(0, 5)) {
+    case 0:
+      return t.objectExpression([]);
+    case 1:
+      return t.arrayExpression([]);
+    case 2:
+      return t.numericLiteral(getRandomInt(0, 99));
+    case 3:
+      return t.stringLiteral(choice(["x", "y", "z", "q", "k"]));
+    case 4:
+      return t.identifier("undefined");
+    default:
+      return t.nullLiteral();
+  }
+}
+
+// Folds a group of fake parameter references into one value worth assigning,
+// so the result never reads as an obvious no-op (`if (x) {}`, a bare `x;`)
+// that a trivial dead-code pass strips on sight.
+function buildFakeValue(refs: t.Expression[]): t.Expression {
+  if (refs.length === 1) return refs[0];
+  if (chance(50)) return t.arrayExpression(refs);
+  return refs.reduce((acc, cur) =>
+    t.logicalExpression(choice(["||", "&&"]), acc, cur),
+  );
+}
+
+function randomPermutation(n: number): number[] {
+  return shuffle(Array.from({ length: n }, (_, i) => i));
+}
+
+// ── Parameter reordering (pre-declassify shape) ─────────────────────────
 // For each eligible constructor/method, a single random permutation is
 // applied to both its declared parameter list and the argument list of
 // every call site that matches it — including call sites synthesized by
@@ -527,30 +505,6 @@ function collectReorderCandidates(model: ClassModel): ReorderCandidate[] {
   return candidates;
 }
 
-function randomPermutation(n: number): number[] {
-  return shuffle(Array.from({ length: n }, (_, i) => i));
-}
-
-// Dummy value handed to a fake parameter at a call site. The value is never
-// read by real logic, so any cheap-to-construct literal works; varying the
-// kind across call sites just avoids a tell-tale repeated literal.
-function randomFakeLiteral(): t.Expression {
-  switch (getRandomInt(0, 5)) {
-    case 0:
-      return t.objectExpression([]);
-    case 1:
-      return t.arrayExpression([]);
-    case 2:
-      return t.numericLiteral(getRandomInt(0, 99));
-    case 3:
-      return t.stringLiteral(choice(["x", "y", "z", "q", "k"]));
-    case 4:
-      return t.identifier("undefined");
-    default:
-      return t.nullLiteral();
-  }
-}
-
 function reorderParameters(ast: t.File, model: ClassModel): void {
   const candidates = collectReorderCandidates(model);
   if (candidates.length === 0) return;
@@ -562,14 +516,12 @@ function reorderParameters(ast: t.File, model: ClassModel): void {
   // the fakes get shuffled in amongst the real params for free.
   //
   // The fakes are then "used" so they don't read as obviously dead — every
-  // group gets stashed onto a real, brand-new `this` field (never a no-op
-  // like `if (x) {}` or a bare `x;`, which a trivial dead-code pass strips
-  // on sight), registered into classInfo.fields so it flows through the
-  // existing field-renaming pass exactly like a real property. They're never
-  // all written in one giveaway statement at the top, either: they're split
-  // across however many 1-2-fake groups it takes to exhaust them, each group
-  // gets its own field and its own statement, and each statement lands at a
-  // random point in the body.
+  // group gets stashed onto a real, brand-new `this` field, registered into
+  // classInfo.fields so it flows through the existing field-renaming pass
+  // exactly like a real property. They're never all written in one giveaway
+  // statement at the top, either: they're split across however many 1-2-fake
+  // groups it takes to exhaust them, each group gets its own field and its
+  // own statement, and each statement lands at a random point in the body.
   let fakeParamCounter = 0;
   let fakeFieldCounter = 0;
 
@@ -577,22 +529,13 @@ function reorderParameters(ast: t.File, model: ClassModel): void {
     refs: t.Expression[],
     classInfo: ClassInfo,
   ): t.Statement {
-    const value: t.Expression =
-      refs.length > 1 && chance(50)
-        ? t.arrayExpression(refs)
-        : refs.length === 1
-          ? refs[0]
-          : refs.reduce((acc, cur) =>
-              t.logicalExpression(choice(["||", "&&"]), acc, cur),
-            );
-
     const fieldName = `_fake${++fakeFieldCounter}`;
     classInfo.fields.add(fieldName);
     return t.expressionStatement(
       t.assignmentExpression(
         "=",
         t.memberExpression(t.thisExpression(), t.identifier(fieldName)),
-        value,
+        buildFakeValue(refs),
       ),
     );
   }
@@ -688,7 +631,259 @@ function reorderParameters(ast: t.File, model: ClassModel): void {
   }
 }
 
-// ── Statement shuffling (pre-existing behavior) ─────────────────────────
+// ── Parameter reordering (post-declassify shape) ────────────────────────
+// Once declassify has run, every factory and every former method is a plain
+// function binding, so call sites are matched by *binding* instead of by
+// property name. That removes the ambiguity bail-out the shape above needs
+// (two classes sharing a method name) and makes the receiver — now just the
+// first argument — one more parameter free to be shuffled out of position 0.
+
+interface FreeCandidate {
+  entry: DeclassifiedFn;
+  paramCount: number;
+  callSites: t.CallExpression[];
+  usesArguments: boolean;
+  unsafe: boolean;
+}
+
+function referencesArguments(fn: t.FunctionDeclaration): boolean {
+  let found = false;
+  t.traverseFast(fn, (n) => {
+    if (t.isIdentifier(n, { name: "arguments" })) found = true;
+  });
+  return found;
+}
+
+// Skips the two positions where an identifier is a name rather than a
+// reference. Our generated function names are unique across the file so this
+// can't actually fire today, but it keeps the by-name matching honest.
+function isNamePosition(path: NodePath<t.Identifier>): boolean {
+  const parent = path.parentPath;
+  if (!parent) return false;
+  if (
+    parent.isMemberExpression() &&
+    parent.node.property === path.node &&
+    !parent.node.computed
+  )
+    return true;
+  return (
+    parent.isObjectProperty() &&
+    parent.node.key === path.node &&
+    !parent.node.computed
+  );
+}
+
+function reorderFreeFunctions(ast: t.File, result: DeclassifyResult): void {
+  const byName = new Map<string, FreeCandidate>();
+  for (const entry of result.fns) {
+    if (!hasOnlyPlainIdentifierParams(entry.fn.params)) continue;
+    byName.set(entry.name, {
+      entry,
+      paramCount: entry.fn.params.length,
+      callSites: [],
+      usesArguments: referencesArguments(entry.fn),
+      unsafe: false,
+    });
+  }
+  if (byName.size === 0) return;
+
+  traverse(ast, {
+    Identifier(path) {
+      const candidate = byName.get(path.node.name);
+      if (!candidate) return;
+
+      const parent = path.parentPath;
+      if (!parent) return;
+      if (parent.isFunctionDeclaration() && parent.node.id === path.node)
+        return; // its own declaration
+      if (isNamePosition(path)) return;
+
+      if (!parent.isCallExpression() || parent.node.callee !== path.node) {
+        candidate.unsafe = true; // escapes as a value — can't track its arity
+        return;
+      }
+
+      const args = parent.node.arguments;
+      if (args.some((a) => t.isSpreadElement(a) || t.isArgumentPlaceholder(a))) {
+        candidate.unsafe = true;
+        return;
+      }
+
+      // Partial calls exist by design: `this._constant()` leaves both operand
+      // params defaulted, and after declassify that's `VM_constant(vm)`
+      // against three params. Pad them out to full arity so the permutation
+      // can't rebind a real argument to the wrong slot. Skipped if the
+      // function can observe `arguments.length`.
+      if (args.length < candidate.paramCount && !candidate.usesArguments) {
+        while (args.length < candidate.paramCount) {
+          args.push(t.unaryExpression("void", t.numericLiteral(0)));
+        }
+      }
+      if (args.length !== candidate.paramCount) {
+        candidate.unsafe = true;
+        return;
+      }
+      candidate.callSites.push(parent.node);
+    },
+  });
+
+  let fakeParamCounter = 0;
+  let fakeFieldCounter = 0;
+
+  // Decoy fields are seeded into the factory's object literal so the shape is
+  // final at construction — a method writing a brand-new property on the hot
+  // path would otherwise transition the object's hidden class mid-run.
+  function seedDecoyField(owner: DeclassifiedClass, fieldName: string): void {
+    owner.objectLiteral.properties.push(
+      t.objectProperty(t.identifier(fieldName), randomFakeLiteral()),
+    );
+  }
+
+  // A fake statement must land before the function's first top-level return,
+  // otherwise it's unreachable and reads as exactly the dead code it is.
+  function insertLimit(body: t.Statement[]): number {
+    const idx = body.findIndex((s) => t.isReturnStatement(s));
+    return idx === -1 ? body.length : idx;
+  }
+
+  function injectFakeParams(candidate: FreeCandidate): void {
+    const { entry } = candidate;
+    const fakeCount = getRandomInt(1, 4);
+    const fakeNames: string[] = [];
+
+    for (let i = 0; i < fakeCount; i++) {
+      const name = `fake_${++fakeParamCounter}`;
+      fakeNames.push(name);
+      const insertAt = getRandomInt(0, entry.fn.params.length);
+      (entry.fn.params as t.Identifier[]).splice(
+        insertAt,
+        0,
+        t.identifier(name),
+      );
+      for (const site of candidate.callSites) {
+        site.arguments.splice(insertAt, 0, randomFakeLiteral());
+      }
+      candidate.paramCount++;
+    }
+
+    shuffle(fakeNames);
+    const body = entry.fn.body.body;
+    let i = 0;
+    while (i < fakeNames.length) {
+      const groupSize = Math.min(getRandomInt(1, 2), fakeNames.length - i);
+      const refs = fakeNames
+        .slice(i, i + groupSize)
+        .map((n): t.Expression => t.identifier(n));
+      i += groupSize;
+
+      const fieldName = `_fake${++fakeFieldCounter}`;
+      entry.owner.fields.add(fieldName);
+      const value = buildFakeValue(refs);
+
+      if (entry.selfName === null) {
+        // A factory has no receiver to write through — the fake rides along
+        // as one more property of the object it builds.
+        entry.owner.objectLiteral.properties.push(
+          t.objectProperty(t.identifier(fieldName), value),
+        );
+        continue;
+      }
+
+      seedDecoyField(entry.owner, fieldName);
+      body.splice(
+        getRandomInt(0, insertLimit(body)),
+        0,
+        t.expressionStatement(
+          t.assignmentExpression(
+            "=",
+            t.memberExpression(
+              t.identifier(entry.selfName),
+              t.identifier(fieldName),
+            ),
+            value,
+          ),
+        ),
+      );
+    }
+  }
+
+  for (const candidate of byName.values()) {
+    if (candidate.unsafe) continue;
+
+    injectFakeParams(candidate);
+
+    const perm = randomPermutation(candidate.paramCount);
+    const params = candidate.entry.fn.params as t.Identifier[];
+    candidate.entry.fn.params = perm.map((i) => params[i]);
+
+    for (const site of candidate.callSites) {
+      const origArgs = site.arguments.slice();
+      site.arguments = perm.map((i) => origArgs[i]) as typeof site.arguments;
+    }
+  }
+}
+
+// The functions declassify hid inside the run function keep their readable
+// `VM_pushFrame`-style names right up until here, so every pass in between
+// stays debuggable. They are bindings, not properties, so renaming them is a
+// scope question, not an alias-analysis one — and their generated names are
+// unique across the file, which is what makes the flat identifier sweep below
+// sound. The top-level survivors (the factories, the run function, the boot
+// helpers) keep their names: they're `var`s on the global object in a browser,
+// where a one-letter name is a live collision risk with the guest program's
+// own globals.
+function renameFreeFunctions(ast: t.File, result: DeclassifyResult): void {
+  const targets = result.fns.filter((f) => f.moved);
+  if (targets.length === 0) return;
+
+  const nextName = createNameGenerator(collectUsedNames(ast));
+  const map = new Map<string, string>();
+  for (const entry of shuffle(targets.slice())) map.set(entry.name, nextName());
+
+  traverse(ast, {
+    Identifier(path) {
+      const renamed = map.get(path.node.name);
+      if (!renamed || isNamePosition(path)) return;
+      path.node.name = renamed;
+    },
+  });
+
+  for (const entry of targets) entry.name = map.get(entry.name)!;
+}
+
+// Shuffles each factory's object literal. Safe only while every initializer is
+// side-effect free and independent of the others, which is what the purity
+// test below establishes — a value that reads a variable assigned by an
+// earlier property would change meaning if it moved.
+function isPureInitializer(node: t.Node): boolean {
+  if (t.isIdentifier(node)) return true;
+  if (t.isNullLiteral(node)) return true;
+  if (
+    t.isNumericLiteral(node) ||
+    t.isStringLiteral(node) ||
+    t.isBooleanLiteral(node)
+  )
+    return true;
+  if (t.isArrayExpression(node)) return node.elements.length === 0;
+  if (t.isObjectExpression(node)) return node.properties.length === 0;
+  if (t.isUnaryExpression(node) && node.operator === "void")
+    return isPureInitializer(node.argument);
+  return false;
+}
+
+function shuffleObjectFields(result: DeclassifyResult): void {
+  for (const cls of result.classes) {
+    const props = cls.objectLiteral.properties;
+    if (props.length < 2) continue;
+    const shufflable = props.every(
+      (p) => t.isObjectProperty(p) && !p.computed && isPureInitializer(p.value),
+    );
+    if (!shufflable) continue;
+    shuffle(props);
+  }
+}
+
+// ── Statement shuffling ─────────────────────────────────────────────────
 
 function hasComment(node: t.Node, text: string): boolean {
   const all = [
@@ -738,7 +933,29 @@ function isPrototypeAssignment(
   );
 }
 
-function shuffleStatementOrder(ast: t.File): void {
+// The hidden helpers are function *declarations*, so they hoist to the top of
+// the run function no matter where they physically sit. That makes every slot
+// in the body a legal home for them — including past the dispatch loop, where
+// nothing else could go. Only the declarations move; every other statement
+// keeps its relative order, which is what keeps `var H = []` ahead of the
+// handler-table assignments that write through it.
+function shuffleRunLocals(runFn: t.FunctionDeclaration): void {
+  const body = runFn.body.body;
+  const decls = body.filter((s): s is t.FunctionDeclaration =>
+    t.isFunctionDeclaration(s),
+  );
+  if (decls.length < 2) return;
+
+  const rest = body.filter((s) => !t.isFunctionDeclaration(s));
+  shuffle(decls);
+  for (const decl of decls) rest.splice(getRandomInt(0, rest.length), 0, decl);
+  runFn.body.body = rest;
+}
+
+function shuffleStatementOrder(
+  ast: t.File,
+  result: DeclassifyResult | null,
+): void {
   const body = ast.program.body;
 
   // Split at the first statement that carries the @BOOT comment.
@@ -754,6 +971,7 @@ function shuffleStatementOrder(ast: t.File): void {
   // Group B: prototype method assignments (X.prototype.Y = ..., alias[K] = ...).
   // Both groups are shuffled independently; A always precedes B so that
   // constructors and prototype aliases are defined before methods reference them.
+  // After declassify group B is empty — there are no prototypes left to assign.
   const aliases = collectPrototypeAliases(body);
   const varDecls: t.Statement[] = [];
   const methodDefs: t.Statement[] = [];
@@ -770,6 +988,8 @@ function shuffleStatementOrder(ast: t.File): void {
   shuffle(methodDefs);
 
   ast.program.body = [...varDecls, ...methodDefs, ...boot];
+
+  if (result) shuffleRunLocals(result.runFn);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────────
@@ -777,13 +997,24 @@ function shuffleStatementOrder(ast: t.File): void {
 export function applyClassObfuscation(ast: t.File, compiler: Compiler): void {
   inlineConstants(ast, compiler);
 
-  const model = buildClassModel(ast);
+  const declassified = compiler.declassify;
 
-  // Reorder first: it matches call sites by their *original* method names.
-  // Renaming mutates those same MemberExpression names, so it must run after,
-  // not before — otherwise the reorder pass can no longer find call sites
-  // like `this.captureUpvalue(...)` once they've become `this._i(...)`.
-  reorderParameters(ast, model);
-  renameClassProperties(ast, model, compiler);
-  shuffleStatementOrder(ast);
+  if (declassified) {
+    // Reorder first: it registers the fake fields that renaming has to cover.
+    reorderFreeFunctions(ast, declassified);
+    renameProperties(ast, collectDeclassifiedNames(declassified, ast), compiler);
+    renameFreeFunctions(ast, declassified);
+    shuffleObjectFields(declassified);
+  } else {
+    const model = buildClassModel(ast);
+
+    // Reorder first: it matches call sites by their *original* method names.
+    // Renaming mutates those same MemberExpression names, so it must run after,
+    // not before — otherwise the reorder pass can no longer find call sites
+    // like `this.captureUpvalue(...)` once they've become `this._i(...)`.
+    reorderParameters(ast, model);
+    renameProperties(ast, collectCandidateNames(model, ast), compiler);
+  }
+
+  shuffleStatementOrder(ast, declassified);
 }

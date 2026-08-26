@@ -82,9 +82,8 @@ function VM(bytecode, constants, globals) {
   this.bytecode = bytecode;
   this.constants = constants;
   this.globals = globals;
-  // Open upvalues, keyed by absolute slot; created on the first capture so a
-  // closure-free program never allocates it. See captureUpvalue().
-  this._openUpvalues = null;
+  // Open upvalues are keyed by absolute slot
+  this._openUpvalues = [];
 
   // Flat slot array (Lua-style register file, with the frame headers folded in).
   // _regsTop is the next free slot (= base of the hypothetical next frame).
@@ -165,7 +164,7 @@ VM.prototype.captureUpvalue = function (fp, slot) {
   // a filter over every capture in the program. Entries are removed on close, so
   // anything found here is open by construction.
   var absSlot = this._regs[fp + SLOTS.REG_BASE] + slot;
-  var uvs = this._openUpvalues || (this._openUpvalues = []);
+  var uvs = this._openUpvalues;
   return uvs[absSlot] || (uvs[absSlot] = new Upvalue(this._regs, absSlot));
 };
 
@@ -207,7 +206,6 @@ VM.prototype._closeUpvaluesFor = function (fp) {
   // window [REG_BASE, end of the frame block) and free its table entry, so a
   // later frame reusing those slots starts with no captures.
   var uvs = this._openUpvalues;
-  if (!uvs) return; // nothing in this program ever captured a local
   var regs = this._regs;
   var hi = fp + regs[fp + SLOTS.FRAME_SIZE];
   for (var i = regs[fp + SLOTS.REG_BASE]; i < hi; i++) {
@@ -242,7 +240,7 @@ VM.prototype.run = function (closure, thisVal, args) {
     // var opcode = this.bytecode[pc];
     // console.log(`[run] pc=${pc}, opcode=${opcode}, name=${Object.keys(OP).find((key) => OP[key] === opcode)}`);
 
-    // Churn the decoy header slots so the real PC isn't the only slot moving
+    // Modify the decoy header slots
     /* @NOISE */
     if (typeof SLOTS.NOISE_PC === "number")
       regs[fp + SLOTS.NOISE_PC] = (regs[fp + SLOTS.NOISE_PC] + 1) % bc.length;
@@ -662,8 +660,8 @@ VM.prototype.run = function (closure, thisVal, args) {
 
           // A caller of 0 is the root frame returning to the host: park the
           // value in slot 0 for run() to hand back. A bare `return retVal`
-          // would only exit an extracted VM.prototype[op] handler function
-          // (handlerTable option), not the loop. Keeping the sole `break`
+          // would only exit an extracted handler function (handlerTable
+          // option), not the loop. Keeping the sole `break`
           // trailing (no mid-body break/return) also lets the handlerTable
           // transform lift this body verbatim.
           regs[caller ? regs[caller + SLOTS.REG_BASE] + (retDst >> 1) : 0] =

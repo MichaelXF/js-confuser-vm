@@ -10,6 +10,7 @@ import { applySpecializedOpcodes } from "./transforms/runtime/specializedOpcodes
 import { applyAliasedOpcodes } from "./transforms/runtime/aliasedOpcodes.ts";
 import { applyAntiInstrumentation } from "./transforms/runtime/antiInstrumentation.ts";
 import { applyClassObfuscation } from "./transforms/runtime/classObfuscation.ts";
+import { applyDeclassify } from "./transforms/runtime/declassify.ts";
 import { applyHandlerTable } from "./transforms/runtime/handlerTable.ts";
 import type * as b from "./types.ts";
 import { getSwitchStatement } from "./utils/ast-utils.ts";
@@ -80,11 +81,16 @@ export async function buildRuntime(
     runAndTime(applyShuffleOpcodes, "applyShuffleOpcodes");
   }
 
+  // Lower the runtime's classes to bare objects + standalone functions
+  if (options.classObfuscation) {
+    runAndTime(applyDeclassify, "applyDeclassify");
+  }
+
   if (options.handlerTable) {
     runAndTime(applyHandlerTable, "applyHandlerTable");
   }
 
-  // Shuffle top-level var declarations and prototype method definitions
+  // Inline constants, shuffle declarations, rename fields, reorder parameters
   if (options.classObfuscation) {
     runAndTime(applyClassObfuscation, "applyClassObfuscation");
   }

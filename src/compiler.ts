@@ -8,6 +8,7 @@ import { readFileSync } from "fs";
 import { stripTypeScriptTypes } from "module";
 import { ok } from "assert";
 import { buildRuntime } from "./build-runtime.ts";
+import type { DeclassifyResult } from "./transforms/runtime/declassify.ts";
 import { DEFAULT_OPTIONS, type Options } from "./options.ts";
 import { resolveLabels } from "./transforms/bytecode/resolveLabels.ts";
 import { resolveRegisters } from "./transforms/bytecode/resolveRegisters.ts";
@@ -324,6 +325,9 @@ export class Compiler {
   options: Options;
   serializer: Serializer;
 
+  // Set by the declassify runtime pass
+  declassify: DeclassifyResult | null;
+
   OP: Partial<typeof OP_ORIGINAL>;
   SENTINELS: { CALL_SPREAD: number };
   FRAME_LAYOUT: FrameLayout;
@@ -378,6 +382,8 @@ export class Compiler {
     this._loopStack = [];
     this._pendingLabel = null;
     this._labelCount = 0;
+
+    this.declassify = null;
 
     this.MACRO_OPS = {};
     this.MICRO_OPS = {};

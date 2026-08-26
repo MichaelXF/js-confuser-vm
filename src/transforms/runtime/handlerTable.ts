@@ -4,6 +4,8 @@ import traverseImport from "@babel/traverse";
 import { ok } from "assert";
 import { Compiler } from "../../compiler.ts";
 import { shuffle } from "../../utils/random-utils.ts";
+import { getSwitchStatement } from "../../utils/ast-utils.ts";
+import { collectUsedNames, makeUniqueNamer } from "./declassify.ts";
 
 const traverse = (traverseImport.default ||
   traverseImport) as typeof traverseImport.default;
@@ -19,6 +21,14 @@ function hasComment(node: t.Node, text: string): boolean {
   return ((node as any).leadingComments ?? []).some((c: t.Comment) =>
     c.value.includes(text),
   );
+}
+
+function containsNode(root: t.Node, target: t.Node): boolean {
+  let found = false;
+  t.traverseFast(root, (n) => {
+    if (n === target) found = true;
+  });
+  return found;
 }
 
 // Replace every switch-level `break;` with `return;` so a case body becomes a
@@ -72,7 +82,11 @@ function caseBody(sc: t.SwitchCase): t.Statement[] {
 // pre-scan the body's identifiers for those exact names. `base` is the frame's
 // REG_BASE header slot, so it needs both `fp` and `regs`; when a body reads
 // `base` alone we inline those two reads rather than emit unused vars.
-function buildInjectedVars(body: t.Statement[]): t.Statement[] {
+//
+// `self` is how the handler reaches VM state: `this` in the prototype-method
+// shape, or the run function's vm parameter once declassify has run (the
+// handlers are nested inside run, so they close over it).
+function buildInjectedVars(body: t.Statement[], self: string): t.Statement[] {
   const used = new Set<string>();
   t.traverseFast(t.blockStatement(body), (node) => {
     if (t.isIdentifier(node)) used.add(node.name);
@@ -82,14 +96,14 @@ function buildInjectedVars(body: t.Statement[]): t.Statement[] {
   const needFp = used.has("fp");
   const needRegs = used.has("regs");
 
-  if (needFp) injected.push(parseStatement("var fp = this._f;"));
-  if (needRegs) injected.push(parseStatement("var regs = this._regs;"));
+  if (needFp) injected.push(parseStatement(`var fp = ${self}._f;`));
+  if (needRegs) injected.push(parseStatement(`var regs = ${self}._regs;`));
   if (used.has("base")) {
     // Read through whichever locals already exist; a body that wants `base`
     // but never names `fp`/`regs` inlines those reads instead of declaring
     // vars it would use exactly once.
-    const arr = needRegs ? "regs" : "this._regs";
-    const frame = needFp ? "fp" : "this._f";
+    const arr = needRegs ? "regs" : `${self}._regs`;
+    const frame = needFp ? "fp" : `${self}._f`;
     injected.push(
       parseStatement(`var base = ${arr}[${frame} + SLOTS.REG_BASE];`),
     );
@@ -104,16 +118,48 @@ function dropTrailingReturn(body: t.Statement[]): void {
   if (last && t.isReturnStatement(last) && !last.argument) body.pop();
 }
 
-// Lift the @SWITCH opcode dispatch into a handler table:
-//   VM.prototype[<opcode>] = function () { <injected vars>; <case body> };
-// and replace the switch itself with a single dynamic dispatch `this[op]()`.
+// Lift the @SWITCH opcode dispatch into a handler table and replace the switch
+// itself with a single dynamic dispatch. Two shapes, depending on whether
+// declassify has already run:
+//
+//   prototype:    VM.prototype[<opcode>] = function () { ... this._f ... };
+//                 this[op]();
+//
+//   declassified: var H = [];  (a local of the run function)
+//                 H[<opcode>] = function () { ... vm._f ... };
+//                 H[op]();
+//
+// The declassified form is the reason for the whole exercise: the table is a
+// local of a running function rather than a property of a globally reachable
+// object, so it can't be enumerated or monkey-patched from a console. Calling
+// through `H` also means `this` inside a handler is the table, not the VM —
+// any `this` a rewrite failed to convert throws instead of silently working.
 //
 // Must run AFTER every pass that adds or clones switch cases (specialized /
-// macro / aliased / anti-instrumentation / shuffle) and BEFORE classObfuscation
-// so the lifted handler functions get obfuscated like the rest of the runtime
-// (and so `OP.X` keys get inlined to numbers by classObfuscation's
-// inlineConstants).
-export function applyHandlerTable(ast: t.File, _compiler: Compiler): void {
+// macro / aliased / anti-instrumentation / shuffle) and AFTER declassify, and
+// BEFORE classObfuscation so the lifted handler functions get obfuscated like
+// the rest of the runtime (and so `OP.X` keys get inlined to numbers by
+// classObfuscation's inlineConstants).
+export function applyHandlerTable(ast: t.File, compiler: Compiler): void {
+  const declassified = compiler.declassify;
+  const self = declassified ? declassified.vmName : "this";
+
+  // The table's own name has to dodge every identifier already in the runtime,
+  // including the locals of the run function it's about to live inside.
+  const tableName = declassified
+    ? makeUniqueNamer(collectUsedNames(ast))("H")
+    : "VMPrototype";
+
+  // Where the dispatch loop sits inside the run function — captured before the
+  // switch is replaced, since that's what we insert the table ahead of.
+  const switchNode = getSwitchStatement(ast);
+  let insertAt = -1;
+  if (declassified && switchNode) {
+    insertAt = declassified.runFn.body.body.findIndex((stmt) =>
+      containsNode(stmt, switchNode),
+    );
+  }
+
   let handlers: t.Statement[] | null = null;
 
   traverse(ast, {
@@ -124,7 +170,7 @@ export function applyHandlerTable(ast: t.File, _compiler: Compiler): void {
       handlers = [];
       for (const sc of path.node.cases) {
         // default: (test === null) is dropped. Unknown opcodes now surface as a
-        // TypeError from `this[op]()` rather than the old explicit Error — they
+        // TypeError from the dispatch rather than the old explicit Error — they
         // are unreachable for well-formed bytecode anyway.
         if (sc.test === null) continue;
 
@@ -135,7 +181,7 @@ export function applyHandlerTable(ast: t.File, _compiler: Compiler): void {
         const fn = t.functionExpression(
           null,
           [],
-          t.blockStatement([...buildInjectedVars(body), ...body]),
+          t.blockStatement([...buildInjectedVars(body, self), ...body]),
         );
 
         // The key is the case test verbatim: `OP.LOAD_CONST` for original ops
@@ -146,7 +192,7 @@ export function applyHandlerTable(ast: t.File, _compiler: Compiler): void {
             t.assignmentExpression(
               "=",
               t.memberExpression(
-                t.identifier("VMPrototype"),
+                t.identifier(tableName),
                 t.cloneNode(sc.test, true),
                 true, // computed
               ),
@@ -159,19 +205,36 @@ export function applyHandlerTable(ast: t.File, _compiler: Compiler): void {
       // Replace the whole switch with a single dynamic dispatch. Uses `op` (not
       // `opcode`) so the TIMING_CHECKS tamper path, which reassigns `op`, still
       // routes through the handler table.
-      path.replaceWith(parseStatement("this[op]();"));
+      path.replaceWith(
+        parseStatement(
+          `${declassified ? tableName : "this"}[op]();`,
+        ),
+      );
       path.stop();
     },
   });
 
   ok(handlers, "Could not find @SWITCH statement for handler table");
 
-  if (_compiler.options.shuffleOpcodes) {
+  if (compiler.options.shuffleOpcodes) {
     shuffle(handlers);
   }
 
+  if (declassified) {
+    ok(insertAt !== -1, "Could not locate the dispatch loop inside the run function");
+    // A plain local array: dense and packed for sequential opcodes, and never
+    // reachable from outside a live call to the run function.
+    declassified.runFn.body.body.splice(
+      insertAt,
+      0,
+      parseStatement(`var ${tableName} = [];`),
+      ...handlers,
+    );
+    return;
+  }
+
   // Append: var VMPrototype = VM.prototype; for minification reasons
-  var initStatement = parse("var VMPrototype=VM.prototype;", {
+  var initStatement = parse(`var ${tableName}=VM.prototype;`, {
     sourceType: "unambiguous",
   }).program.body[0];
 

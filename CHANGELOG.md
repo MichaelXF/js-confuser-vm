@@ -17,6 +17,12 @@ Website Ideas:
 - Better visualization for options bytecode and file size
 
 
+## `0.1.6` Updates
+
+- Improved `Class Obfuscation`
+- - Now removes the VM's class structure in favor of standalone functions and bare objects
+
+
 ## `0.1.5` Updates
 
 - Improved `Self Modifying`
