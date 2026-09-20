@@ -9,7 +9,7 @@ Ideas:
 - Header slot for PC should be XOR'ed
 - Memory protection: Registers should be XOR'ed (strings and numbers) with another register (such as a neighbor or deterministic slot) to conceal the runtime values from debuggers. The data can be decrypted at runtime during the opcode handlers, and re-encrypted upon write.
 
-- Better reporting for transforms changes apply (such as "3 Macro Opcodes created")
+- Better reporting for transforms changes applied (such as "3 Macro Opcodes created")
 
 Website Ideas:
 - Measure options for file size and performance individually and together to provide insights for docs:
@@ -21,6 +21,20 @@ Website Ideas:
 
 - Improved `Class Obfuscation`
 - - Now removes the VM's class structure in favor of standalone functions and bare objects
+
+- Improved `String Concealing` performance
+- - Strings are now decoded once for the whole program into a shared table, instead of being re-decoded on every access
+
+Before vs. After on `test/programs/sha256.js`, hashing three inputs after load:
+
+| Options | Before | After |
+| --- | --- | --- |
+| `stringConcealing` | 1,068ms | 316ms |
+| `stringConcealing` + `controlFlowFlattening` | 21,654ms | 4,393ms |
+| `stringConcealing` + `controlFlowFlattening` + `dispatcher` | 279,869ms | 43,596ms |
+
+- Added support for `for..of` loops ([#1](https://github.com/MichaelXF/js-confuser-vm/issues/1))
+- - Compiled against the real iterator protocol, so arrays, strings, `Map`, `Set` and any object with a `Symbol.iterator` all work
 
 
 ## `0.1.5` Updates

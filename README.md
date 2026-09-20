@@ -125,6 +125,7 @@ new Uint32Array(R.length/4),W=0;W<Ka.length;W++)Ka[W]=(R[W*4]|R[W*4+1]<<8|R[W*4+
 - [x] throw statement
 - [x] labeled statements
 - [x] for..in loop
+- [x] for..of loop (**ES6**)
 - [x] RegExp literals
 - [x] try..catch..finally
 - [x] getter/setters
@@ -142,6 +143,7 @@ new Uint32Array(R.length/4),W=0;W<Ka.length;W++)Ka[W]=(R[W*4]|R[W*4+1]<<8|R[W*4+
 - [ ] with statement
 - [ ] arguments.callee, argument parameter syncing   
 - [ ] eval() referencing local variables
+- [ ] destructuring patterns
 
 ### Hardening
 

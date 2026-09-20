@@ -60,7 +60,8 @@ export function walkHoistScope(
         break;
       }
 
-      case "ForInStatement": {
+      case "ForInStatement":
+      case "ForOfStatement": {
         if (stmt.left.type === "VariableDeclaration")
           visit(stmt.left as t.Statement);
         const body =

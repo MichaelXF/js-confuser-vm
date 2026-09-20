@@ -485,6 +485,15 @@ export class Compiler {
           (stmt as any)._iterSlot = ctx._newReg();
           break;
 
+        case "ForOfStatement":
+          // Two hidden locals live across the whole loop rather than within one
+          // iteration: the iterator returned by the @@iterator call, and the
+          // bound `next` method. Both are read on every pass, so they must come
+          // from the non-reusing local pool the same way for-in's iterator does.
+          (stmt as any)._iterSlot = ctx._newReg();
+          (stmt as any)._nextSlot = ctx._newReg();
+          break;
+
         case "TryStatement":
           if (stmt.handler) {
             if (stmt.handler.param?.type === "Identifier") {
@@ -1387,7 +1396,8 @@ export class Compiler {
           _lBody.type === "ForStatement" ||
           _lBody.type === "WhileStatement" ||
           _lBody.type === "DoWhileStatement" ||
-          _lBody.type === "ForInStatement";
+          _lBody.type === "ForInStatement" ||
+          _lBody.type === "ForOfStatement";
         const _lIsSwitch = _lBody.type === "SwitchStatement";
 
         if (_lIsLoop || _lIsSwitch) {
@@ -1454,48 +1464,155 @@ export class Compiler {
         );
 
         // Assign the key to the loop variable.
-        if (node.left.type === "VariableDeclaration") {
-          const identifier = node.left.declarations[0].id;
-          ok(
-            identifier.type === "Identifier",
-            "Only simple identifiers can be declared in for-in loops",
-          );
-          const name = (identifier as t.Identifier).name;
-          if (scope) {
-            const slot = scope._locals.get(name)!;
-            if (keyReg !== slot)
-              this.emit(ctx, [this.OP.MOVE, slot, keyReg], node);
-          } else {
-            this.emit(
-              ctx,
-              [this.OP.STORE_GLOBAL, b.constantOperand(name), keyReg],
-              node,
-            );
-          }
-        } else if (node.left.type === "Identifier") {
-          const res = this._resolve(node.left.name, this._currentCtx);
-          if (res.kind === "local") {
-            if (keyReg !== res.reg)
-              this.emit(ctx, [this.OP.MOVE, res.reg, keyReg], node);
-          } else if (res.kind === "upvalue") {
-            this.emit(ctx, [this.OP.STORE_UPVALUE, res.index, keyReg], node);
-          } else {
-            this.emit(
-              ctx,
-              [this.OP.STORE_GLOBAL, b.constantOperand(node.left.name), keyReg],
-              node,
-            );
-          }
-        } else {
-          const src = generate(node.left).code;
-          throw new Error(
-            `Unsupported for-in left-hand side: ${node.left.type}\n  -> ${src}`,
-          );
-        }
+        this._emitIterationAssign(
+          node.left,
+          keyReg,
+          scope,
+          ctx,
+          node,
+          "for-in",
+        );
 
         const fiBody =
           node.body.type === "BlockStatement" ? node.body.body : [node.body];
         for (const stmt of fiBody) {
+          this._compileStatement(stmt, scope, ctx);
+        }
+
+        this.emit(
+          ctx,
+          [this.OP.JUMP, { type: "label", label: loopTopLabel }],
+          node,
+        );
+        this.emit(ctx, [null, { type: "defineLabel", label: exitLabel }], node);
+
+        this._loopStack.pop();
+        break;
+      }
+
+      case "ForOfStatement": {
+        ok(!(node as any).await, "for await..of is not supported");
+
+        const _foLabel = this._pendingLabel;
+        this._pendingLabel = null;
+
+        // Both reserved by _hoistVars — they are read on every iteration.
+        const iterSlot: b.RegisterOperand = (node as any)._iterSlot;
+        const nextSlot: b.RegisterOperand = (node as any)._nextSlot;
+
+        // ── GetIterator(obj) ────────────────────────────────────────────────
+        //   iter = obj[Symbol.iterator]()
+        //   next = iter.next          (captured once, per IteratorRecord)
+        const objReg = this._compileExpr(node.right, scope, ctx);
+
+        const symbolReg = ctx.allocReg();
+        this.emit(
+          ctx,
+          [this.OP.LOAD_GLOBAL, symbolReg, b.constantOperand("Symbol")],
+          node,
+        );
+        const symIterReg = ctx.allocReg();
+        this.emit(
+          ctx,
+          [
+            this.OP.GET_PROP,
+            symIterReg,
+            symbolReg,
+            this._loadConstReg("iterator", ctx, node),
+          ],
+          node,
+        );
+
+        const iterFnReg = ctx.allocReg();
+        this.emit(
+          ctx,
+          [this.OP.GET_PROP, iterFnReg, objReg, symIterReg],
+          node,
+        );
+        this.emit(
+          ctx,
+          [this.OP.CALL_METHOD, iterSlot, objReg, iterFnReg, 0],
+          node,
+        );
+        this.emit(
+          ctx,
+          [
+            this.OP.GET_PROP,
+            nextSlot,
+            iterSlot,
+            this._loadConstReg("next", ctx, node),
+          ],
+          node,
+        );
+
+        const loopTopLabel = this._makeLabel("forof_top");
+        const exitLabel = this._makeLabel("forof_exit");
+
+        // `continue` re-enters at the top so it advances the iterator, matching
+        // for-in, where the top of the loop is also where the step happens.
+        this._loopStack.push({
+          type: "loop",
+          label: _foLabel,
+          breakLabel: exitLabel,
+          continueLabel: loopTopLabel,
+        });
+
+        this.emit(
+          ctx,
+          [null, { type: "defineLabel", label: loopTopLabel }],
+          node,
+        );
+
+        // ── IteratorStep ────────────────────────────────────────────────────
+        //   step = next.call(iter);  if (step.done) break;  value = step.value
+        const stepReg = ctx.allocReg();
+        this.emit(
+          ctx,
+          [this.OP.CALL_METHOD, stepReg, iterSlot, nextSlot, 0],
+          node,
+        );
+
+        const doneReg = ctx.allocReg();
+        this.emit(
+          ctx,
+          [
+            this.OP.GET_PROP,
+            doneReg,
+            stepReg,
+            this._loadConstReg("done", ctx, node),
+          ],
+          node,
+        );
+        this.emit(
+          ctx,
+          [this.OP.JUMP_IF_TRUE, doneReg, { type: "label", label: exitLabel }],
+          node,
+        );
+
+        const valueReg = ctx.allocReg();
+        this.emit(
+          ctx,
+          [
+            this.OP.GET_PROP,
+            valueReg,
+            stepReg,
+            this._loadConstReg("value", ctx, node),
+          ],
+          node,
+        );
+
+        this._emitIterationAssign(
+          node.left,
+          valueReg,
+          scope,
+          ctx,
+          node,
+          "for-of",
+        );
+
+        const foBody =
+          node.body.type === "BlockStatement" ? node.body.body : [node.body];
+        for (const stmt of foBody) {
           this._compileStatement(stmt, scope, ctx);
         }
 
@@ -1686,6 +1803,94 @@ export class Compiler {
         throw new Error(`Unsupported statement: ${node.type}\n  -> ${src}`);
       }
     }
+  }
+
+  // Store one iteration's value into a for-in / for-of left-hand side.
+  //
+  // Shared because both loops bind exactly the same shapes: a single-declarator
+  // `var`/`let`/`const`, or an already-declared target resolved through the
+  // normal local / upvalue / global ladder. Destructuring patterns are rejected
+  // here for the same reason VariableDeclaration rejects them — nothing in the
+  // compiler lowers them yet.
+  _emitIterationAssign(
+    left: t.Node,
+    valueReg: b.RegisterOperand,
+    scope: Scope | null,
+    ctx: FnContext,
+    node: t.Node,
+    loopKind: string,
+  ): void {
+    if (left.type === "VariableDeclaration") {
+      const identifier = (left as t.VariableDeclaration).declarations[0].id;
+      ok(
+        identifier.type === "Identifier",
+        `Only simple identifiers can be declared in ${loopKind} loops`,
+      );
+      const name = (identifier as t.Identifier).name;
+      if (scope) {
+        const slot = scope._locals.get(name)!;
+        if (valueReg !== slot)
+          this.emit(ctx, [this.OP.MOVE, slot, valueReg], node);
+      } else {
+        this.emit(
+          ctx,
+          [this.OP.STORE_GLOBAL, b.constantOperand(name), valueReg],
+          node,
+        );
+      }
+      return;
+    }
+
+    if (left.type === "Identifier") {
+      const res = this._resolve((left as t.Identifier).name, this._currentCtx);
+      if (res.kind === "local") {
+        if (valueReg !== res.reg)
+          this.emit(ctx, [this.OP.MOVE, res.reg, valueReg], node);
+      } else if (res.kind === "upvalue") {
+        this.emit(ctx, [this.OP.STORE_UPVALUE, res.index, valueReg], node);
+      } else {
+        this.emit(
+          ctx,
+          [
+            this.OP.STORE_GLOBAL,
+            b.constantOperand((left as t.Identifier).name),
+            valueReg,
+          ],
+          node,
+        );
+      }
+      return;
+    }
+
+    if (left.type === "MemberExpression") {
+      const member = left as t.MemberExpression;
+      const objReg = this._compileExpr(member.object as t.Expression, scope, ctx);
+      const keyReg = member.computed
+        ? this._compileExpr(member.property as t.Expression, scope, ctx)
+        : this._loadConstReg(
+            (member.property as t.Identifier).name,
+            ctx,
+            node,
+          );
+      this.emit(ctx, [this.OP.SET_PROP, objReg, keyReg, valueReg], node);
+      return;
+    }
+
+    const src = generate(left).code;
+    throw new Error(
+      `Unsupported ${loopKind} left-hand side: ${left.type}\n  -> ${src}`,
+    );
+  }
+
+  // Materialize a string/number constant into a fresh temporary register.
+  _loadConstReg(
+    value: any,
+    ctx: FnContext,
+    node: t.Node,
+  ): b.RegisterOperand {
+    const reg = ctx.allocReg();
+    this.emit(ctx, [this.OP.LOAD_CONST, reg, b.constantOperand(value)], node);
+    return reg;
   }
 
   // Returns true if any element in an argument/element list is a SpreadElement.
