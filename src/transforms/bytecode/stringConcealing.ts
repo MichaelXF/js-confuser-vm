@@ -33,21 +33,53 @@
 // the stored constant is pure ASCII (and smaller on disk than the raw glyphs).
 //
 // ── Runtime shape — PROGRAM-LEVEL bank ───────────────────────────────────────
-// The bank is inflated EXACTLY ONCE, in the program's main scope, into a plain
-// main-scope register (NOT a global — nothing is written to globalThis). That
-// register is shared with the functions that need it through the VM's ordinary
-// upvalue mechanism: an extra upvalue is threaded down the closure-creation tree
-// to every string-using function and its ancestors. Each string-using function
-// reads the already-inflated bank from that upvalue and passes it to a small
-// per-function `decode` closure (decode itself is function-level — cheap):
+// The bank is inflated EXACTLY ONCE, in the program's main scope, and every
+// string in it is decoded EXACTLY ONCE into a plain main-scope array (NOT a
+// global — nothing is written to globalThis). That table register is shared
+// with the functions that need it through the VM's ordinary upvalue mechanism:
+// an extra upvalue is threaded down the closure-creation tree to every
+// string-using function and its ancestors. A string-using function reads the
+// table from that upvalue once in its prologue, and each site is then an
+// ordinary indexed read:
 //
 //   main:               MAKE_CLOSURE rInflate
-//                       LOAD_CONST   rB64, <base64 bank>
-//                       CALL         rBankMain, rInflate, 1, rB64   (once)
-//   string-using fn:    LOAD_UPVALUE rBank, <threaded idx>
+//                       LOAD_CONST   rB64, <base64 blob>
+//                       CALL         rBank, rInflate, 1, rB64      (once)
+//                       LOAD_INT     rMetaLen, <header length>
 //                       MAKE_CLOSURE rDecode
-//   per site:           LOAD_INT     rKey/rStart/rLen
-//                       CALL         rDst, rDecode, 4, rBank, rKey, rStart, rLen
+//                       MAKE_CLOSURE rDecodeAll
+//                       CALL         rTableMain, rDecodeAll, 3, …  (once)
+//   string-using fn:    LOAD_UPVALUE rTable, <threaded idx>
+//   per site:           LOAD_INT     rIdx, <table index>
+//                       GET_PROP     rDst, rTable, rIdx
+//
+// Main's prologue is a fixed seven instructions no matter how many strings the
+// program has, because the per-string loop lives inside `decodeAll`.
+//
+// ── Why the table, and not per-site decoding ─────────────────────────────────
+// Decoding at the use site re-ran the whole thing on every dynamic execution of
+// that instruction, and the strings the compiler emits implicitly are exactly
+// the ones that sit in loops: `s.charAt(i)` compiles to a LOAD_CONST of the
+// name "charAt", so a loop paid a full keystream pass plus a VM call per
+// iteration. With `controlFlowFlattening` and `dispatcher` also enabled each of
+// those calls was a flattened invocation with a dispatcher round-trip, which is
+// where a measured 2,500x-over-native runtime came from.
+//
+// Memoizing the decoder was not enough, because the VM call itself dominates,
+// not the keystream loop. Hoisting into each function's prologue was not enough
+// either: it trades a loop's cost for one call per distinct string per
+// invocation, which a frequently-called function pays back in full. Decoding
+// once for the whole program is the only shape where a site costs O(1) opcodes
+// and no call at all.
+//
+// The trade is that every string is in memory in plaintext from startup rather
+// than on first use. That is a small change in exposure — the bank and the
+// decoder both ship anyway, and any heap snapshot taken after warmup showed the
+// used strings regardless — in exchange for making the option usable at all.
+//
+// Startup does more work than it used to, since strings a given run never
+// reaches are decoded anyway. That cost is bounded by the total string length
+// and is paid once, which is the right trade against paying per access forever.
 //
 // ── Pipeline position ─────────────────────────────────────────────────────────
 // Runs BEFORE resolveRegisters and resolveLabels (same slot as Dispatcher/CFF),
@@ -96,19 +128,59 @@ function bankToBase64(bank: string): string {
   return Buffer.from(bytes).toString("base64");
 }
 
+// Units per metadata record in the blob header: key, start and length each as a
+// high/low u16 pair. Six code units per string, in table-index order.
+const META_UNITS = 6;
+
+// Pack every entry's (key, start, length) into the u16 header that precedes the
+// bank in the shipped blob. The runtime walks this header instead of having the
+// compiler unroll one decode sequence per string into main's prologue: that
+// unrolled form made startup quadratic under controlFlowFlattening, whose
+// dispatch chain is a linear scan, so N extra prologue blocks cost O(N^2)
+// comparisons before the program runs a single instruction of its own.
+//
+// The header shares one blob with the bank so that startup inflates a single
+// base64 constant rather than two, which also keeps one fewer large literal in
+// the output. `start` values are therefore absolute in the combined blob:
+// buildBank is seeded with the header length, which is known up front from the
+// string count.
+//
+// Splitting each field into two u16 halves keeps every unit inside the range
+// `inflate` round-trips. The key is reassembled as a signed int32, which the
+// keystream's `| 0` makes indistinguishable from the unsigned seed the encoder
+// started from, since the two differ by exactly 2^32.
+function packMeta(entries: Iterable<BankEntry>): string {
+  let out = "";
+  for (const entry of entries) {
+    for (const field of [entry.key, entry.start, entry.length]) {
+      out += String.fromCharCode((field >>> 16) & 0xffff, field & 0xffff);
+    }
+  }
+  return out;
+}
+
 interface BankEntry {
   key: number;
   start: number;
   length: number;
+  // Slot this string occupies in the decoded table main builds at startup.
+  // Assigned in bank order, so it is unrelated to the order strings appear in
+  // the program.
+  index: number;
 }
 
-function buildBank(strings: Iterable<string>): {
+// `startOffset` is where the bank will sit inside the shipped blob, so every
+// recorded `start` is already an absolute index into what the runtime inflates.
+function buildBank(
+  strings: Iterable<string>,
+  startOffset: number,
+): {
   bank: string;
   table: Map<string, BankEntry>;
 } {
   const parts: string[] = [];
   const table = new Map<string, BankEntry>();
-  let pos = 0;
+  let pos = startOffset;
 
   const lead = decoyRun(getRandomInt(100, 250)); // leading decoys
   parts.push(lead);
@@ -121,7 +193,12 @@ function buildBank(strings: Iterable<string>): {
 
     const key = getRandomInt(1, U32_MAX);
     const encoded = xorEncode(str, key);
-    table.set(str, { key, start: pos, length: str.length });
+    table.set(str, {
+      key,
+      start: pos,
+      length: str.length,
+      index: table.size,
+    });
     parts.push(encoded);
     pos += encoded.length;
   }
@@ -152,10 +229,11 @@ export function stringConcealing(
   const entryLabels = new Set(entryLabelToFnId.keys());
 
   // ── Prescan: collect strings + closure-creation graph ───────────────────────
-  // directUser  — functions that contain a string LOAD_CONST.
+  // stringsByFn — fnId → the distinct strings that function loads. Its keys are
+  //               the functions that contain a string LOAD_CONST.
   // parentOf    — childFnId → creating (lexical parent) fnId.
   const strings = new Set<string>();
-  const directUser = new Set<number>();
+  const stringsByFn = new Map<number, Set<string>>();
   const parentOf = new Map<number, number>();
 
   let curFn = -1;
@@ -170,13 +248,21 @@ export function stringConcealing(
     }
     if (curFn < 0) continue;
     if (isStringLoadConst(instr, OP)) {
-      strings.add((instr[2] as any).value as string);
-      directUser.add(curFn);
+      const value = (instr[2] as any).value as string;
+      strings.add(value);
+      let used = stringsByFn.get(curFn);
+      if (!used) {
+        used = new Set();
+        stringsByFn.set(curFn, used);
+      }
+      used.add(value);
     } else if (instr[0] === OP.MAKE_CLOSURE) {
       const childId = entryLabelToFnId.get((instr[2] as any)?.label);
       if (childId !== undefined) parentOf.set(childId, curFn);
     }
   }
+
+  const directUser = new Set(stringsByFn.keys());
 
   if (strings.size === 0) return { bytecode: bc };
 
@@ -192,21 +278,23 @@ export function stringConcealing(
   }
 
   // Threaded upvalue index per function = its ORIGINAL upvalue count (appended
-  // last). main holds the bank as a local, so it has no threaded index.
-  const bankUvIndex = new Map<number, number>();
+  // last). main holds the table as a local, so it has no threaded index.
+  const tableUvIndex = new Map<number, number>();
   for (const f of needSet) {
     if (f === mainId) continue;
-    bankUvIndex.set(f, compiler.fnDescriptors[f]?.upvalues?.length ?? 0);
+    tableUvIndex.set(f, compiler.fnDescriptors[f]?.upvalues?.length ?? 0);
   }
 
   const maxId = buildMaxIdMap(bc);
-  const rBankMain = allocReg(mainId, maxId); // program-level inflated bank
-  const { bank, table } = buildBank(strings);
-  const bankB64 = bankToBase64(bank);
+  const rTableMain = allocReg(mainId, maxId); // program-level decoded table
+  const metaLength = META_UNITS * strings.size;
+  const { bank, table } = buildBank(strings, metaLength);
+  const blobB64 = bankToBase64(packMeta(table.values()) + bank);
 
   // Helper closures, compiled once and shared by reference.
-  //   inflate(b64)                  → reconstruct the u16 bank from base64
-  //   decode(bank, key, start, len) → slice + keystream-decrypt one string
+  //   inflate(b64)   → reconstruct the u16 blob from base64
+  //   decode(...)    → keystream-decrypt one string out of the blob
+  //   decodeAll(...) → walk the header, decoding every string into a table
   const helpers = new Template(`
     function inflate(s) {
       var bytes = atob(s);
@@ -227,8 +315,22 @@ export function stringConcealing(
       }
       return result;
     }
-  `).compile({}, compiler);
-  const [inflateDesc, decodeDesc] = helpers.functions;
+    function decodeAll(bank, metaLength, decode) {
+      var out = [];
+      var slot = 0;
+      for (var i = 0; i < metaLength; i += {units}) {
+        out[slot] = decode(
+          bank,
+          (bank["charCodeAt"](i) << 16) | bank["charCodeAt"](i + 1),
+          (bank["charCodeAt"](i + 2) << 16) | bank["charCodeAt"](i + 3),
+          (bank["charCodeAt"](i + 4) << 16) | bank["charCodeAt"](i + 5)
+        );
+        slot++;
+      }
+      return out;
+    }
+  `).compile({ units: META_UNITS }, compiler);
+  const [inflateDesc, decodeDesc, decodeAllDesc] = helpers.functions;
 
   const mkClosure = (dst: RegisterOperand, desc: any, params: number) =>
     [
@@ -247,35 +349,55 @@ export function stringConcealing(
     const isMain = fnId === mainId;
     const usesStrings = directUser.has(fnId);
 
-    // Bank source for closures created in THIS frame: main captures its local,
+    // Table source for closures created in THIS frame: main captures its local,
     // every other frame inherits its own threaded upvalue.
     const childUpvalue: InstrOperandPair = isMain
-      ? [1, ref(rBankMain)]
-      : [0, bankUvIndex.get(fnId)!];
+      ? [1, ref(rTableMain)]
+      : [0, tableUvIndex.get(fnId)!];
 
     const prologue: Bytecode = [];
-    let rBank: RegisterOperand | null = null;
-    let rDecode: RegisterOperand | null = null;
-    let rKey: RegisterOperand, rStart: RegisterOperand, rLen: RegisterOperand;
+    // Register holding the decoded string table for this frame.
+    let rTable: RegisterOperand | null = null;
+    // Scratch index register, only needed by frames that actually read strings.
+    let rIdx: RegisterOperand | null = null;
 
     if (isMain) {
+      // Inflate the bank and the metadata blob, then decode every string in the
+      // bank exactly once into the table. Only main does this; every other frame
+      // inherits the result through the threaded upvalue. The emitted sequence
+      // is a fixed seven instructions no matter how many strings the program
+      // has, because the per-string loop lives inside `decodeAll`.
       const rInflate = allocReg(fnId, maxId);
       const rB64 = allocReg(fnId, maxId);
+      const rBank = allocReg(fnId, maxId);
+      const rMetaLen = allocReg(fnId, maxId);
+      const rDecode = allocReg(fnId, maxId);
+      const rDecodeAll = allocReg(fnId, maxId);
+
       prologue.push(mkClosure(rInflate, inflateDesc, 1));
-      prologue.push([OP.LOAD_CONST!, ref(rB64), b.constantOperand(bankB64)]);
-      prologue.push([OP.CALL!, ref(rBankMain), ref(rInflate), 1, ref(rB64)]);
-      rBank = rBankMain;
+      prologue.push([OP.LOAD_CONST!, ref(rB64), b.constantOperand(blobB64)]);
+      prologue.push([OP.CALL!, ref(rBank), ref(rInflate), 1, ref(rB64)]);
+      prologue.push([OP.LOAD_INT!, ref(rMetaLen), metaLength]);
+      prologue.push(mkClosure(rDecode, decodeDesc, 4));
+      prologue.push(mkClosure(rDecodeAll, decodeAllDesc, 3));
+      prologue.push([
+        OP.CALL!,
+        ref(rTableMain),
+        ref(rDecodeAll),
+        3,
+        ref(rBank),
+        ref(rMetaLen),
+        ref(rDecode),
+      ]);
+
+      rTable = rTableMain;
     } else if (usesStrings) {
-      rBank = allocReg(fnId, maxId);
-      prologue.push([OP.LOAD_UPVALUE!, ref(rBank), bankUvIndex.get(fnId)!]);
+      rTable = allocReg(fnId, maxId);
+      prologue.push([OP.LOAD_UPVALUE!, ref(rTable), tableUvIndex.get(fnId)!]);
     }
 
     if (usesStrings) {
-      rDecode = allocReg(fnId, maxId);
-      prologue.push(mkClosure(rDecode, decodeDesc, 4));
-      rKey = allocReg(fnId, maxId);
-      rStart = allocReg(fnId, maxId);
-      rLen = allocReg(fnId, maxId);
+      rIdx = allocReg(fnId, maxId);
     }
 
     const out: Bytecode = [...prologue];
@@ -296,19 +418,8 @@ export function stringConcealing(
       if (usesStrings && isStringLoadConst(instr, OP)) {
         const dst = instr[1] as RegisterOperand;
         const entry = table.get((instr[2] as any).value as string)!;
-        out.push([OP.LOAD_INT!, ref(rKey!), entry.key]);
-        out.push([OP.LOAD_INT!, ref(rStart!), entry.start]);
-        out.push([OP.LOAD_INT!, ref(rLen!), entry.length]);
-        out.push([
-          OP.CALL!,
-          ref(dst),
-          ref(rDecode!),
-          4,
-          ref(rBank!),
-          ref(rKey!),
-          ref(rStart!),
-          ref(rLen!),
-        ]);
+        out.push([OP.LOAD_INT!, ref(rIdx!), entry.index]);
+        out.push([OP.GET_PROP!, ref(dst), ref(rTable!), ref(rIdx!)]);
         continue;
       }
 
