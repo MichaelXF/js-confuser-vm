@@ -29,6 +29,15 @@ function concealString(s: string, key: number): string {
   return Buffer.from(bytes).toString("base64");
 }
 
+function isInt32(value: number): boolean {
+  return (
+    Number.isInteger(value) &&
+    value >= -2147483648 &&
+    value <= 2147483647 &&
+    !Object.is(value, -0)
+  );
+}
+
 // Resolve all {type:"constant", value} (index) and {type:"constant", value, key: true} (key) operands
 //
 // constPoolIndex — index into the constants array (as before).
@@ -70,11 +79,11 @@ export function resolveConstants(
       } else if (
         compiler.options.concealConstants &&
         typeof value === "number" &&
-        Number.isInteger(value)
+        isInt32(value)
       ) {
         // Integers: XOR with a full u32 key. JS `^` operates on int32, so the
         // stored value (often negative) and the runtime XOR-back are symmetric
-        // for any int32-range integer, and all 32 key bits resist enumeration.
+        // Only for int32 integers.
         key = getRandomInt(1, U32_MAX);
         constants.push(value ^ key);
       } else {

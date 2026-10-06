@@ -36,7 +36,7 @@ JsConfuserVM.obfuscate(`
   target: "browser", // or "node"
   randomizeOpcodes: true, // randomize the opcode numbers?
   shuffleOpcodes: true, // shuffle order of opcode handlers in the runtime?
-  encodeBytecode: true, // encode bytecode? when off, comments for instructions are added
+  encodeBytecode: true, // encode bytecode?
   selfModifying: true, // do self-modifying bytecode for function bodies?
   dispatcher: true, // create middleman blocks to process jumps?
   controlFlowFlattening: true, // flatten the control flow of your program into a convoluted state machine?
